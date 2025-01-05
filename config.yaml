@@ -1,0 +1,11 @@
+credentials:
+    username: email
+    password: pass
+settings:
+    doctor: Dr. Smith
+    city: Warsaw
+    check_interval: 120
+notifications:
+    email: example@example.com
+    telegram: '@example_bot'
+    webhook: https://example.com/webhook

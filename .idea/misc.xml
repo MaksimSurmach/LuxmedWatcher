@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="Black">
+    <option name="sdkName" value="Poetry (LuxmedWatcher)" />
+  </component>
+  <component name="GithubDefaultAccount">
+    <option name="defaultAccountId" value="ca1aaed9-8e66-48c1-9328-a2fc5f2a729c" />
+  </component>
+  <component name="ProjectRootManager" version="2" project-jdk-name="Poetry (LuxmedWatcher)" project-jdk-type="Python SDK" />
+</project>
