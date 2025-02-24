@@ -1,0 +1,28 @@
+credentials:
+    username: maxsurm@gmail.com
+    password: hur3nosh9PRIK
+settings:
+    appointments:
+        - cityid: 1
+          check_interval_s: 120
+          location: 5
+          serviceVariantId: 4468
+          serviceVariantName: 'Wizyta lekarska'
+notifications:
+    pushover:
+        user: user_key
+        token: app_token
+    telegram:
+        user_id: '@example_bot'
+        bot_token: 1234567890:ABCDEF
+        chat_id: "1234567890"
+    webhook:
+        url: https://example.com/webhook
+        method: POST
+        headers:
+            Content-Type: application/json
+        body:
+            key: value
+    slack:
+        webhook_url: https://hooks.slack.com/services/XXX/YYY
+        channel: '#channel'
