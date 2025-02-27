@@ -2,12 +2,12 @@ package storage
 
 import (
 	"database/sql"
-	// "encoding/json"
 	"errors"
 	"fmt"
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"LuxmedWatcher/internal/domain"
 )
 
 type SQLiteStorage struct {
@@ -26,7 +26,6 @@ func (s *SQLiteStorage) Init() error {
 	}
 	s.db = db
 
-	// Создаем таблицу для хранения конфигурации (упрощённо)
 	_, err = s.db.Exec(`
 	CREATE TABLE IF NOT EXISTS config_store (
 		id INTEGER PRIMARY KEY,
@@ -37,7 +36,6 @@ func (s *SQLiteStorage) Init() error {
 		return fmt.Errorf("create config_store: %w", err)
 	}
 
-	// Таблица для зафиксированных "уже отправленных" слотов
 	_, err = s.db.Exec(`
 	CREATE TABLE IF NOT EXISTS appointments_notified (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,45 +59,17 @@ func (s *SQLiteStorage) Close() error {
 	return nil
 }
 
-// LoadConfig загружает единственную запись (id=1) из таблицы config_store.
-// В реальном проекте можно хранить JSON/YAML в поле content, парсить его и т.д.
-func (s *SQLiteStorage) LoadConfig() (*Config, error) {
-	row := s.db.QueryRow("SELECT id, content FROM config_store WHERE id=1")
-	cfg := &Config{}
-	err := row.Scan(&cfg.ID, &cfg.Content)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			// Нет записи — возможно, вернём nil, nil или ошибку
-			return nil, nil
-		}
-		return nil, err
-	}
-	return cfg, nil
-}
-
-func (s *SQLiteStorage) SaveConfig(cfg *Config) error {
-	if cfg.ID == 0 {
-		cfg.ID = 1 // условимся, что у нас 1 запись
-	}
-	_, err := s.db.Exec("INSERT OR REPLACE INTO config_store (id, content) VALUES (?, ?)",
-		cfg.ID, cfg.Content)
-	return err
-}
-
-// IsAlreadyNotified проверяет, есть ли такой слот в таблице appointments_notified
-func (s *SQLiteStorage) IsAlreadyNotified(app Appointment) (bool, error) {
+func (s *SQLiteStorage) IsAlreadyNotified(app domain.Appointment) (bool, error) {
 	if s.db == nil {
 		return false, errors.New("db not initialized")
 	}
 
 	query := `
 	SELECT COUNT(*) FROM appointments_notified 
-	WHERE doctor_id = ? AND clinic_id = ?
-	  AND date_from = ? AND date_to = ?
+	WHERE doctor_id = ? AND clinic_id = ? AND date_from = ? AND date_to = ?
 	`
 	dateFrom := app.DateTimeFrom.Format(time.RFC3339)
 	dateTo := app.DateTimeTo.Format(time.RFC3339)
-
 	var count int
 	err := s.db.QueryRow(query, app.DoctorID, app.ClinicID, dateFrom, dateTo).Scan(&count)
 	if err != nil {
@@ -108,8 +78,7 @@ func (s *SQLiteStorage) IsAlreadyNotified(app Appointment) (bool, error) {
 	return count > 0, nil
 }
 
-// MarkAppointmentsNotified — добавляет записи в appointments_notified.
-func (s *SQLiteStorage) MarkAppointmentsNotified(apps []Appointment) error {
+func (s *SQLiteStorage) MarkAppointmentsNotified(apps []domain.Appointment) error {
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err

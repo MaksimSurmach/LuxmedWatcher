@@ -3,7 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
-
+	"LuxmedWatcher/internal/domain"
 	"gopkg.in/yaml.v3"
 )
 
@@ -111,6 +111,17 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+func (ac *AppointmentConfig) ToAppointmentSearch() domain.AppointmentSearch {
+	return domain.AppointmentSearch{
+		DoctorID:         ac.DoctorID,
+		CityID:           ac.CityID,
+		PlaceID:          ac.Location,
+		ServiceVariantID: ac.ServiceVariantID,
+		LanguageID:       10,  // значение по умолчанию
+		SearchDays:       14,  // значение по умолчанию
+	}
 }
 
 // GenerateSampleConfigFile создаёт пример config.yaml на диске.
