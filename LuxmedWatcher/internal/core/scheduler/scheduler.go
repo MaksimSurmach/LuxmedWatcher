@@ -1,9 +1,9 @@
 package scheduler
 
 import (
-	"fmt"
 	"sync"
 	"time"
+	log "github.com/sirupsen/logrus"
 )
 
 // Scheduler описывает интерфейс планировщика,
@@ -49,7 +49,7 @@ func (s *schedulerImpl) AddTask(interval time.Duration, task func()) {
 // Каждый таск крутится в цикле с time.Ticker(interval).
 func (s *schedulerImpl) Start() {
 	if s.started {
-		fmt.Println("Scheduler already started.")
+		log.Warn("Scheduler already started.")
 		return
 	}
 	s.started = true
@@ -58,6 +58,7 @@ func (s *schedulerImpl) Start() {
 	for _, t := range s.tasks {
 		s.wg.Add(1)
 		go s.runTask(t)
+		log.Infof("Task with interval %v started.", t.interval)
 	}
 }
 
@@ -84,7 +85,7 @@ func (s *schedulerImpl) runTask(t scheduledTask) {
 // Stop останавливает все задачи, дожидается их корректного завершения.
 func (s *schedulerImpl) Stop() {
 	if !s.started {
-		fmt.Println("Scheduler not started or already stopped.")
+		log.Warn("Scheduler already stopped.")
 		return
 	}
 

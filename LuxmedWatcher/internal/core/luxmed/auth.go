@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	log "github.com/sirupsen/logrus"
 )
 
 type luxmedClient struct {
@@ -43,6 +44,7 @@ func (c *luxmedClient) Authenticate(ctx context.Context, creds domain.Credential
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		log.Debug("Error while making request")
 		return err
 	}
 	defer resp.Body.Close()

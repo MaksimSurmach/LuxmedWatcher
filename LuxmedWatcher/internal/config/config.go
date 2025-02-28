@@ -53,7 +53,6 @@ type PushoverConfig struct {
 
 // TelegramConfig — параметры для Telegram.
 type TelegramConfig struct {
-	UserID   string `yaml:"user_id"`
 	BotToken string `yaml:"bot_token"`
 	ChatID   string `yaml:"chat_id"`
 }
@@ -150,7 +149,6 @@ func GenerateSampleConfigFile(path string) error {
 				Token: "app_token",
 			},
 			Telegram: TelegramConfig{
-				UserID:   "@example_bot",
 				BotToken: "1234567890:ABCDEF",
 				ChatID:   "1234567890",
 			},
