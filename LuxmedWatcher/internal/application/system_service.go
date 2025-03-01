@@ -102,7 +102,9 @@ func (s *SystemService) Start(ctx context.Context) error {
 			}
 		})
 	}
-	s.scheduler.Start()
-	// Здесь можно добавить graceful shutdown через обработку сигналов.
-	select {} // Блокировка работы сервиса
+	s.scheduler.Start(ctx)
+	
+	<-ctx.Done()
+	s.scheduler.Stop()
+	return nil
 }

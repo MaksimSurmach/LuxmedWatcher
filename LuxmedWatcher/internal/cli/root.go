@@ -18,7 +18,6 @@ var rootCmd = &cobra.Command{
 }
 
 func Execute() {
-	log.SetFormatter(&log.JSONFormatter{})
 	log.SetLevel(log.InfoLevel)
 	log.SetOutput(os.Stdout)
 	if err := rootCmd.Execute(); err != nil {

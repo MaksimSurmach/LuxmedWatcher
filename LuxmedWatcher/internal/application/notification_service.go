@@ -3,11 +3,15 @@ package application
 import (
 	"LuxmedWatcher/internal/config"
 	"LuxmedWatcher/internal/core/notification"
+	// "LuxmedWatcher/internal/core/notification/channels"
 	"LuxmedWatcher/internal/domain"
 	"context"
 	"fmt"
+	"strings"
 
 	log "github.com/sirupsen/logrus"
+
+	_ "LuxmedWatcher/internal/core/notification/channels"
 )
 
 // NotificationService responsible for sending notifications about available appointment slots
@@ -15,23 +19,31 @@ type NotificationService struct {
 	notifiers []notification.Notifier
 }
 
-var notifierFactories = make(map[string]notification.NotifierFactoryFunc)
-
 func NewNotificationService(notify_cfg config.NotificationsConfig) (*NotificationService, error) {
 	var notifiers []notification.Notifier
+
 	for _, cfg := range notify_cfg {
 		for notifierType, conf := range cfg {
-			factory, ok := notifierFactories[notifierType]
-			if !ok {
-				log.Error("unknown notifier type: %s", notifierType)
-				return nil, fmt.Errorf("unknown notifier type: %s", notifierType)
-			}
-			notifier, err := factory(conf)
-			if err != nil {
-				log.Error("failed to create notifier: %w", err)
-				return nil, fmt.Errorf("failed to create notifier: %w", err)
-			}
-			notifiers = append(notifiers, notifier)
+			// Make channel name lowercase for case-insensitive matching
+            channelName := strings.ToLower(notifierType)
+            
+            // Check if this channel type exists
+            factory, exists := notification.GetNotifierFactory(channelName)
+            if !exists {
+                available := notification.GetAvailableNotifiers()
+                log.Errorf("Unknown notifier type: %s. Available types: %v", notifierType, available)
+                return nil, fmt.Errorf("unknown notifier type: %s", notifierType)
+            }
+            
+            // Create notifier instance
+            notifier, err := factory(conf)
+            if err != nil {
+                log.Errorf("Failed to create notifier: %v", err)
+                return nil, fmt.Errorf("failed to create notifier: %v", err)
+            }
+            
+            notifiers = append(notifiers, notifier)
+			log.Infof("Registered notifier: %s", notifier.ChannelName())
 		}
 	}
 	if len(notifiers) == 0 {
