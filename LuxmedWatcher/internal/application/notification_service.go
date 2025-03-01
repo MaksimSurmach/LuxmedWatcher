@@ -1,58 +1,83 @@
 package application
 
 import (
-	"fmt"
-	"LuxmedWatcher/internal/domain"
+	"LuxmedWatcher/internal/config"
 	"LuxmedWatcher/internal/core/notification"
+	"LuxmedWatcher/internal/domain"
 	"context"
+	"fmt"
+
+	log "github.com/sirupsen/logrus"
 )
 
-// NotificationService отвечает за отправку уведомлений.
-type NotificationService interface {
-	Notify(ctx context.Context, apps []domain.Appointment) error
-	SendTestNotification(ctx context.Context, msg string) error
-}
-
-type notificationServiceImpl struct {
+// NotificationService responsible for sending notifications about available appointment slots
+type NotificationService struct {
 	notifiers []notification.Notifier
-	// Можно добавить зависимость от Storage для логирования уведомлений.
 }
 
-func NewNotificationService(notifier notification.Notifier, /* дополнительные зависимости, например, storage.Storage */) NotificationService {
-	return &notificationServiceImpl{
-		notifiers: []notification.Notifier{notifier},
+var notifierFactories = make(map[string]notification.NotifierFactoryFunc)
+
+func NewNotificationService(notify_cfg config.NotificationsConfig) (*NotificationService, error) {
+	var notifiers []notification.Notifier
+	for _, cfg := range notify_cfg {
+		for notifierType, conf := range cfg {
+			factory, ok := notifierFactories[notifierType]
+			if !ok {
+				log.Error("unknown notifier type: %s", notifierType)
+				return nil, fmt.Errorf("unknown notifier type: %s", notifierType)
+			}
+			notifier, err := factory(conf)
+			if err != nil {
+				log.Error("failed to create notifier: %w", err)
+				return nil, fmt.Errorf("failed to create notifier: %w", err)
+			}
+			notifiers = append(notifiers, notifier)
+		}
 	}
+	if len(notifiers) == 0 {
+		return nil, fmt.Errorf("no notifiers configured")
+	}
+	return &NotificationService{notifiers: notifiers}, nil
 }
 
-func (n *notificationServiceImpl) Notify(ctx context.Context, apps []domain.Appointment) error {
-	if len(apps) == 0 {
+func (s *NotificationService) Notify(ctx context.Context, slots []domain.Appointment) error {
+	if len(slots) == 0 {
 		return nil
 	}
-	msg := buildMessage(apps)
-	for _, notifier := range n.notifiers {
-		if err := notifier.Send(msg); err != nil {
-			fmt.Printf("Notifier [%s] failed: %v\n", notifier.ChannelName(), err)
+
+	message := formatSlotsMessage(slots)
+	var errs []error
+	for _, notifier := range s.notifiers {
+		if err := notifier.SendMessage(ctx, message); err != nil {
+			errs = append(errs, fmt.Errorf("notification via %T failed: %w", notifier, err))
 		}
+	}
+
+	if len(errs) > 0 {
+		return fmt.Errorf("notification errors: %v", errs)
 	}
 	return nil
 }
 
-func (n *notificationServiceImpl) SendTestNotification(ctx context.Context, msg string) error {
-	for _, notifier := range n.notifiers {
-		if err := notifier.Send(msg); err != nil {
-			return err
+func (s *NotificationService) SendTextMessage(ctx context.Context, msg string) error {
+	var errs []error
+	for _, notifier := range s.notifiers {
+		if err := notifier.SendMessage(ctx, msg); err != nil {
+			errs = append(errs, fmt.Errorf("notification via %T failed: %w", notifier, err))
 		}
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("notification errors: %v", errs)
 	}
 	return nil
 }
 
-func buildMessage(apps []domain.Appointment) string {
-	msg := "New appointments found:\n"
-	for _, a := range apps {
-		msg += fmt.Sprintf("- DoctorID=%d, ClinicID=%d, From=%s\n",
-			a.DoctorID,
-			a.ClinicID,
-			a.DateTimeFrom.Format("2006-01-02 15:04"))
+// formatSlotsMessage форматирует сообщение с найденными слотами.
+func formatSlotsMessage(slots []domain.Appointment) string {
+	message := fmt.Sprintf("Found %d available appointment slots:\n\n", len(slots))
+	for i, slot := range slots {
+		message += fmt.Sprintf("%d. Doctor: %s, Date: %s, Time: %s, Location: %s\n",
+			i+1, slot.DoctorName, slot.DateTimeFrom, slot.DateTimeTo, slot.ClinicName)
 	}
-	return msg
+	return message
 }

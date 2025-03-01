@@ -8,33 +8,53 @@ import (
 	"LuxmedWatcher/internal/config"
 	"LuxmedWatcher/internal/core/scheduler"
 	"LuxmedWatcher/internal/domain"
+	"LuxmedWatcher/internal/core/storage"
+	"LuxmedWatcher/internal/core/luxmed"
 )
 
 // SystemService инкапсулирует старт системы.
 type SystemService struct {
 	appointmentService  *AppointmentService
-	notificationService NotificationService
+	notificationService *NotificationService
 	scheduler           scheduler.Scheduler
+	store               storage.Storage
+	config              *config.Config
 }
 
 // NewSystemService собирает SystemService из переданных зависимостей.
-func NewSystemService(appService *AppointmentService, notifService NotificationService, sched scheduler.Scheduler) *SystemService {
-	return &SystemService{
-		appointmentService:  appService,
-		notificationService: notifService,
-		scheduler:           sched,
+func NewSystemService(cfg *config.Config) (*SystemService, error) {
+	client := luxmed.NewLuxmedClient()
+	appointmentService := NewAppointmentService(client)
+
+	// create sqlite storage
+	store := storage.NewSQLiteStorage(cfg.Settings.DbPath)
+	if err := store.Init(); err != nil {
+		return nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
+
+	// create notifier
+	notificationService, err := NewNotificationService(cfg.Notifications)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create notification service: %w", err)
+	}
+
+	sched := scheduler.NewScheduler()
+
+	return &SystemService{
+		appointmentService:  appointmentService,
+		notificationService: notificationService,
+		scheduler:           sched,
+		store:               store,
+		config:              cfg,
+	}, nil
 }
 
-// Start выполняет последовательность шагов:
-// 1. Аутентификация с использованием кредов из конфига,
-// 2. Отправка тестового уведомления,
-// 3. Постановка задач в планировщик.
-func (s *SystemService) Start(ctx context.Context, cfg *config.Config) error {
+
+func (s *SystemService) Start(ctx context.Context) error {
 	// Аутентификация: передаём креды, извлечённые из конфига.
 	creds := domain.Credentials{
-		Username: cfg.Credentials.Username,
-		Password: cfg.Credentials.Password,
+		Username: s.config.Credentials.Username,
+		Password: s.config.Credentials.Password,
 	}
 	if err := s.appointmentService.Authenticate(ctx, creds); err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
@@ -43,17 +63,17 @@ func (s *SystemService) Start(ctx context.Context, cfg *config.Config) error {
 
 	// Отправка тестового уведомления через NotificationService.
 	testMsg := fmt.Sprintf("Test: Starting search for appointment: DoctorID=%d, CityID=%d",
-		cfg.Settings.Appointments[0].DoctorID,
-		cfg.Settings.Appointments[0].CityID,
+		s.config.Appointments[0].DoctorID,
+		s.config.Appointments[0].CityID,
 	)
-	if err := s.notificationService.SendTestNotification(ctx, testMsg); err != nil {
+	if err := s.notificationService.SendTextMessage(ctx, testMsg); err != nil {
 		return fmt.Errorf("test notification failed: %w", err)
 	}
 	fmt.Println("Test notification sent successfully.")
 
 	// Постановка задач в планировщик для каждого набора параметров поиска.
-	for _, apCfg := range cfg.Settings.Appointments {
-		interval := time.Duration(cfg.Settings.CheckIntervalSec) * time.Second
+	for _, apCfg := range s.config.Appointments {
+		interval := time.Duration(s.config.Settings.CheckIntervalSec) * time.Second
 		if interval < time.Second {
 			interval = 60 * time.Second
 		}

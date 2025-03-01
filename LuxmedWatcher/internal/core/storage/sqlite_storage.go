@@ -5,9 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"encoding/json"
+
+	"LuxmedWatcher/internal/config"
+	"LuxmedWatcher/internal/domain"
 
 	_ "github.com/mattn/go-sqlite3"
-	"LuxmedWatcher/internal/domain"
 )
 
 type SQLiteStorage struct {
@@ -59,7 +62,7 @@ func (s *SQLiteStorage) Close() error {
 	return nil
 }
 
-func (s *SQLiteStorage) IsAlreadyNotified(app domain.Appointment) (bool, error) {
+func (s *SQLiteStorage) IsAppointmentNotified(app domain.Appointment) (bool, error) {
 	if s.db == nil {
 		return false, errors.New("db not initialized")
 	}
@@ -105,4 +108,46 @@ func (s *SQLiteStorage) MarkAppointmentsNotified(apps []domain.Appointment) erro
 		}
 	}
 	return tx.Commit()
+}
+
+func (s *SQLiteStorage) DeleteAppointmentSearchTask(taskID int) error {
+	if s.db == nil {
+		return errors.New("db not initialized")
+	}
+
+	_, err := s.db.Exec("DELETE FROM appointment_search_tasks WHERE id = ?", taskID)
+	return err
+}
+
+func (s *SQLiteStorage) GetConfig() (*config.Config, error) {
+	if s.db == nil {
+		return nil, errors.New("db not initialized")
+	}
+
+	var content string
+	err := s.db.QueryRow("SELECT content FROM config_store WHERE id = 1").Scan(&content)
+	if err != nil {
+		return nil, err
+	}
+
+	cfg := &config.Config{}
+	err = json.Unmarshal([]byte(content), cfg)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func (s *SQLiteStorage) SaveConfig(cfg *config.Config) error {
+	if s.db == nil {
+		return errors.New("db not initialized")
+	}
+
+	content, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Exec("INSERT OR REPLACE INTO config_store (id, content) VALUES (1, ?)", content)
+	return err
 }
