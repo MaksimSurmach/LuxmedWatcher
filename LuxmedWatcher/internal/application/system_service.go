@@ -6,10 +6,12 @@ import (
 	"time"
 
 	"LuxmedWatcher/internal/config"
-	"LuxmedWatcher/internal/core/scheduler"
-	"LuxmedWatcher/internal/domain"
-	"LuxmedWatcher/internal/core/storage"
 	"LuxmedWatcher/internal/core/luxmed"
+	"LuxmedWatcher/internal/core/scheduler"
+	"LuxmedWatcher/internal/core/storage"
+	"LuxmedWatcher/internal/domain"
+
+	log "github.com/sirupsen/logrus"
 )
 
 // SystemService инкапсулирует старт системы.
@@ -49,9 +51,8 @@ func NewSystemService(cfg *config.Config) (*SystemService, error) {
 	}, nil
 }
 
-
 func (s *SystemService) Start(ctx context.Context) error {
-	// Аутентификация: передаём креды, извлечённые из конфига.
+	// First, we need to check if we can authenticate with the Luxmed API
 	creds := domain.Credentials{
 		Username: s.config.Credentials.Username,
 		Password: s.config.Credentials.Password,
@@ -59,9 +60,10 @@ func (s *SystemService) Start(ctx context.Context) error {
 	if err := s.appointmentService.Authenticate(ctx, creds); err != nil {
 		return fmt.Errorf("authentication failed: %w", err)
 	}
-	fmt.Println("Authentication successful.")
+	log.Info("Authentication successful")
 
-	// Отправка тестового уведомления через NotificationService.
+	// Send initial notification to test the notification service
+	// TODO: move this to a separate method and fix text
 	testMsg := fmt.Sprintf("Test: Starting search for appointment: DoctorID=%d, CityID=%d",
 		s.config.Appointments[0].DoctorID,
 		s.config.Appointments[0].CityID,
@@ -69,41 +71,58 @@ func (s *SystemService) Start(ctx context.Context) error {
 	if err := s.notificationService.SendTextMessage(ctx, testMsg); err != nil {
 		return fmt.Errorf("test notification failed: %w", err)
 	}
-	fmt.Println("Test notification sent successfully.")
+	log.Info("Start notification sent")
 
-	// Постановка задач в планировщик для каждого набора параметров поиска.
+	// Create tasks for each appointment configuration
 	for _, apCfg := range s.config.Appointments {
 		interval := time.Duration(s.config.Settings.CheckIntervalSec) * time.Second
 		if interval < time.Second {
-			interval = 60 * time.Second
+			log.Warn("Check interval is too low, setting to 10 seconds")
+			interval = 10 * time.Second
 		}
-		params := domain.AppointmentSearch{
-			DoctorID:         apCfg.DoctorID,
-			CityID:           apCfg.CityID,
-			PlaceID:          apCfg.Location,
-			LanguageID:       10,
-			ServiceVariantID: apCfg.ServiceVariantID,
-			SearchDays:       14,
+		if interval < 5*time.Minute {
+			log.Warn("Check interval is too low, you may get banned by Luxmed")
 		}
-		p := params
+
+		p := domain.AppointmentSearch{
+			DoctorID:          apCfg.DoctorID,
+			CityID:            apCfg.CityID,
+			PlaceID:           apCfg.Location,
+			LanguageID:        10,
+			ServiceVariantID:  apCfg.ServiceVariantID,
+			SearchDays:        14,
+			CreationTimestamp: time.Now(),
+		}
+		// TODO: move this to a separate method
 		s.scheduler.AddTask(interval, func() {
+			log.WithFields(log.Fields{
+				"doctorID": p.DoctorID,
+				"cityID":   p.CityID,
+				"service":  p.ServiceVariantID,
+				"PlaceID":  p.PlaceID,
+			}).Info("Checking appointments")
 			slots, err := s.appointmentService.CheckAppointments(ctx, p)
-			fmt.Printf("[Scheduler] Checking appointments for doctorID=%d, cityID=%d\n", p.DoctorID, p.CityID)
 			if err != nil {
-				fmt.Printf("[Scheduler] Error: %v\n", err)
+				log.Errorf("Error checking appointments: %v", err)
 				return
 			}
 			if len(slots) > 0 {
 				if err := s.notificationService.Notify(ctx, slots); err != nil {
-					fmt.Printf("[Scheduler] Notification error: %v\n", err)
+					log.Errorf("Notification error: %v", err)
+				}
+			} else if len(slots) > 50 {
+				log.Infof("Found %d slots", len(slots))
+				message := "Found more than 50 slots"
+				if err := s.notificationService.SendTextMessage(ctx, message); err != nil {
+					log.Errorf("Notification error: %v", err)
 				}
 			} else {
-				fmt.Printf("[Scheduler] No new slots found for doctorID=%d, cityID=%d\n", p.DoctorID, p.CityID)
+				log.Infof("No new slots found for service variant %d", p.ServiceVariantID)
 			}
 		})
 	}
 	s.scheduler.Start(ctx)
-	
+
 	<-ctx.Done()
 	s.scheduler.Stop()
 	return nil

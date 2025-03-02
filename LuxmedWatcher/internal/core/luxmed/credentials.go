@@ -4,13 +4,13 @@ import (
 	"time"
 )
 
-// Credentials — данные для авторизации в Luxmed.
+// Credentials — auth credentials
 type Credentials struct {
 	Username string
 	Password string
 }
 
-// AuthTokens — структура для хранения токенов, куки и их сроков.
+// AuthTokens — auth tokens
 type AuthTokens struct {
 	AccessToken    string            // тот самый token, приходящий в body["token"]
 	RefreshToken   string            // приходит в Set-Cookie: RefreshToken=...
@@ -20,7 +20,7 @@ type AuthTokens struct {
 	ExpirationTime time.Time         // когда токен истечёт (если известно)
 }
 
-// loginResponse описывает JSON-ответ на POST /LogIn
+// loginResponse login response
 type loginResponse struct {
 	Succeeded     bool   `json:"succeded"`
 	ErrorMessage  string `json:"errorMessage"`
@@ -28,7 +28,7 @@ type loginResponse struct {
 	Token         string `json:"token"`
 }
 
-// forgeryResponse описывает JSON-ответ на POST /security/getforgerytoken
+// forgeryResponse forgery response
 type forgeryResponse struct {
 	Token string `json:"token"`
 }

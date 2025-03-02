@@ -44,8 +44,7 @@ func (s *SQLiteStorage) Init() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		doctor_id INTEGER NOT NULL,
 		clinic_id INTEGER NOT NULL,
-		date_from TEXT NOT NULL,
-		date_to TEXT NOT NULL
+		date_from TEXT NOT NULL
 	);
 	`)
 	if err != nil {
@@ -69,12 +68,11 @@ func (s *SQLiteStorage) IsAppointmentNotified(app domain.Appointment) (bool, err
 
 	query := `
 	SELECT COUNT(*) FROM appointments_notified 
-	WHERE doctor_id = ? AND clinic_id = ? AND date_from = ? AND date_to = ?
+	WHERE doctor_id = ? AND clinic_id = ? AND date_from = ?
 	`
 	dateFrom := app.DateTimeFrom.Format(time.RFC3339)
-	dateTo := app.DateTimeTo.Format(time.RFC3339)
 	var count int
-	err := s.db.QueryRow(query, app.DoctorID, app.ClinicID, dateFrom, dateTo).Scan(&count)
+	err := s.db.QueryRow(query, app.DoctorID, app.ClinicID, dateFrom).Scan(&count)
 	if err != nil {
 		return false, err
 	}
@@ -87,7 +85,7 @@ func (s *SQLiteStorage) MarkAppointmentsNotified(apps []domain.Appointment) erro
 		return err
 	}
 	stmt, err := tx.Prepare(`
-	INSERT INTO appointments_notified (doctor_id, clinic_id, date_from, date_to)
+	INSERT INTO appointments_notified (doctor_id, clinic_id, date_from)
 	VALUES (?, ?, ?, ?)
 	`)
 	if err != nil {
@@ -100,7 +98,6 @@ func (s *SQLiteStorage) MarkAppointmentsNotified(apps []domain.Appointment) erro
 			app.DoctorID,
 			app.ClinicID,
 			app.DateTimeFrom.Format(time.RFC3339),
-			app.DateTimeTo.Format(time.RFC3339),
 		)
 		if err != nil {
 			_ = tx.Rollback()
@@ -151,3 +148,24 @@ func (s *SQLiteStorage) SaveConfig(cfg *config.Config) error {
 	_, err = s.db.Exec("INSERT OR REPLACE INTO config_store (id, content) VALUES (1, ?)", content)
 	return err
 }
+
+func (s *SQLiteStorage) createCityTable() error {
+	_, err := s.db.Exec(`
+	CREATE TABLE IF NOT EXISTS cities (
+		id INTEGER PRIMARY KEY,
+		name TEXT NOT NULL
+	);
+	`)
+	return err
+}
+
+func (s *SQLiteStorage) createServiceVariantGroupTable() error {
+	_, err := s.db.Exec(`
+	CREATE TABLE IF NOT EXISTS service_variant_groups (
+		id INTEGER PRIMARY KEY,
+		name TEXT NOT NULL
+	);
+	`)
+	return err
+}
+

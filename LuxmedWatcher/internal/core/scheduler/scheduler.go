@@ -46,7 +46,7 @@ func (s *schedulerImpl) AddTask(interval time.Duration, task func()) {
 
 func (s *schedulerImpl) Start(ctx context.Context) {
 	if s.started {
-		log.Warn("Scheduler already started.")
+		log.Warn("Scheduler already started")
 		return
 	}
 	s.started = true
@@ -55,7 +55,7 @@ func (s *schedulerImpl) Start(ctx context.Context) {
 	for _, t := range s.tasks {
 		s.wg.Add(1)
 		go s.runTask(t, ctx)
-		log.Infof("Task with interval %v started.", t.interval)
+		log.Infof("Task with interval %v started", t.interval)
 	}
 }
 

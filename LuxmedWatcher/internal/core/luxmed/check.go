@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"LuxmedWatcher/internal/domain"
+
+	log "github.com/sirupsen/logrus"
 )
 
 func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params domain.AppointmentSearch) ([]domain.Appointment, error) {
-	c.ReAuthenticate(ctx)
+	c.RefreshTokenIfNeeded(ctx)
 
 	u, err := url.Parse("https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/terms/index")
 	if err != nil {
@@ -35,19 +37,9 @@ func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params doma
 	}
 	u.RawQuery = q.Encode()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	req, err := c.newAuthRequest(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
-	}
-
-	if c.tokens.AccessToken != "" {
-		req.Header.Set("authorization-token", c.tokens.AccessToken)
-	}
-	for k, v := range c.tokens.Cookies {
-		req.AddCookie(&http.Cookie{
-			Name:  k,
-			Value: v,
-		})
 	}
 
 	resp, err := c.httpClient.Do(req)
@@ -88,23 +80,22 @@ func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params doma
 	}
 
 	var results []domain.Appointment
+	var time_format = "2006-01-02T15:04:05"
 	for _, day := range raw.TermsForService.TermsForDays {
 		for _, t := range day.Terms {
-			fromT, err := time.Parse(time.RFC3339, t.DateTimeFrom)
+			fromT, err := time.Parse(time_format, t.DateTimeFrom)
 			if err != nil {
-				continue
-			}
-			toT, err := time.Parse(time.RFC3339, t.DateTimeTo)
-			if err != nil {
+				log.Warn("Failed to parse time: ", t.DateTimeFrom)
 				continue
 			}
 			app := domain.Appointment{
 				DateTimeFrom: fromT,
-				DateTimeTo:   toT,
 				DoctorID:     t.Doctor.ID,
 				DoctorName:   t.Doctor.FirstName + " " + t.Doctor.LastName,
 				ClinicID:     t.ClinicID,
 				ClinicName:   t.Clinic,
+				ServiceName: "Unknown",
+				
 			}
 			results = append(results, app)
 		}

@@ -88,8 +88,17 @@ func (s *NotificationService) SendTextMessage(ctx context.Context, msg string) e
 func formatSlotsMessage(slots []domain.Appointment) string {
 	message := fmt.Sprintf("Found %d available appointment slots:\n\n", len(slots))
 	for i, slot := range slots {
-		message += fmt.Sprintf("%d. Doctor: %s, Date: %s, Time: %s, Location: %s\n",
-			i+1, slot.DoctorName, slot.DateTimeFrom, slot.DateTimeTo, slot.ClinicName)
+		message += fmt.Sprintf("Usługa: %s\n", slot.ServiceName)
+		message += fmt.Sprintf("Lekarz: %s\n", slot.DoctorName)
+		message += fmt.Sprintf("Data: %s\n", slot.DateTimeFrom)
+		message += fmt.Sprintf("Miejsce: %s\n", slot.ClinicName)
+		if i < len(slots)-1 {
+			message += "\n"
+		}
+		if len(message) > 4000 {
+			message += fmt.Sprintf("\n...and %d more", len(slots)-i-1)
+			break
+		}
 	}
 	return message
 }
