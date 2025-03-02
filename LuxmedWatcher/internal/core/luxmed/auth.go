@@ -25,8 +25,8 @@ func NewLuxmedClient() LuxmedClient {
 }
 
 // newAuthRequest creates a new http.Request with the given method, url and body
-func (c *luxmedClient) newAuthRequest(ctx context.Context, method, url string, body *bytes.Reader) (*http.Request, error) {
-	req, err := http.NewRequestWithContext(ctx, method, url, body)
+func (c *luxmedClient) newAuthRequest(ctx context.Context, method, url string, body []byte) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, method, url, bytes.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
@@ -56,7 +56,7 @@ func (c *luxmedClient) Authenticate(ctx context.Context, creds domain.Credential
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := c.newAuthRequest(ctx, http.MethodPost, LoginURL, bytes.NewReader(body))
+	req, err := c.newAuthRequest(ctx, http.MethodPost, LoginURL, body)
 	if err != nil {
 		return err
 	}
@@ -115,6 +115,7 @@ func (c *luxmedClient) GetXsrfToken(ctx context.Context) (string, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
 		return "", err
 	}
+	// TODO: Failed to fetch XSRF token:invalid character '<' looking for beginning of value - fix this
 	return tokenResp.Token, nil
 }
 
