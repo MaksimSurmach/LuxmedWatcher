@@ -44,7 +44,8 @@ func (s *SQLiteStorage) Init() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		doctor_id INTEGER NOT NULL,
 		clinic_id INTEGER NOT NULL,
-		date_from TEXT NOT NULL
+		date_from TEXT NOT NULL,
+		user TEXT,
 	);
 	`)
 	if err != nil {
@@ -68,7 +69,7 @@ func (s *SQLiteStorage) IsAppointmentNotified(app domain.Appointment) (bool, err
 
 	query := `
 	SELECT COUNT(*) FROM appointments_notified 
-	WHERE doctor_id = ? AND clinic_id = ? AND date_from = ?
+	WHERE doctor_id = ? AND clinic_id = ? AND date_from = ? and user = ?;
 	`
 	dateFrom := app.DateTimeFrom.Format(time.RFC3339)
 	var count int

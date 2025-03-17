@@ -91,7 +91,6 @@ func (s *SystemService) Start(ctx context.Context) error {
 			LanguageID:        10,
 			ServiceVariantID:  apCfg.ServiceVariantID,
 			SearchDays:        14,
-			CreationTimestamp: time.Now(),
 		}
 		// TODO: move this to a separate method
 		s.scheduler.AddTask(interval, func() {

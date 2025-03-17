@@ -17,18 +17,24 @@ type Appointment struct {
 
 // AppointmentSearch parameters for search.
 type AppointmentSearch struct {
-	CityID            int
-	CityName          string // optional
-	ServiceVariantID  int
-	DoctorID          int
-	PlaceID           int
-	PlaceName         string
-	LanguageID        int
-	ReferralID        int
-	ReferralTypeID    int
-	ProcessID         string
-	SearchDays        int
-	CreationTimestamp time.Time
+	CityID           int
+	ServiceVariantID int
+	DoctorID         int
+	PlaceID          int
+	LanguageID       int
+	ReferralID       int
+	ReferralTypeID   int
+	ProcessID        string
+	SearchDays       int
+}
+
+type AppointmentSearchTaskRepository interface {
+	Create(task *AppointmentSearchTask) error
+	GetPendingTasks() ([]AppointmentSearchTask, error)
+	UpdateStatus(taskID int, status string) error
+	UpdateLastChecked(taskID int, time time.Time) error
+	IncrementRetryCount(taskID int) error
+	DeleteTask(taskID int) error
 }
 
 // Credentials — auth credentials.
@@ -49,15 +55,17 @@ type AuthTokens struct {
 
 type NotificationLog struct {
 	ID      int       `json:"id"`
-	Channel string    `json:"channel"` // какой канал использовался
-	Message string    `json:"message"` // текст уведомления
-	SentAt  time.Time `json:"sent_at"` // время отправки
+	Channel string    `json:"channel"`
+	Message string    `json:"message"`
+	SentAt  time.Time `json:"sent_at"`
 }
 
-// AppointmentSearchTask – задание для поиска свободных слотов.
 type AppointmentSearchTask struct {
 	ID                int               `json:"id"`
 	AppointmentSearch AppointmentSearch `json:"appointment_search"`
 	CreatedAt         time.Time         `json:"created_at"`
 	UpdatedAt         time.Time         `json:"updated_at"`
+	LastCheckedAt     time.Time
+	RetryCount        int
+	Status            string
 }
