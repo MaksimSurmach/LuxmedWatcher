@@ -3,12 +3,11 @@ package storage
 import (
 	"LuxmedWatcher/internal/config"
 	"LuxmedWatcher/internal/domain"
+	"fmt"
 )
 
 // Storage определяет абстракцию для работы с базой данных.
 type Storage interface {
-	// Методы жизненного цикла базы
-	Init() error
 	// Migrate() error // запуск миграций для создания/обновления схемы БД
 	Close() error
 
@@ -35,13 +34,16 @@ type Storage interface {
 	// DeleteAppointmentSearchTask(taskID int) error
 }
 
-
-// NewStorage создаёт новое хранилище с указанным типом.
-func NewStorage(storageType string, dbPath string) Storage {
+// NewStorage creates a new storage instance based on the provided storage type.
+func NewStorage(storageType string, dbPath string) (Storage, error) {
 	switch storageType {
 	case "sqlite":
-		return NewSQLiteStorage(dbPath)
+		sqllite, err := NewSQLiteStorage(dbPath)
+		if err != nil {
+			return nil, err
+		}
+		return sqllite, nil
 	default:
-		return nil
+		panic(fmt.Sprintf("unsupported storage type: %s", storageType))
 	}
 }

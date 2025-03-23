@@ -30,6 +30,7 @@ type SettingsConfig struct {
 	DbProvider       string `mapstructure:"db_provider"`
 	LogPath          string `mapstructure:"log_path"`
 	LogLevel         string `mapstructure:"log_level"`
+	Language         string `mapstructure:"language"`
 }
 
 // AppointmentConfig — appointment configuration with id
@@ -60,6 +61,7 @@ func LoadConfig(path string) (*Config, error) {
 	v.SetDefault("settings.db_provider", "sqlite")
 	v.SetDefault("settings.log_path", "log.txt")
 	v.SetDefault("settings.log_level", "INFO")
+	v.SetDefault("settings.language", "pl")
 
 	if err := v.ReadInConfig(); err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)

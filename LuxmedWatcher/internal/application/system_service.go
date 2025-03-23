@@ -19,7 +19,7 @@ type SystemService struct {
 	appointmentService  *AppointmentService
 	notificationService *NotificationService
 	scheduler           scheduler.Scheduler
-	store               storage.Storage
+	storage             storage.Storage
 	config              *config.Config
 }
 
@@ -29,8 +29,8 @@ func NewSystemService(cfg *config.Config) (*SystemService, error) {
 	appointmentService := NewAppointmentService(client)
 
 	// create sqlite storage
-	store := storage.NewSQLiteStorage(cfg.Settings.DbPath)
-	if err := store.Init(); err != nil {
+	storage, err := storage.NewStorage(cfg.Settings.DbProvider, cfg.Settings.DbPath)
+	if err != nil {
 		return nil, fmt.Errorf("failed to initialize storage: %w", err)
 	}
 
@@ -46,7 +46,7 @@ func NewSystemService(cfg *config.Config) (*SystemService, error) {
 		appointmentService:  appointmentService,
 		notificationService: notificationService,
 		scheduler:           sched,
-		store:               store,
+		storage:             storage,
 		config:              cfg,
 	}, nil
 }
@@ -85,12 +85,12 @@ func (s *SystemService) Start(ctx context.Context) error {
 		}
 
 		p := domain.AppointmentSearch{
-			DoctorID:          apCfg.DoctorID,
-			CityID:            apCfg.CityID,
-			PlaceID:           apCfg.Location,
-			LanguageID:        10,
-			ServiceVariantID:  apCfg.ServiceVariantID,
-			SearchDays:        14,
+			DoctorID:         apCfg.DoctorID,
+			CityID:           apCfg.CityID,
+			PlaceID:          apCfg.Location,
+			LanguageID:       10,
+			ServiceVariantID: apCfg.ServiceVariantID,
+			SearchDays:       14,
 		}
 		// TODO: move this to a separate method
 		s.scheduler.AddTask(interval, func() {

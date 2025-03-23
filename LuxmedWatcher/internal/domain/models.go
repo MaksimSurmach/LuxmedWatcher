@@ -22,9 +22,6 @@ type AppointmentSearch struct {
 	DoctorID         int
 	PlaceID          int
 	LanguageID       int
-	ReferralID       int
-	ReferralTypeID   int
-	ProcessID        string
 	SearchDays       int
 }
 
