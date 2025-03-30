@@ -3,6 +3,7 @@ package config
 import (
 	"LuxmedWatcher/internal/domain"
 	"fmt"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 	log "github.com/sirupsen/logrus"
@@ -81,13 +82,13 @@ func LoadConfig(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-func (ac *AppointmentConfig) ToAppointmentSearch() domain.AppointmentSearch {
-	return domain.AppointmentSearch{
+func (ac *AppointmentConfig) ToAppointment() domain.AppointmentRecord {
+	return domain.AppointmentRecord{
 		DoctorID:         ac.DoctorID,
 		CityID:           ac.CityID,
 		PlaceID:          ac.Location,
 		ServiceVariantID: ac.ServiceVariantID,
-		LanguageID:       10, // default value
-		SearchDays:       14, // default value
+		LanguageID:       10,
+		CreatedAt:        time.Now().UTC(),
 	}
 }

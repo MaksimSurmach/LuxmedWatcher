@@ -1,11 +1,9 @@
 package storage
 
 import (
-	"errors"
 	"log"
 	"time"
 
-	"LuxmedWatcher/internal/config"
 	"LuxmedWatcher/internal/domain"
 
 	"github.com/jmoiron/sqlx"
@@ -43,30 +41,32 @@ func (s *SQLiteStorage) Close() error {
 func (s *SQLiteStorage) initSchema() error {
 	schema := `
 	CREATE TABLE IF NOT EXISTS config_store (
-		username TEXT NOT NULL,
-		password TEXT NOT NULL,
-		check_interval INTEGER NOT NULL,
-		language TEXT NOT NULL,
+		key TEXT NOT NULL,
+		value TEXT NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS notification_channels (
 		id INTEGER autoincrement PRIMARY KEY,
+		channel_type TEXT NOT NULL,
 		name TEXT NOT NULL,
 		config TEXT NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS appointments (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		name TEXT NOT NULL,
 		doctor_id INTEGER NOT NULL,
 		clinic_id INTEGER NOT NULL,
-		service_id INTEGER NOT NULL,
+		service_variant_id INTEGER NOT NULL,
+		clinic_id INTEGER NOT NULL,
 		city_id INTEGER NOT NULL,
 		language_id INTEGER NOT NULL,
+		created_at TEXT NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS appointments_notified (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
 		appointment_search_id INTEGER NOT NULL,
+		apointment_id INTEGER NOT NULL,
         doctor_id INTEGER NOT NULL,
         clinic_id INTEGER NOT NULL,
         date_from TEXT NOT NULL
@@ -75,11 +75,12 @@ func (s *SQLiteStorage) initSchema() error {
 	CREATE TABLE IF NOT EXISTS appointment_search_tasks (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		apointment_id INTEGER NOT NULL,
-		created_date TEXT NOT NULL,
+		notification_channel_id INTEGER NOT NULL,
+		search_days INTEGER NOT NULL,
+		created_at TEXT NOT NULL,
 		last_checked_at TEXT NOT NULL,
 		status TEXT NOT NULL,
-		notification_channel TEXT NOT NULL,
-		notification_destination TEXT NOT NULL
+		is_active BOOLEAN NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS cities (
@@ -119,143 +120,141 @@ func (s *SQLiteStorage) initSchema() error {
 	_, err := s.db.Exec(schema)
 	return err
 }
-func (s *SQLiteStorage) IsAppointmentNotified(app domain.Appointment) (bool, error) {
-	var count int
-	dateFrom := app.DateTimeFrom.Format(time.RFC3339)
 
-	err := s.db.Get(&count, `
-        SELECT COUNT(*) FROM appointments_notified
-        WHERE doctor_id = ? AND clinic_id = ? AND date_from = ?
-    `, app.DoctorID, app.ClinicID, dateFrom)
-
-	if err != nil {
-		return false, err
-	}
-	return count > 0, nil
-}
-
-func (s *SQLiteStorage) MarkAppointmentsNotified(apps []domain.Appointment) error {
-	tx, err := s.db.Beginx()
-	if err != nil {
-		return err
-	}
-
-	defer func() {
-		if err != nil {
-			tx.Rollback()
-			return
-		}
-	}()
-
-	for _, app := range apps {
-		_, err := tx.Exec(`
-            INSERT INTO appointments_notified (appointment_search_id, doctor_id, clinic_id, date_from)
-            VALUES (?, ?, ?, ?)
-        `, app.DoctorID, app.ClinicID, app.DateTimeFrom.Format(time.RFC3339))
-		// add appointment_search_id to struct
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
-}
-
-func (s *SQLiteStorage) UpdateLastChecked(taskID int, checkedAt time.Time) error {
+// SaveConfigParam saves a configuration parameter to the database
+func (s *SQLiteStorage) SaveConfigParam(key, value string) error {
 	_, err := s.db.Exec(`
-        UPDATE appointment_search_tasks
-        SET last_checked_at = ?
-        WHERE id = ?
-    `, checkedAt.Format(time.RFC3339), time.Now().Format(time.RFC3339), taskID)
-
+		INSERT INTO config_store (key, value)
+		VALUES (?, ?)
+		`, key, value)
 	return err
 }
 
-func (s *SQLiteStorage) DeleteAppointmentSearchTask(taskID int) error {
-	if s.db == nil {
-		return errors.New("db not initialized")
-	}
+// GetConfigParam returns a configuration parameter by its key
+func (s *SQLiteStorage) GetConfigParam(key string) (string, error) {
+	var value string
+	err := s.db.Get(&value, "SELECT value FROM config_store WHERE key = ?", key)
+	return value, err
+}
 
+// Appointments
+// SaveAppointmentRecord saves an appointment record to the database
+func (s *SQLiteStorage) SaveAppointmentRecord(appoint *domain.AppointmentRecord) error {
+	_, err := s.db.Exec(`
+		INSERT INTO appointments (name, doctor_id, clinic_id, service_variant_id, city_id, language_id, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`, appoint.Name, appoint.DoctorID, appoint.ClinicID, appoint.ServiceVariantID, appoint.CityID, appoint.LanguageID, time.Now().Format(time.RFC3339))
+	return err
+}
+
+// GetAppointmentRecords returns all appointment records
+func (s *SQLiteStorage) GetAppointmentRecords() ([]*domain.AppointmentRecord, error) {
+	var appointments []*domain.AppointmentRecord
+	err := s.db.Select(&appointments, "SELECT * FROM appointments")
+	return appointments, err
+}
+
+// GetAppointmentRecord returns an appointment record by its ID
+func (s *SQLiteStorage) GetAppointmentRecord(id int) (*domain.AppointmentRecord, error) {
+	var appointment *domain.AppointmentRecord
+	err := s.db.Get(&appointment, "SELECT * FROM appointments WHERE id = ?", id)
+	return appointment, err
+}
+
+// DeleteAppointmentRecord deletes an appointment record by its ID
+func (s *SQLiteStorage) DeleteAppointmentRecord(id int) error {
+	_, err := s.db.Exec("DELETE FROM appointments WHERE id = ?", id)
+	return err
+}
+
+// AppointmentSearchTask
+// DeleteAppointmentSearchTask deletes an appointment search task by its ID
+func (s *SQLiteStorage) DeleteAppointmentSearchTask(taskID int) error {
 	_, err := s.db.Exec("DELETE FROM appointment_search_tasks WHERE id = ?", taskID)
 	return err
 }
 
-func (s *SQLiteStorage) IncrementRetryCount(taskID int) error {
-	_, err := s.db.Exec(`
-        UPDATE appointment_search_tasks
-        SET retry_count = retry_count + 1, updated_at = ?
-        WHERE id = ?
-    `, time.Now().Format(time.RFC3339), taskID)
-
-	return err
-}
-
+// GetAppointmentSearchTask returns an appointment search task by its ID
 func (s *SQLiteStorage) GetAppointmentSearchTask(taskID int) (*domain.AppointmentSearchTask, error) {
 	var task domain.AppointmentSearchTask
 	err := s.db.Get(&task, "SELECT * FROM appointment_search_tasks WHERE id = ?", taskID)
 	return &task, err
 }
 
-func (s *SQLiteStorage) GetAppointmentSearchTasks() ([]domain.AppointmentSearchTask, error) {
-	var tasks []domain.AppointmentSearchTask
+// GetAppointmentSearchTasks returns all appointment search tasks
+func (s *SQLiteStorage) GetAppointmentSearchTasks() ([]*domain.AppointmentSearchTask, error) {
+	var tasks []*domain.AppointmentSearchTask
 	err := s.db.Select(&tasks, "SELECT * FROM appointment_search_tasks")
 	return tasks, err
 }
 
-func (s *SQLiteStorage) CreateAppointmentSearchTask(task domain.AppointmentSearchTask) (int, error) {
-	res, err := s.db.Exec(`
-		INSERT INTO appointment_search_tasks (created_at, last_checked_at, status, notification_channel, notification_destination)
-		VALUES (?, ?, ?, ?, ?, ?)
-	`, time.Now().Format(time.RFC3339), time.Now().Format(time.RFC3339), task.Status, task.NotificationChannel, task.NotificationDestination)
-	if err != nil {
-		return 0, err
-	}
-
-	id, err := res.LastInsertId()
-	return int(id), err
-}
-
-func (s *SQLiteStorage) SaveConfig(c *config.Config) error {
+// SaveAppointmentSearchTask saves an appointment search task to the database
+func (s *SQLiteStorage) SaveAppointmentSearchTask(task *domain.AppointmentSearchTask) error {
 	_, err := s.db.Exec(`
-		INSERT INTO config_store (username, password, check_interval, language)
-		VALUES (?, ?, ?, ?)
-	`, c.Credentials.Username, c.Credentials.Password, c.Settings.CheckIntervalSec, c.Settings.Language)
+		INSERT INTO appointment_search_tasks (created_at, last_checked_at, status, notification_channel, apointment_id, search_days, is_active)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`, time.Now().Format(time.RFC3339), task.LastCheckedAt, task.Status, task.NotificationChannelID, task.AppointmentID, task.SearchDays, task.IsActive)
 	return err
 }
 
-func (s *SQLiteStorage) GetConfig() (*config.Config, error) {
-	var sc config.SettingsConfig
-	var cc config.CredentialsConfig
-
-	err := s.db.Get(&sc, "SELECT * FROM config_store")
-	if err != nil {
-		return nil, err
-	}
-	err = s.db.Get(&cc, "SELECT * FROM config_store")
-	if err != nil {
-		return nil, err
-	}
-	return &config.Config{
-		Credentials: cc,
-		Settings:    sc,
-	}, nil
+// GetActiveAppointmentSearchTasks returns all active appointment search tasks
+func (s *SQLiteStorage) GetActiveAppointmentSearchTasks() ([]*domain.AppointmentSearchTask, error) {
+	var tasks []*domain.AppointmentSearchTask
+	err := s.db.Select(&tasks, "SELECT * FROM appointment_search_tasks WHERE is_active = 1")
+	return tasks, err
 }
 
-func (s *SQLiteStorage) SaveAppointment(app domain.Appointment) error {
+// NotificationChannels
+// SaveNotificationChannel saves a notification channel to the database
+func (s *SQLiteStorage) SaveNotificationChannel(channel *domain.NotificationChannels) error {
 	_, err := s.db.Exec(`
-		INSERT INTO appointments (doctor_id, clinic_id, service_id, city_id, language_id)
+		INSERT INTO notification_channels (name, channel_type, config)
+		VALUES (?, ?, ?)
+		`, channel.Name, channel.ChannelType, channel.Config)
+	return err
+}
+
+// GetNotificationChannels returns all notification channels
+func (s *SQLiteStorage) GetNotificationChannels() ([]*domain.NotificationChannels, error) {
+	var channels []*domain.NotificationChannels
+	err := s.db.Select(&channels, "SELECT * FROM notification_channels")
+	return channels, err
+}
+
+// GetNotificationChannel returns a notification channel by its ID
+func (s *SQLiteStorage) GetNotificationChannel(channelID int) (*domain.NotificationChannels, error) {
+	var channel *domain.NotificationChannels
+	err := s.db.Get(&channel, "SELECT * FROM notification_channels WHERE id = ?", channelID)
+	return channel, err
+}
+
+// DeleteNotificationChannel deletes a notification channel by its ID
+func (s *SQLiteStorage) DeleteNotificationChannel(channelID int) error {
+	_, err := s.db.Exec("DELETE FROM notification_channels WHERE id = ?", channelID)
+	return err
+}
+
+// SaveAppointmentNotified saves an appointment notified record to the database
+func (s *SQLiteStorage) SaveAppointmentNotified(searchID int, appointmentID int, doctorID int, clinicID int, dateFrom time.Time) error {
+	_, err := s.db.Exec(`
+		INSERT INTO appointments_notified (appointment_search_id, appointment_id, doctor_id, clinic_id, date_from)
 		VALUES (?, ?, ?, ?, ?)
-	`, app.DoctorID, app.ClinicID, app.ServiceID, app.CityID, app.LanguageID)
+	`, searchID, appointmentID, doctorID, clinicID, dateFrom.Format(time.RFC3339))
 	return err
 }
 
-func (s *SQLiteStorage) GetAppointments() ([]domain.Appointment, error) {
-	var apps []domain.Appointment
-	err := s.db.Select(&apps, "SELECT * FROM appointments")
-	return apps, err
+// GetAppointmentNotified returns an appointment notified record by its ID
+func (s *SQLiteStorage) IsAppointmentNotified(searchID int, appointmentID int, doctorID int, clinicID int, dateFrom time.Time) (bool, error) {
+	var count int
+	err := s.db.Get(&count, "SELECT COUNT(*) FROM appointments_notified WHERE appointment_search_id = ? AND appointment_id = ? AND doctor_id = ? AND clinic_id = ? AND date_from = ?", searchID, appointmentID, doctorID, clinicID, dateFrom.Format(time.RFC3339))
+	return count > 0, err
 }
 
-func (s *SQLiteStorage) SaveCity(city domain.City) error {
+// Reference data
+
+// Cities CRUD
+// SaveCity saves a city to the database
+func (s *SQLiteStorage) SaveCity(city *domain.City) error {
 	_, err := s.db.Exec(`
 		INSERT INTO cities (id, name)
 		VALUES (?, ?)
@@ -263,39 +262,73 @@ func (s *SQLiteStorage) SaveCity(city domain.City) error {
 	return err
 }
 
-func (s *SQLiteStorage) GetCities() ([]domain.City, error) {
-	var cities []domain.City
+// GetCities returns all cities from the database
+func (s *SQLiteStorage) GetCities() ([]*domain.City, error) {
+	var cities []*domain.City
 	err := s.db.Select(&cities, "SELECT * FROM cities")
 	return cities, err
 }
 
-func (s *SQLiteStorage) GetCityName(cityID int) (string, error) {
-	var name string
-	err := s.db.Get(&name, "SELECT name FROM cities WHERE id = ?", cityID)
-	return name, err
+// GetCity returns a city by its ID
+func (s *SQLiteStorage) GetCity(cityID int) (*domain.City, error) {
+	var city *domain.City
+	err := s.db.Get(&city, "SELECT * FROM cities WHERE id = ?", cityID)
+	return city, err
 }
 
-func (s *SQLiteStorage) SaveServiceVariantGroup(group domain.ServiceVariantGroup) error {
-	_, err := s.db.Exec(`
-		INSERT INTO service_variant_groups (id, name)
-		VALUES (?, ?)
-	`, group.ID, group.Name)
+// DeleteCity deletes a city by its ID
+func (s *SQLiteStorage) DeleteCity(cityID int) error {
+	_, err := s.db.Exec("DELETE FROM cities WHERE id = ?", cityID)
 	return err
 }
 
-func (s *SQLiteStorage) GetServiceVariantGroups() ([]domain.ServiceVariantGroup, error) {
-	var groups []domain.ServiceVariantGroup
-	err := s.db.Select(&groups, "SELECT * FROM service_variant_groups")
-	return groups, err
-}
-
-func (s *SQLiteStorage) GetServiceName(serviceID int) (string, error) {
-	var name string
-	err := s.db.Get(&name, "SELECT name FROM service_variants WHERE id = ?", serviceID)
+// Services CRUD
+// GetService returns services with id
+func (s *SQLiteStorage) GetService(serviceID int) (*domain.ServiceVariantGroup, error) {
+	var name *domain.ServiceVariantGroup
+	err := s.db.Get(&name, "SELECT name FROM service_variant_groups WHERE id = ?", serviceID)
 	return name, err
 }
 
-func (s *SQLiteStorage) SaveDoctor(doctor domain.Doctor) error {
+// GetServices returns all services
+func (s *SQLiteStorage) GetServices() ([]*domain.ServiceVariantGroup, error) {
+	var services []*domain.ServiceVariantGroup
+	err := s.db.Select(&services, "SELECT * FROM service_variant_groups")
+	return services, err
+}
+
+// SaveService saves a service to the database
+func (s *SQLiteStorage) SaveService(service *domain.ServiceVariantGroup) error {
+	_, err := s.db.Exec(`
+		INSERT INTO service_variant_groups (id, name)
+		VALUES (?, ?)
+		`, service.ID, service.Name)
+	return err
+}
+
+// DeleteService remove service form db by id
+func (s *SQLiteStorage) DeleteService(id int) error {
+	_, err := s.db.Exec("DELETE FROM service_variant_groups WHERE id = ?", id)
+	return err
+}
+
+// Doctors
+// GetDoctors reset all doctors
+func (s *SQLiteStorage) GetDoctors() ([]*domain.Doctor, error) {
+	var doctors []*domain.Doctor
+	err := s.db.Select(&doctors, "SELECT * FROM doctors")
+	return doctors, err
+}
+
+// GetDoctor get doctor by id
+func (s *SQLiteStorage) GetDoctor(doctorID int) (*domain.Doctor, error) {
+	var doc *domain.Doctor
+	err := s.db.Get(&doc, "SELECT name FROM doctors WHERE id = ?", doctorID)
+	return doc, err
+}
+
+// SaveDoctor save doctor
+func (s *SQLiteStorage) SaveDoctor(doctor *domain.Doctor) error {
 	_, err := s.db.Exec(`
 		INSERT INTO doctors (id, FirstName, LastName, AcademicTitle, Facilities)
 		VALUES (?, ?)
@@ -303,19 +336,29 @@ func (s *SQLiteStorage) SaveDoctor(doctor domain.Doctor) error {
 	return err
 }
 
-func (s *SQLiteStorage) GetDoctors() ([]domain.Doctor, error) {
-	var doctors []domain.Doctor
-	err := s.db.Select(&doctors, "SELECT * FROM doctors")
-	return doctors, err
+// DeleteDoctor delete doctor by id
+func (s *SQLiteStorage) DeleteDoctor(doctorID int) error {
+	_, err := s.db.Exec("DELETE FROM doctors WHERE id = ?", doctorID)
+	return err
 }
 
-func (s *SQLiteStorage) GetDoctorName(doctorID int) (string, error) {
-	var name string
-	err := s.db.Get(&name, "SELECT name FROM doctors WHERE id = ?", doctorID)
-	return name, err
+// Clinics
+// GetClinics
+func (s *SQLiteStorage) GetClinics() ([]*domain.Facilities, error) {
+	var clinics []*domain.Facilities
+	err := s.db.Select(&clinics, "SELECT * FROM clinics")
+	return clinics, err
 }
 
-func (s *SQLiteStorage) SaveClinic(clinic domain.Facilities) error {
+// GetClinic get clinic by id
+func (s *SQLiteStorage) GetClinic(clinicID int) (*domain.Facilities, error) {
+	var clinic *domain.Facilities
+	err := s.db.Get(&clinic, "SELECT name FROM clinics WHERE id = ?", clinicID)
+	return clinic, err
+}
+
+// SaveClinic save clinic record
+func (s *SQLiteStorage) SaveClinic(clinic *domain.Facilities) error {
 	_, err := s.db.Exec(`
 		INSERT INTO clinics (id, name)
 		VALUES (?, ?)
@@ -323,19 +366,29 @@ func (s *SQLiteStorage) SaveClinic(clinic domain.Facilities) error {
 	return err
 }
 
-func (s *SQLiteStorage) GetClinics() ([]domain.Facilities, error) {
-	var clinics []domain.Facilities
-	err := s.db.Select(&clinics, "SELECT * FROM clinics")
-	return clinics, err
+// DeleteClinic delete clinic from db
+func (s *SQLiteStorage) DeleteClinic(clinicID int) error {
+	_, err := s.db.Exec("DELETE FROM clinics WHERE id = ?", clinicID)
+	return err
 }
 
-func (s *SQLiteStorage) GetClinicName(clinicID int) (string, error) {
-	var name string
-	err := s.db.Get(&name, "SELECT name FROM clinics WHERE id = ?", clinicID)
-	return name, err
+// Languages
+// GetLanguages get all languages
+func (s *SQLiteStorage) GetLanguages() ([]*domain.Languages, error) {
+	var languages []*domain.Languages
+	err := s.db.Select(&languages, "SELECT * FROM languages")
+	return languages, err
 }
 
-func (s *SQLiteStorage) SaveLanguage(language domain.Languages) error {
+// GetLanguage get language by id
+func (s *SQLiteStorage) GetLanguage(languageID int) (*domain.Languages, error) {
+	var lan *domain.Languages
+	err := s.db.Get(&lan, "SELECT name FROM languages WHERE id = ?", languageID)
+	return lan, err
+}
+
+// SaveLanguage save language
+func (s *SQLiteStorage) SaveLanguage(language *domain.Languages) error {
 	_, err := s.db.Exec(`
 		INSERT INTO languages (id, name)
 		VALUES (?, ?)
@@ -343,14 +396,8 @@ func (s *SQLiteStorage) SaveLanguage(language domain.Languages) error {
 	return err
 }
 
-func (s *SQLiteStorage) GetLanguages() ([]domain.Languages, error) {
-	var languages []domain.Languages
-	err := s.db.Select(&languages, "SELECT * FROM languages")
-	return languages, err
-}
-
-func (s *SQLiteStorage) GetLanguageName(languageID int) (string, error) {
-	var name string
-	err := s.db.Get(&name, "SELECT name FROM languages WHERE id = ?", languageID)
-	return name, err
+// DeleteLanguage delete language
+func (s *SQLiteStorage) DeleteLanguage(languageID int) error {
+	_, err := s.db.Exec("DELETE FROM languages WHERE id = ?", languageID)
+	return err
 }

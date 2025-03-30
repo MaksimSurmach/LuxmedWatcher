@@ -2,7 +2,7 @@ package domain
 
 import "time"
 
-// Appointment
+// Appointment — represents an appointment.
 type Appointment struct {
 	ServiceName  string
 	ServiceID    int
@@ -13,25 +13,23 @@ type Appointment struct {
 
 	ClinicID   int
 	ClinicName string
+
+	CityID int
+
+	LanguageID int
+	PlaceID    int
 }
 
-// AppointmentSearch parameters for search.
-type AppointmentSearch struct {
-	CityID           int
-	ServiceVariantID int
-	DoctorID         int
-	PlaceID          int
-	LanguageID       int
-	SearchDays       int
-}
-
-type AppointmentSearchTaskRepository interface {
-	Create(task *AppointmentSearchTask) error
-	GetPendingTasks() ([]AppointmentSearchTask, error)
-	UpdateStatus(taskID int, status string) error
-	UpdateLastChecked(taskID int, time time.Time) error
-	IncrementRetryCount(taskID int) error
-	DeleteTask(taskID int) error
+// Appointment
+type AppointmentRecord struct {
+	ID               *int      `json:"id,omitempty" db:"id"`
+	Name             string    `json:"name" db:"name"`
+	CityID           int       `json:"city_id" db:"city_id"`
+	ServiceVariantID int       `json:"service_variant_id" db:"service_variant_id"`
+	DoctorID         int       `json:"doctor_id" db:"doctor_id"`
+	ClinicID         int       `json:"place_id" db:"clinic_id"`
+	LanguageID       int       `json:"language_id" db:"language_id"`
+	CreatedAt        time.Time `json:"created_at" db:"created_at"`
 }
 
 // Credentials — auth credentials.
@@ -50,19 +48,23 @@ type AuthTokens struct {
 	ExpirationTime time.Time
 }
 
-type NotificationLog struct {
-	ID      int       `json:"id"`
-	Channel string    `json:"channel"`
-	Message string    `json:"message"`
-	SentAt  time.Time `json:"sent_at"`
+// NotificationChannels — represents a list of notification channels.
+type NotificationChannels struct {
+	ID          *int                   `json:"id,omitempty" db:"id"`
+	Name        string                 `json:"name" db:"name"`
+	ChannelType string                 `json:"channel_type" db:"channel_type"`
+	Config      map[string]interface{} `json:"config" db:"config"`
 }
 
+// AppointmentSearch — represents a search for an appointment.
 type AppointmentSearchTask struct {
-	ID                int               `json:"id"`
-	AppointmentSearch AppointmentSearch `json:"appointment_search"`
-	CreatedAt         time.Time         `json:"created_at"`
-	UpdatedAt         time.Time         `json:"updated_at"`
-	LastCheckedAt     time.Time
-	RetryCount        int
-	Status            string
+	ID                    *int      `json:"id,omitempty" db:"id"`
+	AppointmentID         int       `json:"appointment_id" db:"appointment_id"`
+	NotificationChannelID int       `json:"notification_channel_id" db:"notification_channel_id"`
+	SearchDays            int       `json:"search_days" db:"search_days"`
+	CreatedAt             time.Time `json:"created_at" db:"created_at"`
+	LastCheckedAt         time.Time `json:"last_checked_at" db:"last_checked_at"`
+	Status                string    `json:"status" db:"status"`
+	RetryCount            int       `json:"retry_count" db:"retry_count"`
+	IsActive              bool      `json:"is_active" db:"is_active"`
 }

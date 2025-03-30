@@ -126,3 +126,16 @@ func (s *SystemService) Start(ctx context.Context) error {
 	s.scheduler.Stop()
 	return nil
 }
+
+func (s *SystemService) CreateAppointment(params domain.AppointmentRecord) error {
+	if params.Name == "" {
+		// TODO: add name generation
+		params.Name = "Appointment"
+	}
+	id, err := s.storage.CreateAppointment(params)
+	if err != nil {
+		return fmt.Errorf("failed to create appointment: %w", err)
+	}
+	log.Infof("Created appointment with ID %d", id)
+	return nil
+}

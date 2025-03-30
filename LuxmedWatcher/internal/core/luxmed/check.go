@@ -13,7 +13,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params domain.AppointmentSearch) ([]domain.Appointment, error) {
+func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params domain.Appointment, SearchDays int) ([]domain.Appointment, error) {
 	c.RefreshTokenIfNeeded(ctx)
 
 	u, err := url.Parse("https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/terms/index")
@@ -23,10 +23,10 @@ func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params doma
 	q := u.Query()
 	q.Set("searchPlace.id", fmt.Sprintf("%d", params.CityID))
 	q.Set("searchPlace.type", "0")
-	q.Set("serviceVariantId", fmt.Sprintf("%d", params.ServiceVariantID))
+	q.Set("serviceVariantId", fmt.Sprintf("%d", params.ServiceID))
 	q.Set("languageId", fmt.Sprintf("%d", params.LanguageID))
 	q.Set("searchDateFrom", time.Now().Format("2006-01-02"))
-	q.Set("searchDateTo", time.Now().AddDate(0, 0, params.SearchDays).Format("2006-01-02"))
+	q.Set("searchDateTo", time.Now().AddDate(0, 0, SearchDays).Format("2006-01-02"))
 	q.Set("searchDatePreset", "14")
 	q.Set("delocalized", "false")
 	if params.DoctorID > 0 {
@@ -94,8 +94,7 @@ func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params doma
 				DoctorName:   t.Doctor.FirstName + " " + t.Doctor.LastName,
 				ClinicID:     t.ClinicID,
 				ClinicName:   t.Clinic,
-				ServiceName: "Unknown",
-				
+				ServiceName:  "Unknown",
 			}
 			results = append(results, app)
 		}

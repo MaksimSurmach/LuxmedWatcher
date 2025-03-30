@@ -1,9 +1,9 @@
 package application
 
 import (
-	"context"
 	"LuxmedWatcher/internal/core/luxmed"
 	"LuxmedWatcher/internal/domain"
+	"context"
 )
 
 type AppointmentService struct {
@@ -19,6 +19,6 @@ func (s *AppointmentService) Authenticate(ctx context.Context, creds domain.Cred
 }
 
 // CheckAppointments checks for available appointments
-func (s *AppointmentService) CheckAppointments(ctx context.Context, params domain.AppointmentSearch) ([]domain.Appointment, error) {
-	return s.client.GetAvailableAppointments(ctx, params)
+func (s *AppointmentService) CheckAppointments(ctx context.Context, params domain.AppointmentRecord) ([]domain.Appointment, error) {
+	return s.client.GetAvailableAppointments(ctx, params , SearchDays int)
 }

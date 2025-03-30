@@ -15,6 +15,7 @@ type ServiceVariantGroup struct {
 type ReferenceData struct {
 	Cities               []City                `json:"cities"`
 	ServiceVariantGroups []ServiceVariantGroup `json:"serviceVariantGroups"`
+	Doctor               []Doctor              `json:"doctors"`
 	UpdatedAt            time.Time             `json:"updated_at"`
 }
 

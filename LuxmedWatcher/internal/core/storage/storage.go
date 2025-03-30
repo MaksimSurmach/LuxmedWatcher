@@ -1,40 +1,68 @@
 package storage
 
 import (
-	"LuxmedWatcher/internal/config"
 	"LuxmedWatcher/internal/domain"
 	"fmt"
+	"time"
 )
 
-// Storage определяет абстракцию для работы с базой данных.
+// Abstract storage interface
 type Storage interface {
-	// Migrate() error // запуск миграций для создания/обновления схемы БД
 	Close() error
 
-	// Управление конфигурацией
-	// Получаем и сохраняем распарсенный конфиг, который является полноценной сущностью.
-	GetConfig() (*config.Config, error)
-	SaveConfig(cfg *config.Config) error
+	// Credentials
+	SaveConfigParam(key string, value string) error
+	GetConfigParam(key string) (string, error)
 
-	// Уведомления по записям
-	// Проверяем, было ли уведомление для данного слота отправлено,
-	// и сохраняем факт отправки.
-	IsAppointmentNotified(app domain.Appointment) (bool, error)
-	MarkAppointmentsNotified(apps []domain.Appointment) error
+	// Appointment records
+	GetAppointmentRecords() ([]*domain.AppointmentRecord, error)
+	GetAppointmentRecord(id int) (*domain.AppointmentRecord, error)
+	SaveAppointmentRecord(record *domain.AppointmentRecord) error
+	DeleteAppointmentRecord(id int) error
 
-	// // Дополнительно: история уведомлений
-	// // Позволяет хранить логи отправленных уведомлений для аудита.
-	// LogNotification(log domain.NotificationLog) error
-	// GetNotificationHistory() ([]domain.NotificationLog, error)
+	// Appointment search tasks
+	GetAppointmentSearchTasks() ([]*domain.AppointmentSearchTask, error)
+	GetAppointmentSearchTask(id int) (*domain.AppointmentSearchTask, error)
+	SaveAppointmentSearchTask(task *domain.AppointmentSearchTask) error
+	DeleteAppointmentSearchTask(id int) error
+	GetActiveAppointmentSearchTasks() ([]*domain.AppointmentSearchTask, error)
 
-	// // Дополнительно: управление задачами поиска
-	// // Позволяет динамически добавлять/удалять задания, которые ищут свободные слоты.
-	// GetAppointmentSearchTasks() ([]domain.AppointmentSearchTask, error)
-	// SaveAppointmentSearchTask(task domain.AppointmentSearchTask) error
-	// DeleteAppointmentSearchTask(taskID int) error
+	// Notification channels
+	GetNotificationChannels() ([]*domain.NotificationChannels, error)
+	GetNotificationChannel(id int) (*domain.NotificationChannels, error)
+	SaveNotificationChannel(channel *domain.NotificationChannels) error
+	DeleteNotificationChannel(id int) error
+	SaveAppointmentNotified(searchID int, appointmentID int, doctorID int, clinicID int, dateFrom time.Time) error
+	IsAppointmentNotified(searchID int, appointmentID int, doctorID int, clinicID int, dateFrom time.Time) (bool, error)
+
+	// Reference data
+	GetCities() ([]*domain.City, error)
+	GetCity(id int) (*domain.City, error)
+	SaveCity(city *domain.City) error
+	DeleteCity(id int) error
+
+	GetServices() ([]*domain.ServiceVariantGroup, error)
+	GetService(id int) (*domain.ServiceVariantGroup, error)
+	SaveService(service *domain.ServiceVariantGroup) error
+	DeleteService(id int) error
+
+	GetDoctors() ([]*domain.Doctor, error)
+	GetDoctor(id int) (*domain.Doctor, error)
+	SaveDoctor(doctor *domain.Doctor) error
+	DeleteDoctor(id int) error
+
+	GetClinics() ([]*domain.Facilities, error)
+	GetClinic(id int) (*domain.Facilities, error)
+	SaveClinic(clinic *domain.Facilities) error
+	DeleteClinic(id int) error
+
+	GetLanguages() ([]*domain.Languages, error)
+	GetLanguage(id int) (*domain.Languages, error)
+	SaveLanguage(language *domain.Languages) error
+	DeleteLanguage(id int) error
 }
 
-// NewStorage creates a new storage instance based on the provided storage type.
+// NewStorage creates a new storage instance based on the provided storage type
 func NewStorage(storageType string, dbPath string) (Storage, error) {
 	switch storageType {
 	case "sqlite":

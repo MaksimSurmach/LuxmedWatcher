@@ -118,7 +118,7 @@ func (c *luxmedClient) GetPopularServices(ctx context.Context) ([]domain.Popular
 	return popularServices.Services, nil
 }
 
-func (c *luxmedClient) GetRecentData(ctx context.Context) ([]domain.AppointmentSearch, error) {
+func (c *luxmedClient) GetRecentData(ctx context.Context) ([]domain.AppointmentRecord, error) {
 	req, err := c.newAuthRequest(ctx, http.MethodGet, RecentSearchesURL, nil)
 	if err != nil {
 		return nil, err
@@ -134,7 +134,7 @@ func (c *luxmedClient) GetRecentData(ctx context.Context) ([]domain.AppointmentS
 		return nil, fmt.Errorf("failed to fetch recent data, status: %d", resp.StatusCode)
 	}
 
-	var recentData []domain.AppointmentSearch
+	var recentData []domain.AppointmentRecord
 	if err := json.NewDecoder(resp.Body).Decode(&recentData); err != nil {
 		return nil, fmt.Errorf("failed to decode recent data: %w", err)
 	}

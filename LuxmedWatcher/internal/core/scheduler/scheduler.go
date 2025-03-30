@@ -1,11 +1,13 @@
 package scheduler
 
 import (
+	"LuxmedWatcher/internal/core/storage"
+	"LuxmedWatcher/internal/domain"
+	"context"
 	"sync"
 	"time"
-	"context"
+
 	log "github.com/sirupsen/logrus"
-	"LuxmedWatcher/internal/domain"
 )
 
 // Scheduler описывает интерфейс планировщика,
@@ -74,7 +76,7 @@ func (s *schedulerImpl) runTask(t scheduledTask, ctx context.Context) {
 
 		case <-ctx.Done():
 			// Context cancelled
-            return
+			return
 
 		case <-s.quit:
 			// SIGTERM received
@@ -89,106 +91,70 @@ func (s *schedulerImpl) Stop() {
 		return
 	}
 
-	close(s.quit)    // Signal all goroutines to stop
-	s.wg.Wait()      // Wait for all goroutines to finish
+	close(s.quit) // Signal all goroutines to stop
+	s.wg.Wait()   // Wait for all goroutines to finish
 	s.started = false
 }
 
-
 type TaskProcessor interface {
-    ProcessTask(ctx context.Context, task domain.AppointmentSearchTask) error
+	ProcessTask(ctx context.Context, task domain.AppointmentSearchTask) error
 }
 
 type TaskScheduler struct {
-    repo domain.AppointmentSearchTaskRepository
-    processor TaskProcessor
-    checkInterval time.Duration
-    maxRetries int
+	db            storage.Storage
+	processor     TaskProcessor
+	checkInterval time.Duration
 }
 
 func NewTaskScheduler(
-    repo domain.AppointmentSearchTaskRepository, 
-    processor TaskProcessor,
-    checkInterval time.Duration,
-    maxRetries int,
+	db *storage.Storage,
+	processor TaskProcessor,
+	checkInterval time.Duration,
 ) *TaskScheduler {
-    return &TaskScheduler{
-        repo: repo,
-        processor: processor,
-        checkInterval: checkInterval,
-        maxRetries: maxRetries,
-    }
+	return &TaskScheduler{
+		db:            *db,
+		processor:     processor,
+		checkInterval: checkInterval,
+	}
 }
 
 func (s *TaskScheduler) Start(ctx context.Context) error {
-    ticker := time.NewTicker(s.checkInterval)
-    defer ticker.Stop()
-    
-    for {
-        select {
-        case <-ctx.Done():
-            return ctx.Err()
-        case <-ticker.C:
-            if err := s.processPendingTasks(ctx); err != nil {
-                log.Printf("Error processing tasks: %v", err)
-            }
-        }
-    }
+	ticker := time.NewTicker(s.checkInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+			if err := s.processPendingTasks(ctx); err != nil {
+				log.Printf("Error processing tasks: %v", err)
+			}
+		}
+	}
 }
 
 func (s *TaskScheduler) processPendingTasks(ctx context.Context) error {
-    tasks, err := s.repo.GetPendingTasks()
-    if err != nil {
-        return err
-    }
-    
-    for _, task := range tasks {
-        // Обновляем время последней проверки
-        err := s.repo.UpdateLastChecked(task.ID, time.Now())
-        if err != nil {
-            log.Printf("Failed to update last checked time for task %d: %v", task.ID, err)
-            continue
-        }
-        
-        // Обновляем статус на "in_progress"
-        err = s.repo.UpdateStatus(task.ID, "in_progress")
-        if err != nil {
-            log.Printf("Failed to update status for task %d: %v", task.ID, err)
-            continue
-        }
-        
-        // Обрабатываем задачу
-        err = s.processor.ProcessTask(ctx, task)
-        if err != nil {
-            log.Printf("Failed to process task %d: %v", task.ID, err)
-            
-            // Увеличиваем счетчик попыток
-            err = s.repo.IncrementRetryCount(task.ID)
-            if err != nil {
-                log.Printf("Failed to increment retry count for task %d: %v", task.ID, err)
-            }
-            
-            // Проверяем, не превышено ли максимальное количество попыток
-            if task.RetryCount >= s.maxRetries {
-                err = s.repo.UpdateStatus(task.ID, "failed")
-                if err != nil {
-                    log.Printf("Failed to update status for task %d: %v", task.ID, err)
-                }
-            } else {
-                err = s.repo.UpdateStatus(task.ID, "pending")
-                if err != nil {
-                    log.Printf("Failed to update status for task %d: %v", task.ID, err)
-                }
-            }
-            continue
-        }
-        
-        // Обновляем статус на "completed"
-        err = s.repo.UpdateStatus(task.ID, "completed")
-        if err != nil {
-            log.Printf("Failed to update status for task %d: %v", task.ID, err)
-        }
-    }
-    
-    return nil
+	tasks, err := s.db.GetActiveAppointmentSearchTasks()
+	if err != nil {
+		return err
+	}
+
+	for _, task := range tasks {
+		// Process task
+		err = s.processor.ProcessTask(ctx, task)
+		if err != nil {
+			log.Printf("Failed to process task %d: %v", task.ID, err)
+			continue
+		}
+
+		// Update last checked time
+		err := s.db.UpdateLastChecked(task.ID, time.Now())
+		if err != nil {
+			log.Printf("Failed to update last checked time for task %d: %v", task.ID, err)
+			continue
+		}
+	}
+
+	return nil
 }
