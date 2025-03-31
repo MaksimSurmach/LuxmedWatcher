@@ -18,7 +18,7 @@ import (
 type SystemService struct {
 	appointmentService  *AppointmentService
 	notificationService *NotificationService
-	scheduler           scheduler.Scheduler
+	scheduler           *scheduler.TaskScheduler
 	storage             storage.Storage
 	config              *config.Config
 }
@@ -40,7 +40,7 @@ func NewSystemService(cfg *config.Config) (*SystemService, error) {
 		return nil, fmt.Errorf("failed to create notification service: %w", err)
 	}
 
-	sched := scheduler.NewScheduler()
+	sched := scheduler.NewTaskScheduler(storage, client, time.Duration(cfg.Settings.CheckIntervalSec)*time.Second)
 
 	return &SystemService{
 		appointmentService:  appointmentService,
@@ -84,42 +84,18 @@ func (s *SystemService) Start(ctx context.Context) error {
 			log.Warn("Check interval is too low, you may get banned by Luxmed")
 		}
 
-		p := domain.AppointmentSearch{
-			DoctorID:         apCfg.DoctorID,
-			CityID:           apCfg.CityID,
-			PlaceID:          apCfg.Location,
-			LanguageID:       10,
-			ServiceVariantID: apCfg.ServiceVariantID,
-			SearchDays:       14,
+		// create appointment
+		id, err := s.CreateAppointment(apCfg)
+		if err != nil {
+			return fmt.Errorf("failed to create appointment: %w", err)
 		}
+
+		// create all notification channels
 		// TODO: move this to a separate method
-		s.scheduler.AddTask(interval, func() {
-			log.WithFields(log.Fields{
-				"doctorID": p.DoctorID,
-				"cityID":   p.CityID,
-				"service":  p.ServiceVariantID,
-				"PlaceID":  p.PlaceID,
-			}).Info("Checking appointments")
-			slots, err := s.appointmentService.CheckAppointments(ctx, p)
-			if err != nil {
-				log.Errorf("Error checking appointments: %v", err)
-				return
-			}
-			if len(slots) > 0 {
-				if err := s.notificationService.Notify(ctx, slots); err != nil {
-					log.Errorf("Notification error: %v", err)
-				}
-			} else if len(slots) > 50 {
-				log.Infof("Found %d slots", len(slots))
-				message := "Found more than 50 slots"
-				if err := s.notificationService.SendTextMessage(ctx, message); err != nil {
-					log.Errorf("Notification error: %v", err)
-				}
-			} else {
-				log.Infof("No new slots found for service variant %d", p.ServiceVariantID)
-			}
-		})
-	}
+
+		// create search task
+		// TODO: move this to a separate method
+
 	s.scheduler.Start(ctx)
 
 	<-ctx.Done()
@@ -127,15 +103,15 @@ func (s *SystemService) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *SystemService) CreateAppointment(params domain.AppointmentRecord) error {
+func (s *SystemService) CreateAppointment(params domain.AppointmentRecord) (int, error) {
 	if params.Name == "" {
 		// TODO: add name generation
 		params.Name = "Appointment"
 	}
 	id, err := s.storage.CreateAppointment(params)
 	if err != nil {
-		return fmt.Errorf("failed to create appointment: %w", err)
+		return nil, fmt.Errorf("failed to create appointment: %w", err)
 	}
 	log.Infof("Created appointment with ID %d", id)
-	return nil
+	return id, nil
 }

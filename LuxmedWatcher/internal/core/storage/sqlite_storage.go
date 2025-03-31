@@ -139,12 +139,19 @@ func (s *SQLiteStorage) GetConfigParam(key string) (string, error) {
 
 // Appointments
 // SaveAppointmentRecord saves an appointment record to the database
-func (s *SQLiteStorage) SaveAppointmentRecord(appoint *domain.AppointmentRecord) error {
+func (s *SQLiteStorage) SaveAppointmentRecord(appoint *domain.AppointmentRecord) (int, error) {
 	_, err := s.db.Exec(`
 		INSERT INTO appointments (name, doctor_id, clinic_id, service_variant_id, city_id, language_id, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 	`, appoint.Name, appoint.DoctorID, appoint.ClinicID, appoint.ServiceVariantID, appoint.CityID, appoint.LanguageID, time.Now().Format(time.RFC3339))
-	return err
+
+	if err != nil {
+		return 0, err
+	}
+
+	var id int
+	err = s.db.Get(&id, "SELECT last_insert_rowid()")
+	return id, err
 }
 
 // GetAppointmentRecords returns all appointment records
@@ -202,6 +209,12 @@ func (s *SQLiteStorage) GetActiveAppointmentSearchTasks() ([]*domain.Appointment
 	var tasks []*domain.AppointmentSearchTask
 	err := s.db.Select(&tasks, "SELECT * FROM appointment_search_tasks WHERE is_active = 1")
 	return tasks, err
+}
+
+// UpdateLastCheckedTask updates the last checked time for an appointment search task
+func (s *SQLiteStorage) UpdateLastCheckedTask(taskID int, lastChecked time.Time) error {
+	_, err := s.db.Exec("UPDATE appointment_search_tasks SET last_checked_at = ? WHERE id = ?", lastChecked.Format(time.RFC3339), taskID)
+	return err
 }
 
 // NotificationChannels

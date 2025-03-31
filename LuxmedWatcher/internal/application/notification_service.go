@@ -3,6 +3,7 @@ package application
 import (
 	"LuxmedWatcher/internal/config"
 	"LuxmedWatcher/internal/core/notification"
+
 	// "LuxmedWatcher/internal/core/notification/channels"
 	"LuxmedWatcher/internal/domain"
 	"context"
@@ -25,24 +26,24 @@ func NewNotificationService(notify_cfg config.NotificationsConfig) (*Notificatio
 	for _, cfg := range notify_cfg {
 		for notifierType, conf := range cfg {
 			// Make channel name lowercase for case-insensitive matching
-            channelName := strings.ToLower(notifierType)
-            
-            // Check if this channel type exists
-            factory, exists := notification.GetNotifierFactory(channelName)
-            if !exists {
-                available := notification.GetAvailableNotifiers()
-                log.Errorf("Unknown notifier type: %s. Available types: %v", notifierType, available)
-                return nil, fmt.Errorf("unknown notifier type: %s", notifierType)
-            }
-            
-            // Create notifier instance
-            notifier, err := factory(conf)
-            if err != nil {
-                log.Errorf("Failed to create notifier: %v", err)
-                return nil, fmt.Errorf("failed to create notifier: %v", err)
-            }
-            
-            notifiers = append(notifiers, notifier)
+			channelName := strings.ToLower(notifierType)
+
+			// Check if this channel type exists
+			factory, exists := notification.GetNotifierFactory(channelName)
+			if !exists {
+				available := notification.GetAvailableNotifiers()
+				log.Errorf("Unknown notifier type: %s. Available types: %v", notifierType, available)
+				return nil, fmt.Errorf("unknown notifier type: %s", notifierType)
+			}
+
+			// Create notifier instance
+			notifier, err := factory(conf)
+			if err != nil {
+				log.Errorf("Failed to create notifier: %v", err)
+				return nil, fmt.Errorf("failed to create notifier: %v", err)
+			}
+
+			notifiers = append(notifiers, notifier)
 			log.Infof("Registered notifier: %s", notifier.ChannelName())
 		}
 	}
@@ -52,7 +53,7 @@ func NewNotificationService(notify_cfg config.NotificationsConfig) (*Notificatio
 	return &NotificationService{notifiers: notifiers}, nil
 }
 
-func (s *NotificationService) Notify(ctx context.Context, slots []domain.Appointment) error {
+func (s *NotificationService) Notify(ctx context.Context, slots []domain.AppointmentRecord) error {
 	if len(slots) == 0 {
 		return nil
 	}
@@ -85,7 +86,7 @@ func (s *NotificationService) SendTextMessage(ctx context.Context, msg string) e
 }
 
 // formatSlotsMessage форматирует сообщение с найденными слотами.
-func formatSlotsMessage(slots []domain.Appointment) string {
+func formatSlotsMessage(slots []domain.AppointmentRecord) string {
 	message := fmt.Sprintf("Found %d available appointment slots:\n\n", len(slots))
 	for i, slot := range slots {
 		message += fmt.Sprintf("Usługa: %s\n", slot.ServiceName)

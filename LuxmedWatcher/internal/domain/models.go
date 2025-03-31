@@ -2,25 +2,22 @@ package domain
 
 import "time"
 
-// Appointment — represents an appointment.
-type Appointment struct {
+// AppointmentSearchResult — represents a search result.
+type AppointmentSearchResult struct {
+	ServiceID    int `json:"service_id"`
 	ServiceName  string
-	ServiceID    int
-	DateTimeFrom time.Time
-
-	DoctorID   int
-	DoctorName string
-
-	ClinicID   int
-	ClinicName string
-
-	CityID int
-
-	LanguageID int
-	PlaceID    int
+	DoctorID     int `json:"doctor_id"`
+	DoctorName   string
+	ClinicID     int `json:"clinic_id"`
+	ClinicName   string
+	DateTimeFrom time.Time `json:"date_time_from"`
+	DateTimeTo   time.Time `json:"date_time_to"`
+	LangID       int       `json:"lang_id"`
+	LangName     string
+	Timestamp    time.Time
 }
 
-// Appointment
+// Appointment — represents an appointment.
 type AppointmentRecord struct {
 	ID               *int      `json:"id,omitempty" db:"id"`
 	Name             string    `json:"name" db:"name"`

@@ -13,7 +13,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params domain.Appointment, SearchDays int) ([]domain.Appointment, error) {
+func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params *domain.AppointmentRecord, SearchDays int) ([]*domain.AppointmentSearchResult, error) {
 	c.RefreshTokenIfNeeded(ctx)
 
 	u, err := url.Parse("https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/terms/index")
@@ -23,7 +23,7 @@ func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params doma
 	q := u.Query()
 	q.Set("searchPlace.id", fmt.Sprintf("%d", params.CityID))
 	q.Set("searchPlace.type", "0")
-	q.Set("serviceVariantId", fmt.Sprintf("%d", params.ServiceID))
+	q.Set("serviceVariantId", fmt.Sprintf("%d", params.ServiceVariantID))
 	q.Set("languageId", fmt.Sprintf("%d", params.LanguageID))
 	q.Set("searchDateFrom", time.Now().Format("2006-01-02"))
 	q.Set("searchDateTo", time.Now().AddDate(0, 0, SearchDays).Format("2006-01-02"))
@@ -32,8 +32,8 @@ func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params doma
 	if params.DoctorID > 0 {
 		q.Set("doctorsIds", fmt.Sprintf("%d", params.DoctorID))
 	}
-	if params.PlaceID > 0 {
-		q.Set("facilitiesIds", fmt.Sprintf("%d", params.PlaceID))
+	if params.ClinicID > 0 {
+		q.Set("facilitiesIds", fmt.Sprintf("%d", params.ClinicID))
 	}
 	u.RawQuery = q.Encode()
 
@@ -79,7 +79,7 @@ func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params doma
 		return nil, fmt.Errorf("GetAvailableAppointments response failed")
 	}
 
-	var results []domain.Appointment
+	var results []*domain.AppointmentSearchResult
 	var time_format = "2006-01-02T15:04:05"
 	for _, day := range raw.TermsForService.TermsForDays {
 		for _, t := range day.Terms {
@@ -88,15 +88,22 @@ func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params doma
 				log.Warn("Failed to parse time: ", t.DateTimeFrom)
 				continue
 			}
-			app := domain.Appointment{
-				DateTimeFrom: fromT,
-				DoctorID:     t.Doctor.ID,
-				DoctorName:   t.Doctor.FirstName + " " + t.Doctor.LastName,
-				ClinicID:     t.ClinicID,
-				ClinicName:   t.Clinic,
-				ServiceName:  "Unknown",
+			finishedT, err := time.Parse(time_format, t.DateTimeTo)
+			if err != nil {
+				log.Warn("Failed to parse time: ", t.DateTimeTo)
+				continue
 			}
-			results = append(results, app)
+			app := domain.AppointmentSearchResult{
+				ServiceID:    params.ServiceVariantID,
+				DoctorID:     t.Doctor.ID,
+				DoctorName:   fmt.Sprintf("%s %s", t.Doctor.FirstName, t.Doctor.LastName),
+				ClinicID:     t.ClinicID,
+				DateTimeFrom: fromT,
+				DateTimeTo:   finishedT,
+				LangID:       params.LanguageID,
+				Timestamp:    time.Now(),
+			}
+			results = append(results, &app)
 		}
 	}
 	return results, nil

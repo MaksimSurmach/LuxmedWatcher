@@ -17,7 +17,7 @@ type Storage interface {
 	// Appointment records
 	GetAppointmentRecords() ([]*domain.AppointmentRecord, error)
 	GetAppointmentRecord(id int) (*domain.AppointmentRecord, error)
-	SaveAppointmentRecord(record *domain.AppointmentRecord) error
+	SaveAppointmentRecord(record *domain.AppointmentRecord) (int, error)
 	DeleteAppointmentRecord(id int) error
 
 	// Appointment search tasks
@@ -26,6 +26,7 @@ type Storage interface {
 	SaveAppointmentSearchTask(task *domain.AppointmentSearchTask) error
 	DeleteAppointmentSearchTask(id int) error
 	GetActiveAppointmentSearchTasks() ([]*domain.AppointmentSearchTask, error)
+	UpdateLastCheckedTask(id int, lastChecked time.Time) error
 
 	// Notification channels
 	GetNotificationChannels() ([]*domain.NotificationChannels, error)

@@ -5,13 +5,13 @@ import (
 	"context"
 )
 
-// LuxmedClient — интерфейс, описывающий методы для работы с API Luxmed.
+// LuxmedClient — Luxmed API client interface.
 type LuxmedClient interface {
-	// Authenticate выполняет логин (с помощью логина/пароля) и сохраняет токены.
+	// Authenticate provides a way to authenticate with the Luxmed API.
 	Authenticate(ctx context.Context, creds domain.Credentials) error
 
 	ReAuthenticate(ctx context.Context) error
 
-	// GetAvailableAppointments возвращает список слотов по заданным параметрам.
-	GetAvailableAppointments(ctx context.Context, params domain.Appointment, SearchDays int) ([]domain.Appointment, error)
+	// GetAvailableAppointments makes a request to the Luxmed API to get available appointments.
+	GetAvailableAppointments(ctx context.Context, params *domain.AppointmentRecord, SearchDays int) ([]*domain.AppointmentSearchResult, error)
 }

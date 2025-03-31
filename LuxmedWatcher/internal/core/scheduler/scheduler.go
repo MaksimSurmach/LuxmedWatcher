@@ -1,8 +1,8 @@
 package scheduler
 
 import (
+	"LuxmedWatcher/internal/core/luxmed"
 	"LuxmedWatcher/internal/core/storage"
-	"LuxmedWatcher/internal/domain"
 	"context"
 	"sync"
 	"time"
@@ -10,151 +10,122 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
-// Scheduler описывает интерфейс планировщика,
-// который может добавлять задачи, запускать их и останавливать.
-type Scheduler interface {
-	AddTask(interval time.Duration, task func())
-	Start(ctx context.Context)
-	Stop()
-}
-
-// scheduledTask хранит параметры одной задачи (интервал и функция).
-type scheduledTask struct {
-	interval time.Duration
-	task     func()
-}
-
-// schedulerImpl — конкретная реализация Scheduler.
-type schedulerImpl struct {
-	tasks   []scheduledTask
-	quit    chan struct{}
-	wg      sync.WaitGroup
-	started bool
-}
-
-func NewScheduler() Scheduler {
-	return &schedulerImpl{
-		tasks: []scheduledTask{},
-		quit:  make(chan struct{}),
-		wg:    sync.WaitGroup{},
-	}
-}
-
-func (s *schedulerImpl) AddTask(interval time.Duration, task func()) {
-	s.tasks = append(s.tasks, scheduledTask{
-		interval: interval,
-		task:     task,
-	})
-}
-
-func (s *schedulerImpl) Start(ctx context.Context) {
-	if s.started {
-		log.Warn("Scheduler already started")
-		return
-	}
-	s.started = true
-
-	// Run goroutine for each task with context to handle graceful shutdown
-	for _, t := range s.tasks {
-		s.wg.Add(1)
-		go s.runTask(t, ctx)
-		log.Infof("Task with interval %v started", t.interval)
-	}
-}
-
-func (s *schedulerImpl) runTask(t scheduledTask, ctx context.Context) {
-	defer s.wg.Done()
-
-	ticker := time.NewTicker(t.interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			// Run task
-			t.task()
-
-		case <-ctx.Done():
-			// Context cancelled
-			return
-
-		case <-s.quit:
-			// SIGTERM received
-			return
-		}
-	}
-}
-
-func (s *schedulerImpl) Stop() {
-	if !s.started {
-		log.Warn("Scheduler already stopped.")
-		return
-	}
-
-	close(s.quit) // Signal all goroutines to stop
-	s.wg.Wait()   // Wait for all goroutines to finish
-	s.started = false
-}
-
-type TaskProcessor interface {
-	ProcessTask(ctx context.Context, task domain.AppointmentSearchTask) error
-}
-
 type TaskScheduler struct {
 	db            storage.Storage
-	processor     TaskProcessor
+	lc            luxmed.LuxmedClient
+	mu            sync.RWMutex
+	wg            sync.WaitGroup
 	checkInterval time.Duration
+	quit          chan struct{}
+	started       bool
 }
 
-func NewTaskScheduler(
-	db *storage.Storage,
-	processor TaskProcessor,
-	checkInterval time.Duration,
-) *TaskScheduler {
+// NewTaskScheduler creates a new task scheduler
+func NewTaskScheduler(db storage.Storage, lc luxmed.LuxmedClient, checkInterval time.Duration) *TaskScheduler {
 	return &TaskScheduler{
-		db:            *db,
-		processor:     processor,
+		db:            db,
+		lc:            lc,
 		checkInterval: checkInterval,
-	}
+		quit:          make(chan struct{}),
+		started:       bool(false)}
 }
 
+// Start starts the task scheduler
 func (s *TaskScheduler) Start(ctx context.Context) error {
-	ticker := time.NewTicker(s.checkInterval)
-	defer ticker.Stop()
+	if s.started {
+		log.Warn("Scheduler already started")
+		return nil
+	}
 
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if err := s.processPendingTasks(ctx); err != nil {
-				log.Printf("Error processing tasks: %v", err)
+	s.started = true
+	s.wg.Add(1)
+
+	// Start the main scheduling goroutine
+	go func() {
+		defer s.wg.Done()
+		ticker := time.NewTicker(s.checkInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				log.Info("Context cancelled, stopping scheduler")
+				return
+
+			case <-ticker.C:
+				if err := s.processPendingTasks(ctx); err != nil {
+					log.Printf("Error processing tasks: %v", err)
+				}
+
+			case <-s.quit:
+				log.Info("Quit signal received, stopping scheduler")
+				return
 			}
 		}
-	}
+	}()
+	return nil
 }
 
+// Stop stops the task scheduler
+func (s *TaskScheduler) Stop() {
+	if !s.started {
+		log.Warn("Scheduler not running")
+		return
+	}
+
+	close(s.quit)
+	s.wg.Wait()
+	s.started = false
+	log.Info("Scheduler stopped")
+}
+
+// processPendingTasks get all active tasks from the database and processes them
 func (s *TaskScheduler) processPendingTasks(ctx context.Context) error {
+	// Get all active tasks
 	tasks, err := s.db.GetActiveAppointmentSearchTasks()
 	if err != nil {
 		return err
 	}
 
 	for _, task := range tasks {
+		// Prepare appointment
+		appointment, err := s.db.GetAppointmentRecord(task.AppointmentID)
+		if err != nil {
+			log.Printf("Failed to get appointment %d: %v", task.AppointmentID, err)
+			continue
+		}
 		// Process task
-		err = s.processor.ProcessTask(ctx, task)
+		res, err := s.lc.GetAvailableAppointments(ctx, appointment, task.SearchDays)
 		if err != nil {
 			log.Printf("Failed to process task %d: %v", task.ID, err)
 			continue
 		}
 
 		// Update last checked time
-		err := s.db.UpdateLastChecked(task.ID, time.Now())
-		if err != nil {
+		if err := s.db.UpdateLastCheckedTask(*task.ID, time.Now()); err != nil {
 			log.Printf("Failed to update last checked time for task %d: %v", task.ID, err)
-			continue
 		}
+
+		// Check if there are any available appointments
+		if len(res) == 0 {
+			log.Printf("No available appointments for task %d", task.ID)
+			continue
+		} else {
+			log.Printf("Found %d available appointments for task %d", len(res), task.ID)
+		}
+
+		// Notify user
+		// todo: implement notification
 	}
 
 	return nil
+}
+
+// SetTaskInterval sets a custom check interval for a specific task
+func (s *TaskScheduler) SetTaskInterval(taskID int, interval time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.checkInterval = interval
+	log.Infof("Check interval for task %d set to %v", taskID, interval)
 }

@@ -86,7 +86,7 @@ func (ac *AppointmentConfig) ToAppointment() domain.AppointmentRecord {
 	return domain.AppointmentRecord{
 		DoctorID:         ac.DoctorID,
 		CityID:           ac.CityID,
-		PlaceID:          ac.Location,
+		ClinicID:         ac.Location,
 		ServiceVariantID: ac.ServiceVariantID,
 		LanguageID:       10,
 		CreatedAt:        time.Now().UTC(),
