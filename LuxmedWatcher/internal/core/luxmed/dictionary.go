@@ -63,6 +63,7 @@ func (c *luxmedClient) GetCities(ctx context.Context) ([]domain.City, error) {
 	return cities, nil
 }
 
+// GetDoctorsAndFacilities downloads doctors and facilities from the corresponding endpoint
 func (c *luxmedClient) GetDoctorsAndFacilities(ctx context.Context, cityID int, serviceVariantID int) (domain.DoctorsAndFacilities, error) {
 	req, err := c.newAuthRequest(ctx, http.MethodGet, DoctorsAndFacilitiesURL, nil)
 	if err != nil {
@@ -92,6 +93,7 @@ func (c *luxmedClient) GetDoctorsAndFacilities(ctx context.Context, cityID int, 
 	return doctorsAndFacilities, nil
 }
 
+// GetAvailableAppointments downloads available appointments from the corresponding endpoint
 func (c *luxmedClient) GetPopularServices(ctx context.Context) ([]domain.PopularService, error) {
 	req, err := c.newAuthRequest(ctx, http.MethodGet, PopularServicesURL, nil)
 	if err != nil {
@@ -118,6 +120,7 @@ func (c *luxmedClient) GetPopularServices(ctx context.Context) ([]domain.Popular
 	return popularServices.Services, nil
 }
 
+// GetRecentData downloads recent data from the corresponding endpoint
 func (c *luxmedClient) GetRecentData(ctx context.Context) ([]domain.AppointmentRecord, error) {
 	req, err := c.newAuthRequest(ctx, http.MethodGet, RecentSearchesURL, nil)
 	if err != nil {

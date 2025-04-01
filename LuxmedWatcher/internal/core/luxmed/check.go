@@ -13,6 +13,7 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// GetAvailableAppointments fetches appointsment from luxmed API
 func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params *domain.AppointmentRecord, SearchDays int) ([]*domain.AppointmentSearchResult, error) {
 	c.RefreshTokenIfNeeded(ctx)
 

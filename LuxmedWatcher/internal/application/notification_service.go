@@ -53,7 +53,7 @@ func NewNotificationService(notify_cfg config.NotificationsConfig) (*Notificatio
 	return &NotificationService{notifiers: notifiers}, nil
 }
 
-func (s *NotificationService) Notify(ctx context.Context, slots []domain.AppointmentRecord) error {
+func (s *NotificationService) Notify(ctx context.Context, slots []domain.AppointmentSearchResult) error {
 	if len(slots) == 0 {
 		return nil
 	}
@@ -86,7 +86,7 @@ func (s *NotificationService) SendTextMessage(ctx context.Context, msg string) e
 }
 
 // formatSlotsMessage форматирует сообщение с найденными слотами.
-func formatSlotsMessage(slots []domain.AppointmentRecord) string {
+func formatSlotsMessage(slots []domain.AppointmentSearchResult) string {
 	message := fmt.Sprintf("Found %d available appointment slots:\n\n", len(slots))
 	for i, slot := range slots {
 		message += fmt.Sprintf("Usługa: %s\n", slot.ServiceName)

@@ -10,6 +10,7 @@ type LuxmedClient interface {
 	// Authenticate provides a way to authenticate with the Luxmed API.
 	Authenticate(ctx context.Context, creds domain.Credentials) error
 
+	// ReAuthenticate may be delete?
 	ReAuthenticate(ctx context.Context) error
 
 	// GetAvailableAppointments makes a request to the Luxmed API to get available appointments.

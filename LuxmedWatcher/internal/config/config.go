@@ -36,14 +36,15 @@ type SettingsConfig struct {
 
 // AppointmentConfig — appointment configuration with id
 type AppointmentConfig struct {
-	DoctorID           int    `mapstructure:"doctorid"`
+	DoctorID           int    `mapstructure:"doctorid" json:"doctor_id"`
 	DoctorName         string `mapstructure:"doctor_name"`
 	CityName           string `mapstructure:"city_name"`
-	CityID             int    `mapstructure:"cityid"`
-	Location           int    `mapstructure:"location"`
+	CityID             int    `mapstructure:"cityid" json:"city_id"`
+	Location           int    `mapstructure:"location" json:"place_id"`
 	LocationName       string `mapstructure:"location_name"`
-	ServiceVariantID   int    `mapstructure:"serviceVariantId"`
+	ServiceVariantID   int    `mapstructure:"serviceVariantId" json:"service_id"`
 	ServiceVariantName string `mapstructure:"serviceVariantName"`
+	LanguageID         int    `mapstructure:"language_id" json:"language_id"`
 }
 
 type NotifierConfig map[string]interface{}

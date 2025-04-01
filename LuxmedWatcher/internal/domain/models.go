@@ -22,7 +22,7 @@ type AppointmentRecord struct {
 	ID               *int      `json:"id,omitempty" db:"id"`
 	Name             string    `json:"name" db:"name"`
 	CityID           int       `json:"city_id" db:"city_id"`
-	ServiceVariantID int       `json:"service_variant_id" db:"service_variant_id"`
+	ServiceVariantID int       `json:"service_id" db:"service_variant_id"`
 	DoctorID         int       `json:"doctor_id" db:"doctor_id"`
 	ClinicID         int       `json:"place_id" db:"clinic_id"`
 	LanguageID       int       `json:"language_id" db:"language_id"`

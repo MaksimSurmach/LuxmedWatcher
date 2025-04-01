@@ -19,6 +19,6 @@ func (s *AppointmentService) Authenticate(ctx context.Context, creds domain.Cred
 }
 
 // CheckAppointments checks for available appointments
-func (s *AppointmentService) CheckAppointments(ctx context.Context, params domain.AppointmentRecord, searchDays int) ([]domain.Appointment, error) {
+func (s *AppointmentService) CheckAppointments(ctx context.Context, params *domain.AppointmentRecord, searchDays int) ([]*domain.AppointmentSearchResult, error) {
 	return s.client.GetAvailableAppointments(ctx, params, searchDays)
 }

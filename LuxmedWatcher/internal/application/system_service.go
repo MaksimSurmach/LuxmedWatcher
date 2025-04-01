@@ -2,6 +2,7 @@ package application
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"time"
 
@@ -85,16 +86,18 @@ func (s *SystemService) Start(ctx context.Context) error {
 		}
 
 		// create appointment
-		id, err := s.CreateAppointment(apCfg)
+		id, err := s.CreateAppointment(&apCfg)
 		if err != nil {
 			return fmt.Errorf("failed to create appointment: %w", err)
 		}
+		log.Infof("Created appointment: %d", id)
 
 		// create all notification channels
 		// TODO: move this to a separate method
 
 		// create search task
 		// TODO: move this to a separate method
+	}
 
 	s.scheduler.Start(ctx)
 
@@ -103,15 +106,15 @@ func (s *SystemService) Start(ctx context.Context) error {
 	return nil
 }
 
-func (s *SystemService) CreateAppointment(params domain.AppointmentRecord) (int, error) {
-	if params.Name == "" {
-		// TODO: add name generation
-		params.Name = "Appointment"
-	}
-	id, err := s.storage.CreateAppointment(params)
+func (s *SystemService) CreateAppointment(config_appointment *config.AppointmentConfig) (int, error) {
+	data, _ := json.Marshal(config_appointment)
+	var apr domain.AppointmentRecord
+	json.Unmarshal(data, &apr)
+
+	appointmentid, err := s.storage.SaveAppointmentRecord(&apr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create appointment: %w", err)
+		return 0, fmt.Errorf("failed to save appointment: %w", err)
 	}
-	log.Infof("Created appointment with ID %d", id)
-	return id, nil
+
+	return appointmentid, nil
 }
