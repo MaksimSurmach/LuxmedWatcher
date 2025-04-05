@@ -91,7 +91,7 @@ func (s *TaskScheduler) processPendingTasks(ctx context.Context) error {
 		// Prepare appointment
 		appointment, err := s.db.GetAppointmentRecord(task.AppointmentID)
 		if err != nil {
-			log.Printf("Failed to get appointment %d: %v", task.AppointmentID, err)
+			log.Printf("Failed to get appointment id:%d - %v", task.AppointmentID, err)
 			continue
 		}
 		// Process task
@@ -117,7 +117,7 @@ func (s *TaskScheduler) processPendingTasks(ctx context.Context) error {
 				}
 			}
 		} else {
-			log.Infof("No available appointments found for task %d", task.ID)
+			log.Infof("No available appointments found for task %d", *task.ID)
 		}
 	}
 
@@ -125,10 +125,10 @@ func (s *TaskScheduler) processPendingTasks(ctx context.Context) error {
 }
 
 // SetTaskInterval sets a custom check interval for a specific task
-func (s *TaskScheduler) SetTaskInterval(taskID int, interval time.Duration) {
+func (s *TaskScheduler) SetTaskInterval(interval time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	s.checkInterval = interval
-	log.Infof("Check interval for task %d set to %v", taskID, interval)
+	log.Infof("Check interval set to %v", interval)
 }

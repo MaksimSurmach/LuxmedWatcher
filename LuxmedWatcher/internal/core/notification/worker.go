@@ -75,6 +75,7 @@ func (w *NotificationWorker) Start(ctx context.Context) {
 				if err := w.processNotifications(ctx); err != nil {
 					log.Errorf("Error processing notifications: %v", err)
 				}
+				// TODO: add a daily db cleanup
 			case event := <-eventChan:
 				// handle event
 				log.Infof("Received event: %s", event.Type)

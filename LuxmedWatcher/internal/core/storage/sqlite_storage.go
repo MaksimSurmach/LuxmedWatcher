@@ -46,43 +46,42 @@ func (s *SQLiteStorage) initSchema() error {
 	);
 
 	CREATE TABLE IF NOT EXISTS notification_channels (
-		id INTEGER autoincrement PRIMARY KEY,
+		id INTEGER PRIMARY KEY,
 		channel_type TEXT NOT NULL,
 		name TEXT NOT NULL,
 		config TEXT NOT NULL
 	);
 
 	CREATE TABLE IF NOT EXISTS appointments (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		name TEXT NOT NULL,
+		id INTEGER PRIMARY KEY,
+		name TEXT,
 		doctor_id INTEGER NOT NULL,
 		clinic_id INTEGER NOT NULL,
 		service_variant_id INTEGER NOT NULL,
-		clinic_id INTEGER NOT NULL,
 		city_id INTEGER NOT NULL,
-		language_id INTEGER NOT NULL,
-		created_at TEXT NOT NULL
+		language_id INTEGER,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 	);
 
 	CREATE TABLE IF NOT EXISTS appointments_notified (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		id INTEGER PRIMARY KEY,
 		appointment_search_id INTEGER NOT NULL,
         doctor_id INTEGER NOT NULL,
         doctor_name TEXT NOT NULL,
         clinic_id INTEGER NOT NULL,
         clinic_name TEXT NOT NULL,
         date_from TIMESTAMP NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
         status TEXT DEFAULT 'pending'
     );
 
 	CREATE TABLE IF NOT EXISTS appointment_search_tasks (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		apointment_id INTEGER NOT NULL,
+		id INTEGER PRIMARY KEY,
+		appointment_id INTEGER NOT NULL,
 		notification_channel_id INTEGER NOT NULL,
 		search_days INTEGER NOT NULL,
-		created_at TEXT NOT NULL,
-		last_checked_at TEXT NOT NULL,
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		last_checked_at TIMESTAMP,
 		status TEXT NOT NULL,
 		is_active BOOLEAN NOT NULL
 	);
@@ -145,9 +144,9 @@ func (s *SQLiteStorage) GetConfigParam(key string) (string, error) {
 // SaveAppointmentRecord saves an appointment record to the database
 func (s *SQLiteStorage) SaveAppointmentRecord(appoint *domain.AppointmentRecord) (int, error) {
 	_, err := s.db.Exec(`
-		INSERT INTO appointments (name, doctor_id, clinic_id, service_variant_id, city_id, language_id, created_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-	`, appoint.Name, appoint.DoctorID, appoint.ClinicID, appoint.ServiceVariantID, appoint.CityID, appoint.LanguageID, time.Now().Format(time.RFC3339))
+		INSERT INTO appointments (name, doctor_id, clinic_id, service_variant_id, city_id, language_id)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, appoint.Name, appoint.DoctorID, appoint.ClinicID, appoint.ServiceVariantID, appoint.CityID, appoint.LanguageID)
 
 	if err != nil {
 		return 0, err
@@ -167,9 +166,9 @@ func (s *SQLiteStorage) GetAppointmentRecords() ([]*domain.AppointmentRecord, er
 
 // GetAppointmentRecord returns an appointment record by its ID
 func (s *SQLiteStorage) GetAppointmentRecord(id int) (*domain.AppointmentRecord, error) {
-	var appointment *domain.AppointmentRecord
+	var appointment domain.AppointmentRecord
 	err := s.db.Get(&appointment, "SELECT * FROM appointments WHERE id = ?", id)
-	return appointment, err
+	return &appointment, err
 }
 
 // DeleteAppointmentRecord deletes an appointment record by its ID
@@ -202,9 +201,9 @@ func (s *SQLiteStorage) GetAppointmentSearchTasks() ([]*domain.AppointmentSearch
 // SaveAppointmentSearchTask saves an appointment search task to the database
 func (s *SQLiteStorage) SaveAppointmentSearchTask(task *domain.AppointmentSearchTask) error {
 	_, err := s.db.Exec(`
-		INSERT INTO appointment_search_tasks (created_at, last_checked_at, status, notification_channel, apointment_id, search_days, is_active)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, time.Now().Format(time.RFC3339), task.LastCheckedAt, task.Status, task.NotificationChannelID, task.AppointmentID, task.SearchDays, task.IsActive)
+		INSERT INTO appointment_search_tasks (last_checked_at, status, notification_channel_id, appointment_id, search_days, is_active)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, task.LastCheckedAt, task.Status, task.NotificationChannelID, task.AppointmentID, task.SearchDays, task.IsActive)
 	return err
 }
 

@@ -63,17 +63,6 @@ func (s *SystemService) Start(ctx context.Context) error {
 	}
 	log.Info("Authentication successful")
 
-	// Send initial notification to test the notification service
-	// TODO: move this to a separate method and fix text
-	testMsg := fmt.Sprintf("Test: Starting search for appointment: DoctorID=%d, CityID=%d",
-		s.config.Appointments[0].DoctorID,
-		s.config.Appointments[0].CityID,
-	)
-	if err := s.notificationService.SendTextMessage(ctx, testMsg); err != nil {
-		return fmt.Errorf("test notification failed: %w", err)
-	}
-	log.Info("Start notification sent")
-
 	// Create tasks for each appointment configuration
 	for _, apCfg := range s.config.Appointments {
 		interval := time.Duration(s.config.Settings.CheckIntervalSec) * time.Second
@@ -86,18 +75,40 @@ func (s *SystemService) Start(ctx context.Context) error {
 		}
 
 		// create appointment
+		// TODO: move this to a separate method,  and check if appointment already exists
 		id, err := s.CreateAppointment(&apCfg)
 		if err != nil {
 			return fmt.Errorf("failed to create appointment: %w", err)
 		}
 		log.Infof("Created appointment: %d", id)
 
-		// create all notification channels
-		// TODO: move this to a separate method
-
-		// create search task
-		// TODO: move this to a separate method
+		// create task
+		task := &domain.AppointmentSearchTask{
+			AppointmentID:         id,
+			SearchDays:            7,
+			NotificationChannelID: 1,
+			Status:                "active",
+			IsActive:              true,
+		}
+		// TODO: check if task already exists
+		if err := s.storage.SaveAppointmentSearchTask(task); err != nil {
+			return fmt.Errorf("failed to create task: %w", err)
+		}
+		// set task interval
+		s.scheduler.SetTaskInterval(interval)
+		log.Infof("Set interval for checking appointment: %s", interval)
 	}
+
+	// Send initial notification to test the notification service
+	// TODO: move this to a separate method and fix text
+	testMsg := fmt.Sprintf("Test: Starting search for appointment: DoctorID=%d, CityID=%d",
+		s.config.Appointments[0].DoctorID,
+		s.config.Appointments[0].CityID,
+	)
+	if err := s.notificationService.SendTextMessage(ctx, testMsg); err != nil {
+		return fmt.Errorf("test notification failed: %w", err)
+	}
+	log.Info("Start notification sent")
 
 	s.scheduler.Start(ctx)
 
