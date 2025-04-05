@@ -55,6 +55,8 @@ type Storage interface {
 	GetPendingNotifications() ([]*domain.AppointmentSearchResult, error)
 	// SetNotificationStatus sets the status of a notification
 	SetNotificationStatus(notificationID int, status string) error
+	// DeleteAppointmentNotification deletes an appointment notification by its ID
+	DeleteAppointmentNotification(notificationID int) error
 
 	// Reference data
 	// GetCities returns a list of cities

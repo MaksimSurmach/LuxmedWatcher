@@ -73,7 +73,6 @@ func (s *SQLiteStorage) initSchema() error {
         clinic_name TEXT NOT NULL,
         date_from TIMESTAMP NOT NULL,
         created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-        processed_by TEXT,
         status TEXT DEFAULT 'pending'
     );
 
@@ -274,6 +273,12 @@ func (s *SQLiteStorage) GetPendingNotifications() ([]*domain.AppointmentSearchRe
 // SetNotificationStatus sets the status of a notification
 func (s *SQLiteStorage) SetNotificationStatus(notificationID int, status string) error {
 	_, err := s.db.Exec("UPDATE appointments_notified SET status = ? WHERE id = ?", status, notificationID)
+	return err
+}
+
+// DeleteAppointmentNotification deletes an appointment notification by its ID
+func (s *SQLiteStorage) DeleteAppointmentNotification(notificationID int) error {
+	_, err := s.db.Exec("DELETE FROM appointments_notified WHERE id = ?", notificationID)
 	return err
 }
 

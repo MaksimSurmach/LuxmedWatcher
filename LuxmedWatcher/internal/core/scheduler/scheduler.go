@@ -106,11 +106,18 @@ func (s *TaskScheduler) processPendingTasks(ctx context.Context) error {
 			log.Printf("Failed to update last checked time for task %d: %v", task.ID, err)
 		}
 
-		for _, res := range search_result {
-			// Save appointment search result
-			if err := s.db.SaveAppointmentNotification(res); err != nil {
-				log.Printf("Failed to save appointment search result: %v", err)
+		// if search_result is not empty, save the results
+		if len(search_result) > 0 {
+			log.Infof("Found %d available appointments for task %d", len(search_result), task.ID)
+
+			for _, res := range search_result {
+				// Save appointment search result
+				if err := s.db.SaveAppointmentNotification(res); err != nil {
+					log.Printf("Failed to save appointment search result: %v", err)
+				}
 			}
+		} else {
+			log.Infof("No available appointments found for task %d", task.ID)
 		}
 	}
 

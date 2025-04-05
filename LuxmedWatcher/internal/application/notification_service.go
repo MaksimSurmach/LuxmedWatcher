@@ -5,7 +5,7 @@ import (
 	"LuxmedWatcher/internal/core/notification"
 
 	// "LuxmedWatcher/internal/core/notification/channels"
-	"LuxmedWatcher/internal/domain"
+
 	"context"
 	"fmt"
 	"strings"
@@ -53,25 +53,6 @@ func NewNotificationService(notify_cfg config.NotificationsConfig) (*Notificatio
 	return &NotificationService{notifiers: notifiers}, nil
 }
 
-func (s *NotificationService) Notify(ctx context.Context, slots []domain.AppointmentSearchResult) error {
-	if len(slots) == 0 {
-		return nil
-	}
-
-	message := formatSlotsMessage(slots)
-	var errs []error
-	for _, notifier := range s.notifiers {
-		if err := notifier.SendMessage(ctx, message); err != nil {
-			errs = append(errs, fmt.Errorf("notification via %T failed: %w", notifier, err))
-		}
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("notification errors: %v", errs)
-	}
-	return nil
-}
-
 func (s *NotificationService) SendTextMessage(ctx context.Context, msg string) error {
 	var errs []error
 	for _, notifier := range s.notifiers {
@@ -83,23 +64,4 @@ func (s *NotificationService) SendTextMessage(ctx context.Context, msg string) e
 		return fmt.Errorf("notification errors: %v", errs)
 	}
 	return nil
-}
-
-// formatSlotsMessage форматирует сообщение с найденными слотами.
-func formatSlotsMessage(slots []domain.AppointmentSearchResult) string {
-	message := fmt.Sprintf("Found %d available appointment slots:\n\n", len(slots))
-	for i, slot := range slots {
-		message += fmt.Sprintf("Usługa: %s\n", slot.ServiceName)
-		message += fmt.Sprintf("Lekarz: %s\n", slot.DoctorName)
-		message += fmt.Sprintf("Data: %s\n", slot.DateTimeFrom)
-		message += fmt.Sprintf("Miejsce: %s\n", slot.ClinicName)
-		if i < len(slots)-1 {
-			message += "\n"
-		}
-		if len(message) > 4000 {
-			message += fmt.Sprintf("\n...and %d more", len(slots)-i-1)
-			break
-		}
-	}
-	return message
 }

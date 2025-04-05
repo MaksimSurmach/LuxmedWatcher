@@ -16,6 +16,7 @@ type AppointmentSearchResult struct {
 	LangName     string
 	Timestamp    time.Time
 	TaskID       int `db:"appointment_search_id"`
+	ID           int `db:"id"`
 }
 
 // Appointment — represents an appointment.
