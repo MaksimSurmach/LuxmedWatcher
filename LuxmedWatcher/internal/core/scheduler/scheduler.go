@@ -95,7 +95,7 @@ func (s *TaskScheduler) processPendingTasks(ctx context.Context) error {
 			continue
 		}
 		// Process task
-		res, err := s.lc.GetAvailableAppointments(ctx, appointment, task.SearchDays)
+		search_result, err := s.lc.GetAvailableAppointments(ctx, appointment, task.SearchDays)
 		if err != nil {
 			log.Printf("Failed to process task %d: %v", task.ID, err)
 			continue
@@ -106,16 +106,12 @@ func (s *TaskScheduler) processPendingTasks(ctx context.Context) error {
 			log.Printf("Failed to update last checked time for task %d: %v", task.ID, err)
 		}
 
-		// Check if there are any available appointments
-		if len(res) == 0 {
-			log.Printf("No available appointments for task %d", task.ID)
-			continue
-		} else {
-			log.Printf("Found %d available appointments for task %d", len(res), task.ID)
+		for _, res := range search_result {
+			// Save appointment search result
+			if err := s.db.SaveAppointmentNotification(res); err != nil {
+				log.Printf("Failed to save appointment search result: %v", err)
+			}
 		}
-
-		// Notify user
-		// todo: implement notification
 	}
 
 	return nil

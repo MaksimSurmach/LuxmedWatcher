@@ -6,15 +6,16 @@ import "time"
 type AppointmentSearchResult struct {
 	ServiceID    int `json:"service_id"`
 	ServiceName  string
-	DoctorID     int `json:"doctor_id"`
-	DoctorName   string
-	ClinicID     int `json:"clinic_id"`
-	ClinicName   string
+	DoctorID     int       `json:"doctor_id" db:"doctor_id"`
+	DoctorName   string    `json:"doctor_name" db:"doctor_name"`
+	ClinicID     int       `json:"clinic_id"`
+	ClinicName   string    `json:"clinic_name" db:"clinic_name"`
 	DateTimeFrom time.Time `json:"date_time_from"`
 	DateTimeTo   time.Time `json:"date_time_to"`
 	LangID       int       `json:"lang_id"`
 	LangName     string
 	Timestamp    time.Time
+	TaskID       int `db:"appointment_search_id"`
 }
 
 // Appointment — represents an appointment.

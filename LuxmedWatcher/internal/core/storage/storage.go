@@ -50,9 +50,11 @@ type Storage interface {
 	// DeleteNotificationChannel deletes a notification channel by ID
 	DeleteNotificationChannel(id int) error
 	// GetNotificationChannelByType returns a single notification channel by type
-	SaveAppointmentNotified(searchID int, appointmentID int, doctorID int, clinicID int, dateFrom time.Time) error
-	// IsAppointmentNotified checks if the appointment has been notified
-	IsAppointmentNotified(searchID int, appointmentID int, doctorID int, clinicID int, dateFrom time.Time) (bool, error)
+	SaveAppointmentNotification(appointment *domain.AppointmentSearchResult) error
+	// GetPendingNotifications returns all pending notifications
+	GetPendingNotifications() ([]*domain.AppointmentSearchResult, error)
+	// SetNotificationStatus sets the status of a notification
+	SetNotificationStatus(notificationID int, status string) error
 
 	// Reference data
 	// GetCities returns a list of cities

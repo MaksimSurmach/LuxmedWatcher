@@ -99,6 +99,7 @@ func (c *luxmedClient) GetAvailableAppointments(ctx context.Context, params *dom
 				DoctorID:     t.Doctor.ID,
 				DoctorName:   fmt.Sprintf("%s %s", t.Doctor.FirstName, t.Doctor.LastName),
 				ClinicID:     t.ClinicID,
+				ClinicName:   t.Clinic,
 				DateTimeFrom: fromT,
 				DateTimeTo:   finishedT,
 				LangID:       params.LanguageID,

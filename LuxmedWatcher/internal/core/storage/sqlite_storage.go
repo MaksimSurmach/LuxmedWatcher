@@ -65,11 +65,16 @@ func (s *SQLiteStorage) initSchema() error {
 	);
 
 	CREATE TABLE IF NOT EXISTS appointments_notified (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		appointment_search_id INTEGER NOT NULL,
-		apointment_id INTEGER NOT NULL,
         doctor_id INTEGER NOT NULL,
+        doctor_name TEXT NOT NULL,
         clinic_id INTEGER NOT NULL,
-        date_from TEXT NOT NULL
+        clinic_name TEXT NOT NULL,
+        date_from TIMESTAMP NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        processed_by TEXT,
+        status TEXT DEFAULT 'pending'
     );
 
 	CREATE TABLE IF NOT EXISTS appointment_search_tasks (
@@ -247,20 +252,29 @@ func (s *SQLiteStorage) DeleteNotificationChannel(channelID int) error {
 	return err
 }
 
-// SaveAppointmentNotified saves an appointment notified record to the database
-func (s *SQLiteStorage) SaveAppointmentNotified(searchID int, appointmentID int, doctorID int, clinicID int, dateFrom time.Time) error {
+// SaveAppointmentNotification saves an search result to the database to be notified
+func (s *SQLiteStorage) SaveAppointmentNotification(appointment *domain.AppointmentSearchResult) error {
 	_, err := s.db.Exec(`
-		INSERT INTO appointments_notified (appointment_search_id, appointment_id, doctor_id, clinic_id, date_from)
-		VALUES (?, ?, ?, ?, ?)
-	`, searchID, appointmentID, doctorID, clinicID, dateFrom.Format(time.RFC3339))
+		INSERT INTO appointments_notified (appointment_search_id, doctor_id, doctor_name, clinic_id, clinic_name, date_from)
+		VALUES (?, ?, ?, ?, ?, ?)
+	`, appointment.TaskID, appointment.DoctorID, appointment.DoctorName, appointment.ClinicID, appointment.ClinicName, appointment.DateTimeFrom.Format(time.RFC3339))
 	return err
 }
 
-// GetAppointmentNotified returns an appointment notified record by its ID
-func (s *SQLiteStorage) IsAppointmentNotified(searchID int, appointmentID int, doctorID int, clinicID int, dateFrom time.Time) (bool, error) {
-	var count int
-	err := s.db.Get(&count, "SELECT COUNT(*) FROM appointments_notified WHERE appointment_search_id = ? AND appointment_id = ? AND doctor_id = ? AND clinic_id = ? AND date_from = ?", searchID, appointmentID, doctorID, clinicID, dateFrom.Format(time.RFC3339))
-	return count > 0, err
+// GetPendingNotifications returns all pending notifications
+func (s *SQLiteStorage) GetPendingNotifications() ([]*domain.AppointmentSearchResult, error) {
+	var notifications []*domain.AppointmentSearchResult
+	err := s.db.Select(&notifications, "SELECT * FROM appointments_notified WHERE status = 'pending'")
+	if err != nil {
+		return nil, err
+	}
+	return notifications, nil
+}
+
+// SetNotificationStatus sets the status of a notification
+func (s *SQLiteStorage) SetNotificationStatus(notificationID int, status string) error {
+	_, err := s.db.Exec("UPDATE appointments_notified SET status = ? WHERE id = ?", status, notificationID)
+	return err
 }
 
 // Reference data
