@@ -55,10 +55,11 @@ const (
 )
 
 type flow struct {
-	Kind         flowKind
-	Login        string
-	CitySettings bool
-	Watch        domain.Watch
+	Kind                 flowKind
+	Login                string
+	CitySettings         bool
+	ProcedureSearchQuery string
+	Watch                domain.Watch
 }
 
 func New(api *tgbotapi.BotAPI, db *storage.DB, catalog *i18n.Catalog, cryptor *security.Cryptor, cfg Config, logger *slog.Logger) *Bot {
@@ -233,9 +234,9 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 	case flowCitySearch:
 		b.showCitySearchResults(ctx, user, state, text)
 	case flowWatchService:
-		b.showProcedureMenu(ctx, user, state)
+		b.handleProcedureText(ctx, user, state, text)
 	case flowWatchSearch:
-		b.showProcedureSearchResults(ctx, user, state, text)
+		b.handleProcedureText(ctx, user, state, text)
 	case flowWatchDoctor:
 		id, name, ok := parseIDName(text)
 		if !ok {
@@ -325,10 +326,23 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		state.Kind = flowWatchSearch
 		b.setFlow(user.ID, state)
 		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
+
 	case data == "proc:all":
 		state := b.getFlow(user.ID)
 		if state != nil {
-			b.showAllProcedures(ctx, user, state)
+			b.showProcedureLetters(ctx, user, state)
+		}
+
+	case strings.HasPrefix(data, "procletter:"):
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.handleProcedureLetterPage(ctx, user, state, data)
+		}
+
+	case strings.HasPrefix(data, "procsearchpage:"):
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.handleProcedureSearchPage(ctx, user, state, data)
 		}
 	case strings.HasPrefix(data, "proc:"):
 		b.handleProcedure(ctx, user, data)
@@ -492,26 +506,37 @@ func (b *Bot) showProcedureMenu(ctx context.Context, user domain.User, state *fl
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
-	recent, _ := b.db.RecentProcedures(ctx, state.Watch.CityID, 6)
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.service"), procedureMenuKeyboard(recent, b.catalog, user.Locale))
+
+	state.Kind = flowWatchService
+	state.ProcedureSearchQuery = ""
+	b.setFlow(user.ID, state)
+
+	recent, _ := b.db.RecentProcedures(ctx, state.Watch.CityID, 10)
+	if len(recent) > 0 {
+		title := b.catalog.T(user.Locale, "flow.watch.service") + "\n\nПоследние процедуры. Можно нажать номер или написать часть названия."
+		b.sendProcedureOptions(user, title, recent, procedureResultsKeyboard(recent, "", "", b.catalog, user.Locale))
+		return
+	}
+
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.service"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
 }
 
 func (b *Bot) showProcedureSearchResults(ctx context.Context, user domain.User, state *flow, query string) {
-	procedures, err := b.db.SearchProcedures(ctx, state.Watch.CityID, query, 8)
-	if err != nil || len(procedures) == 0 {
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
+	query = strings.TrimSpace(query)
+	if query == "" {
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
 		return
 	}
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.service_results"), procedureListKeyboard(procedures, b.catalog, user.Locale))
+
+	state.Kind = flowWatchSearch
+	state.ProcedureSearchQuery = query
+	b.setFlow(user.ID, state)
+
+	b.showProcedureSearchResultsPage(ctx, user, state, query, 0)
 }
 
 func (b *Bot) showAllProcedures(ctx context.Context, user domain.User, state *flow) {
-	procedures, err := b.db.SearchProcedures(ctx, state.Watch.CityID, "", 20)
-	if err != nil || len(procedures) == 0 {
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
-		return
-	}
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.service_all"), procedureListKeyboard(procedures, b.catalog, user.Locale))
+	b.showProcedureLetters(ctx, user, state)
 }
 
 func (b *Bot) handleProcedure(ctx context.Context, user domain.User, data string) {
@@ -519,20 +544,25 @@ func (b *Bot) handleProcedure(ctx context.Context, user domain.User, data string
 	if state == nil {
 		return
 	}
+
 	id, err := strconv.Atoi(strings.TrimPrefix(data, "proc:"))
 	if err != nil {
 		return
 	}
+
 	proc, err := b.db.Procedure(ctx, state.Watch.CityID, id)
 	if err != nil {
+		b.logger.Warn(
+			"procedure callback not found",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"procedure_id", id,
+			"err", err,
+		)
 		return
 	}
-	state.Watch.ServiceID = proc.ID
-	state.Watch.ServiceName = proc.Name
-	state.Watch.DoctorMode = domain.DoctorModeAny
-	state.Kind = flowWatchFacility
-	b.setFlow(user.ID, state)
-	b.showFacilityMenu(ctx, user, state)
+
+	b.selectProcedure(ctx, user, state, proc)
 }
 
 func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flow) {
@@ -615,28 +645,358 @@ func (b *Bot) ensureCities(ctx context.Context, user domain.User) ([]domain.City
 func (b *Bot) ensureProcedures(ctx context.Context, user domain.User, city domain.City) error {
 	existing, err := b.db.SearchProcedures(ctx, city.ID, "", 1)
 	if err != nil {
+		b.logger.Warn(
+			"check existing procedures failed",
+			"user_id", user.ID,
+			"city_id", city.ID,
+			"city_name", city.Name,
+			"err", err,
+		)
 		return err
 	}
+
+	b.logger.Info(
+		"ensure procedures started",
+		"user_id", user.ID,
+		"city_id", city.ID,
+		"city_name", city.Name,
+		"existing_count", len(existing),
+	)
+
 	if len(existing) > 0 {
+		b.logger.Info(
+			"procedures already cached",
+			"user_id", user.ID,
+			"city_id", city.ID,
+			"city_name", city.Name,
+		)
 		return nil
 	}
+
 	client, err := b.authenticatedLuxMedClient(ctx, user)
 	if err != nil {
+		b.logger.Warn(
+			"authenticate luxmed client for procedures failed",
+			"user_id", user.ID,
+			"city_id", city.ID,
+			"city_name", city.Name,
+			"err", err,
+		)
 		return err
 	}
+
 	services, err := client.GetServices(ctx)
 	if err != nil {
+		b.logger.Warn(
+			"load luxmed services failed",
+			"user_id", user.ID,
+			"city_id", city.ID,
+			"city_name", city.Name,
+			"err", err,
+		)
 		return err
 	}
+
+	b.logger.Info(
+		"luxmed services parsed",
+		"user_id", user.ID,
+		"city_id", city.ID,
+		"city_name", city.Name,
+		"services_count", len(services),
+	)
+
 	procedures := make([]domain.Procedure, 0, len(services))
 	for _, service := range services {
-		procedures = append(procedures, domain.Procedure{ID: service.ID, Name: service.Name})
+		procedures = append(procedures, domain.Procedure{
+			ID:   service.ID,
+			Name: service.Name,
+		})
 	}
+
 	recent, err := client.GetRecentProcedures(ctx)
-	if err == nil {
+	if err != nil {
+		b.logger.Warn(
+			"load recent procedures failed",
+			"user_id", user.ID,
+			"city_id", city.ID,
+			"city_name", city.Name,
+			"err", err,
+		)
+	} else {
+		b.logger.Info(
+			"recent procedures parsed",
+			"user_id", user.ID,
+			"city_id", city.ID,
+			"city_name", city.Name,
+			"recent_count", len(recent),
+		)
 		procedures = append(procedures, recent...)
 	}
-	return b.db.UpsertProcedures(ctx, city, procedures)
+
+	if len(procedures) == 0 {
+		b.logger.Warn(
+			"no procedures parsed before upsert",
+			"user_id", user.ID,
+			"city_id", city.ID,
+			"city_name", city.Name,
+		)
+	}
+
+	if err := b.db.UpsertProcedures(ctx, city, procedures); err != nil {
+		b.logger.Warn(
+			"upsert procedures failed",
+			"user_id", user.ID,
+			"city_id", city.ID,
+			"city_name", city.Name,
+			"procedures_count", len(procedures),
+			"err", err,
+		)
+		return err
+	}
+
+	after, err := b.db.SearchProcedures(ctx, city.ID, "", 3)
+	if err != nil {
+		b.logger.Warn(
+			"check procedures after upsert failed",
+			"user_id", user.ID,
+			"city_id", city.ID,
+			"city_name", city.Name,
+			"err", err,
+		)
+		return err
+	}
+
+	b.logger.Info(
+		"procedures upserted",
+		"user_id", user.ID,
+		"city_id", city.ID,
+		"city_name", city.Name,
+		"procedures_count", len(procedures),
+		"db_sample_count", len(after),
+	)
+
+	return nil
+}
+
+func (b *Bot) handleProcedureText(ctx context.Context, user domain.User, state *flow, text string) {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		b.showProcedureMenu(ctx, user, state)
+		return
+	}
+
+	if id, _, ok := parseIDName(text); ok {
+		proc, err := b.db.Procedure(ctx, state.Watch.CityID, id)
+		if err != nil {
+			b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
+			return
+		}
+
+		b.selectProcedure(ctx, user, state, proc)
+		return
+	}
+
+	if id, err := strconv.Atoi(text); err == nil && id > 0 {
+		proc, err := b.db.Procedure(ctx, state.Watch.CityID, id)
+		if err != nil {
+			b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
+			return
+		}
+
+		b.selectProcedure(ctx, user, state, proc)
+		return
+	}
+
+	b.showProcedureSearchResults(ctx, user, state, text)
+}
+
+func (b *Bot) selectProcedure(ctx context.Context, user domain.User, state *flow, proc domain.Procedure) {
+	state.Watch.ServiceID = proc.ID
+	state.Watch.ServiceName = proc.Name
+	state.Watch.DoctorMode = domain.DoctorModeAny
+	state.Kind = flowWatchFacility
+
+	b.setFlow(user.ID, state)
+
+	b.logger.Info(
+		"procedure selected",
+		"user_id", user.ID,
+		"city_id", state.Watch.CityID,
+		"city_name", state.Watch.CityName,
+		"procedure_id", proc.ID,
+		"procedure_name", proc.Name,
+	)
+
+	b.showFacilityMenu(ctx, user, state)
+}
+
+func (b *Bot) showProcedureLetters(ctx context.Context, user domain.User, state *flow) {
+	letters, err := b.db.ProcedureLetters(ctx, state.Watch.CityID)
+	if err != nil || len(letters) == 0 {
+		b.logger.Warn(
+			"procedure letters not found",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+			"err", err,
+		)
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
+		return
+	}
+
+	state.Kind = flowWatchService
+	state.ProcedureSearchQuery = ""
+	b.setFlow(user.ID, state)
+
+	b.send(user, "Выберите первую букву процедуры.", procedureLettersKeyboard(letters, b.catalog, user.Locale))
+}
+
+func (b *Bot) handleProcedureLetterPage(ctx context.Context, user domain.User, state *flow, data string) {
+	parts := strings.Split(data, ":")
+	if len(parts) != 3 {
+		return
+	}
+
+	letter := parts[1]
+	page, err := strconv.Atoi(parts[2])
+	if err != nil || page < 0 {
+		page = 0
+	}
+
+	b.showProcedureLetterPage(ctx, user, state, letter, page)
+}
+
+func (b *Bot) showProcedureLetterPage(ctx context.Context, user domain.User, state *flow, letter string, page int) {
+	const pageSize = 10
+
+	if page < 0 {
+		page = 0
+	}
+
+	offset := page * pageSize
+	procedures, err := b.db.ProceduresByLetter(ctx, state.Watch.CityID, letter, pageSize+1, offset)
+
+	b.logger.Info(
+		"show procedure letter page",
+		"user_id", user.ID,
+		"city_id", state.Watch.CityID,
+		"city_name", state.Watch.CityName,
+		"letter", letter,
+		"page", page,
+		"procedures_count", len(procedures),
+		"err", err,
+	)
+
+	if err != nil || len(procedures) == 0 {
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
+		return
+	}
+
+	hasNext := len(procedures) > pageSize
+	if hasNext {
+		procedures = procedures[:pageSize]
+	}
+
+	previousCallback := ""
+	if page > 0 {
+		previousCallback = fmt.Sprintf("procletter:%s:%d", letter, page-1)
+	}
+
+	nextCallback := ""
+	if hasNext {
+		nextCallback = fmt.Sprintf("procletter:%s:%d", letter, page+1)
+	}
+
+	title := fmt.Sprintf(
+		"Процедуры на букву %s. Показаны %d–%d.\n\nНажмите номер под сообщением или напишите новый поисковый запрос.",
+		letter,
+		offset+1,
+		offset+len(procedures),
+	)
+
+	b.sendProcedureOptions(user, title, procedures, procedureResultsKeyboard(procedures, previousCallback, nextCallback, b.catalog, user.Locale))
+}
+
+func (b *Bot) handleProcedureSearchPage(ctx context.Context, user domain.User, state *flow, data string) {
+	pageText := strings.TrimPrefix(data, "procsearchpage:")
+	page, err := strconv.Atoi(pageText)
+	if err != nil || page < 0 {
+		page = 0
+	}
+
+	query := strings.TrimSpace(state.ProcedureSearchQuery)
+	if query == "" {
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
+		return
+	}
+
+	b.showProcedureSearchResultsPage(ctx, user, state, query, page)
+}
+
+func (b *Bot) showProcedureSearchResultsPage(ctx context.Context, user domain.User, state *flow, query string, page int) {
+	const pageSize = 10
+
+	if page < 0 {
+		page = 0
+	}
+
+	offset := page * pageSize
+	procedures, err := b.db.SearchProceduresPage(ctx, state.Watch.CityID, query, pageSize+1, offset)
+
+	b.logger.Info(
+		"search procedures page",
+		"user_id", user.ID,
+		"city_id", state.Watch.CityID,
+		"city_name", state.Watch.CityName,
+		"query", query,
+		"page", page,
+		"procedures_count", len(procedures),
+		"err", err,
+	)
+
+	if err != nil || len(procedures) == 0 {
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
+		return
+	}
+
+	hasNext := len(procedures) > pageSize
+	if hasNext {
+		procedures = procedures[:pageSize]
+	}
+
+	previousCallback := ""
+	if page > 0 {
+		previousCallback = fmt.Sprintf("procsearchpage:%d", page-1)
+	}
+
+	nextCallback := ""
+	if hasNext {
+		nextCallback = fmt.Sprintf("procsearchpage:%d", page+1)
+	}
+
+	state.Kind = flowWatchSearch
+	state.ProcedureSearchQuery = query
+	b.setFlow(user.ID, state)
+
+	title := fmt.Sprintf(
+		"Результаты поиска по “%s”. Показаны %d–%d.\n\nНажмите номер под сообщением или напишите новый поисковый запрос.",
+		query,
+		offset+1,
+		offset+len(procedures),
+	)
+
+	b.sendProcedureOptions(user, title, procedures, procedureResultsKeyboard(procedures, previousCallback, nextCallback, b.catalog, user.Locale))
+}
+
+func (b *Bot) sendProcedureOptions(user domain.User, title string, procedures []domain.Procedure, markup any) {
+	var lines []string
+	lines = append(lines, strings.TrimSpace(title))
+
+	for i, proc := range procedures {
+		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, proc.Name, proc.ID))
+	}
+
+	b.send(user, strings.Join(lines, "\n\n"), markup)
 }
 
 func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domain.City, procedureID int) error {

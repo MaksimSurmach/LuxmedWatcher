@@ -104,16 +104,64 @@ func citySearchKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardM
 	)
 }
 
-func procedureMenuKeyboard(recent []domain.Procedure, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
-	var rows [][]tgbotapi.InlineKeyboardButton
-	for _, proc := range recent {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(proc.Name, fmt.Sprintf("proc:%d", proc.ID))))
-	}
-	rows = append(rows,
+func procedureMenuKeyboard(_ []domain.Procedure, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.search"), "proc:search")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_procedures"), "proc:all")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
 	)
+}
+
+func procedureLettersKeyboard(letters []string, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	for i := 0; i < len(letters); i += 5 {
+		var row []tgbotapi.InlineKeyboardButton
+		for j := i; j < len(letters) && j < i+5; j++ {
+			letter := letters[j]
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(letter, fmt.Sprintf("procletter:%s:0", letter)))
+		}
+		rows = append(rows, row)
+	}
+
+	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.search"), "proc:search")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
+	)
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func procedureResultsKeyboard(procedures []domain.Procedure, previousCallback string, nextCallback string, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	for i := 0; i < len(procedures); i += 5 {
+		var row []tgbotapi.InlineKeyboardButton
+		for j := i; j < len(procedures) && j < i+5; j++ {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(fmt.Sprintf("%d", j+1), fmt.Sprintf("proc:%d", procedures[j].ID)))
+		}
+		rows = append(rows, row)
+	}
+
+	var nav []tgbotapi.InlineKeyboardButton
+	if previousCallback != "" {
+		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.previous"), previousCallback))
+	}
+	if nextCallback != "" {
+		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.next"), nextCallback))
+	}
+	if len(nav) > 0 {
+		rows = append(rows, nav)
+	}
+
+	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.search"), "proc:search"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_procedures"), "proc:all"),
+		),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
+	)
+
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 

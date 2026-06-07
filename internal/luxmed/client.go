@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -165,19 +166,27 @@ func (c *HTTPClient) GetCities(ctx context.Context) ([]domain.City, error) {
 }
 
 func (c *HTTPClient) GetServices(ctx context.Context) ([]domain.Service, error) {
-	var raw struct {
-		Children []struct {
-			ID   int    `json:"id"`
-			Name string `json:"name"`
-		} `json:"children"`
-	}
-	if err := c.getJSON(ctx, ServiceVariantsGroupsURL, &raw); err != nil {
+	var payload any
+	if err := c.getJSON(ctx, ServiceVariantsGroupsURL, &payload); err != nil {
+		slog.Default().Warn("luxmed get services failed", "err", err)
 		return nil, err
 	}
-	services := make([]domain.Service, 0, len(raw.Children))
-	for _, item := range raw.Children {
-		services = append(services, domain.Service{ID: item.ID, Name: item.Name})
+
+	raw, _ := json.Marshal(payload)
+	sample := string(raw)
+	if len(sample) > 2000 {
+		sample = sample[:2000]
 	}
+
+	services := normalizeServices(payload)
+
+	slog.Default().Info(
+		"luxmed services loaded",
+		"raw_bytes", len(raw),
+		"parsed_services", len(services),
+		"sample", sample,
+	)
+
 	return services, nil
 }
 

@@ -1,6 +1,7 @@
 services:
   luxmed-watcher:
-    image: ghcr.io/maksimsurmach/luxmedwatcher:${LUXMED_WATCHER_VERSION:-v0.1.0}
+    build:
+      context: .
     env_file: .env
     restart: unless-stopped
     volumes:

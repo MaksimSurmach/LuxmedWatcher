@@ -490,23 +490,88 @@ func (db *DB) RecentProcedures(ctx context.Context, cityID int, limit int) ([]do
 }
 
 func (db *DB) SearchProcedures(ctx context.Context, cityID int, query string, limit int) ([]domain.Procedure, error) {
+	return db.SearchProceduresPage(ctx, cityID, query, limit, 0)
+}
+
+func (db *DB) SearchProceduresPage(ctx context.Context, cityID int, query string, limit int, offset int) ([]domain.Procedure, error) {
 	query = strings.TrimSpace(strings.ToLower(query))
 	sqlQuery := `
 		SELECT id, city_id, city_name, name, is_recent, updated_at
 		FROM luxmed_procedures
 		WHERE city_id=?`
 	args := []any{cityID}
+
 	if query != "" {
 		sqlQuery += ` AND lower(name) LIKE ?`
 		args = append(args, "%"+query+"%")
 	}
-	sqlQuery += ` ORDER BY name LIMIT ?`
-	args = append(args, limit)
+
+	sqlQuery += ` ORDER BY name`
+
+	if limit > 0 {
+		sqlQuery += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+
 	rows, err := db.sql.QueryContext(ctx, sqlQuery, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+
+	return scanProcedures(rows)
+}
+
+func (db *DB) ProcedureLetters(ctx context.Context, cityID int) ([]string, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT DISTINCT substr(name, 1, 1)
+		FROM luxmed_procedures
+		WHERE city_id=? AND name <> ''
+		ORDER BY substr(name, 1, 1)
+	`, cityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var letters []string
+	for rows.Next() {
+		var letter string
+		if err := rows.Scan(&letter); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(letter) != "" {
+			letters = append(letters, letter)
+		}
+	}
+
+	return letters, rows.Err()
+}
+
+func (db *DB) ProceduresByLetter(ctx context.Context, cityID int, letter string, limit int, offset int) ([]domain.Procedure, error) {
+	letter = strings.TrimSpace(letter)
+	if letter == "" {
+		return nil, nil
+	}
+
+	sqlQuery := `
+		SELECT id, city_id, city_name, name, is_recent, updated_at
+		FROM luxmed_procedures
+		WHERE city_id=? AND substr(name, 1, 1)=?
+		ORDER BY name`
+	args := []any{cityID, letter}
+
+	if limit > 0 {
+		sqlQuery += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+
+	rows, err := db.sql.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
 	return scanProcedures(rows)
 }
 
