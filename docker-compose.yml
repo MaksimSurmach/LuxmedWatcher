@@ -1,0 +1,12 @@
+services:
+  luxmed-watcher:
+    image: ghcr.io/maksimsurmach/luxmedwatcher:${LUXMED_WATCHER_VERSION:-v0.1.0}
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - luxmed-watcher-data:/app/data
+    ports:
+      - "8080:8080"
+
+volumes:
+  luxmed-watcher-data:
