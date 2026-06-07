@@ -52,6 +52,7 @@ const (
 	flowWatchSearch   flowKind = "watch_search"
 	flowWatchDoctor   flowKind = "watch_doctor"
 	flowWatchFacility flowKind = "watch_facility"
+	flowWatchTime     flowKind = "watch_time"
 )
 
 type flow struct {
@@ -250,7 +251,9 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 		b.setFlow(user.ID, state)
 		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility"), cancelKeyboard(b.catalog, user.Locale))
 	case flowWatchFacility:
-		b.finishFacilityStep(ctx, user, state, text)
+		b.handleFacilityText(ctx, user, state, text)
+	case flowWatchTime:
+		b.handleTimeText(ctx, user, state, text)
 	}
 }
 
@@ -326,13 +329,16 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		state.Kind = flowWatchSearch
 		b.setFlow(user.ID, state)
 		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
-
+	case data == "proc:popular":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.showPopularProcedures(ctx, user, state)
+		}
 	case data == "proc:all":
 		state := b.getFlow(user.ID)
 		if state != nil {
 			b.showProcedureLetters(ctx, user, state)
 		}
-
 	case strings.HasPrefix(data, "procletter:"):
 		state := b.getFlow(user.ID)
 		if state != nil {
@@ -346,22 +352,110 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		}
 	case strings.HasPrefix(data, "proc:"):
 		b.handleProcedure(ctx, user, data)
+
 	case data == "fac:any":
 		state := b.getFlow(user.ID)
 		if state != nil {
 			state.Watch.FacilityMode = domain.FacilityModeAll
+			state.Watch.FacilityIDs = nil
+			state.Watch.FacilityNames = nil
 			b.setFlow(user.ID, state)
 			b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
 		}
+
 	case data == "fac:all":
 		state := b.getFlow(user.ID)
 		if state != nil {
-			b.showAllFacilities(ctx, user, state)
+			b.showFacilityPage(ctx, user, state, "all", 0)
 		}
+
 	case data == "fac:favs":
 		state := b.getFlow(user.ID)
 		if state != nil {
-			b.showFavoriteFacilities(ctx, user, state, 0)
+			b.showFacilityPage(ctx, user, state, "favs", 0)
+		}
+
+	case strings.HasPrefix(data, "facpage:"):
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.handleFacilityPage(ctx, user, state, data)
+		}
+
+	case strings.HasPrefix(data, "facsel:"):
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.handleFacilityToggle(ctx, user, state, data)
+		}
+
+	case data == "facclear":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			state.Watch.FacilityIDs = nil
+			state.Watch.FacilityNames = nil
+			state.Watch.FacilityMode = ""
+			b.setFlow(user.ID, state)
+			b.showFacilityPage(ctx, user, state, "all", 0)
+		}
+
+	case data == "facdone":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.finishSelectedFacilities(ctx, user, state)
+		}
+
+	case data == "fac:any":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			state.Watch.FacilityMode = domain.FacilityModeAll
+			state.Watch.FacilityIDs = nil
+			state.Watch.FacilityNames = nil
+			b.setFlow(user.ID, state)
+			b.showTimeStep(user, state)
+		}
+
+	case data == "fac:all":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.showFacilityPage(ctx, user, state, "all", 0)
+		}
+
+	case data == "fac:favs":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.showFacilityPage(ctx, user, state, "favs", 0)
+		}
+
+	case strings.HasPrefix(data, "facpage:"):
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.handleFacilityPage(ctx, user, state, data)
+		}
+
+	case strings.HasPrefix(data, "facsel:"):
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.handleFacilityToggle(ctx, user, state, data)
+		}
+
+	case data == "facclear":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			state.Watch.FacilityIDs = nil
+			state.Watch.FacilityNames = nil
+			state.Watch.FacilityMode = ""
+			b.setFlow(user.ID, state)
+			b.showFacilityPage(ctx, user, state, "all", 0)
+		}
+
+	case data == "facdone":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.finishSelectedFacilities(ctx, user, state)
+		}
+	case strings.HasPrefix(data, "time:"):
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.handleTimeCallback(ctx, user, state, data)
 		}
 	case strings.HasPrefix(data, "fac:"):
 		b.handleFacility(ctx, user, data)
@@ -511,14 +605,175 @@ func (b *Bot) showProcedureMenu(ctx context.Context, user domain.User, state *fl
 	state.ProcedureSearchQuery = ""
 	b.setFlow(user.ID, state)
 
-	recent, _ := b.db.RecentProcedures(ctx, state.Watch.CityID, 10)
+	b.refreshRecentProcedures(ctx, user, state)
+
+	recent, err := b.db.RecentProcedures(ctx, state.Watch.CityID, 3)
+	if err != nil {
+		b.logger.Warn(
+			"load recent procedures from db failed",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+			"err", err,
+		)
+	}
+
+	b.logger.Info(
+		"show procedure menu",
+		"user_id", user.ID,
+		"city_id", state.Watch.CityID,
+		"city_name", state.Watch.CityName,
+		"recent_count", len(recent),
+	)
+
 	if len(recent) > 0 {
-		title := b.catalog.T(user.Locale, "flow.watch.service") + "\n\nПоследние процедуры. Можно нажать номер или написать часть названия."
+		title := b.catalog.T(user.Locale, "flow.watch.service") + "\n\nПоследние процедуры:"
 		b.sendProcedureOptions(user, title, recent, procedureResultsKeyboard(recent, "", "", b.catalog, user.Locale))
 		return
 	}
 
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.service"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
+	b.send(
+		user,
+		b.catalog.T(user.Locale, "flow.watch.service")+"\n\nНапишите часть названия процедуры, откройте популярные процедуры или обзор A-Z.",
+		procedureMenuKeyboard(nil, b.catalog, user.Locale),
+	)
+}
+
+func (b *Bot) refreshRecentProcedures(ctx context.Context, user domain.User, state *flow) {
+	client, err := b.authenticatedLuxMedClient(ctx, user)
+	if err != nil {
+		b.logger.Warn(
+			"authenticate luxmed client for recent procedures failed",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+			"err", err,
+		)
+		return
+	}
+
+	recent, err := client.GetRecentProcedures(ctx)
+	if err != nil {
+		b.logger.Warn(
+			"load recent procedures failed",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+			"err", err,
+		)
+		return
+	}
+
+	b.logger.Info(
+		"recent procedures loaded from luxmed",
+		"user_id", user.ID,
+		"city_id", state.Watch.CityID,
+		"city_name", state.Watch.CityName,
+		"recent_count", len(recent),
+	)
+
+	if len(recent) == 0 {
+		return
+	}
+
+	if err := b.db.UpsertProcedures(ctx, domain.City{ID: state.Watch.CityID, Name: state.Watch.CityName}, recent); err != nil {
+		b.logger.Warn(
+			"upsert recent procedures failed",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+			"recent_count", len(recent),
+			"err", err,
+		)
+		return
+	}
+
+	dbRecent, err := b.db.RecentProcedures(ctx, state.Watch.CityID, 3)
+	if err != nil {
+		b.logger.Warn(
+			"check recent procedures after upsert failed",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+			"err", err,
+		)
+		return
+	}
+
+	b.logger.Info(
+		"recent procedures saved",
+		"user_id", user.ID,
+		"city_id", state.Watch.CityID,
+		"city_name", state.Watch.CityName,
+		"db_recent_count", len(dbRecent),
+	)
+}
+
+func (b *Bot) showPopularProcedures(ctx context.Context, user domain.User, state *flow) {
+	state.Kind = flowWatchService
+	state.ProcedureSearchQuery = ""
+	b.setFlow(user.ID, state)
+
+	client, err := b.authenticatedLuxMedClient(ctx, user)
+	if err != nil {
+		b.logger.Warn(
+			"authenticate luxmed client for popular procedures failed",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+			"err", err,
+		)
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
+		return
+	}
+
+	popular, err := client.GetPopularProcedures(ctx)
+	if err != nil {
+		b.logger.Warn(
+			"load popular procedures failed",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+			"err", err,
+		)
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
+		return
+	}
+
+	if len(popular) == 0 {
+		b.logger.Warn(
+			"popular procedures empty",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+		)
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
+		return
+	}
+
+	if err := b.db.UpsertProcedures(ctx, domain.City{ID: state.Watch.CityID, Name: state.Watch.CityName}, popular); err != nil {
+		b.logger.Warn(
+			"upsert popular procedures failed",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"city_name", state.Watch.CityName,
+			"popular_count", len(popular),
+			"err", err,
+		)
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
+		return
+	}
+
+	b.logger.Info(
+		"show popular procedures",
+		"user_id", user.ID,
+		"city_id", state.Watch.CityID,
+		"city_name", state.Watch.CityName,
+		"popular_count", len(popular),
+	)
+
+	title := "Популярные процедуры LuxMed:"
+	b.sendProcedureOptions(user, title, popular, procedureResultsKeyboard(popular, "", "", b.catalog, user.Locale))
 }
 
 func (b *Bot) showProcedureSearchResults(ctx context.Context, user domain.User, state *flow, query string) {
@@ -571,26 +826,46 @@ func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flo
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
-	favorites, _ := b.db.FavoriteFacilities(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, 3)
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.facility"), facilityMenuKeyboard(favorites, b.catalog, user.Locale))
+
+	state.Kind = flowWatchFacility
+	b.setFlow(user.ID, state)
+
+	favorites, err := b.db.FavoriteFacilities(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, 3)
+	if err != nil {
+		b.logger.Warn(
+			"load favorite facilities failed",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"procedure_id", state.Watch.ServiceID,
+			"err", err,
+		)
+	}
+
+	if len(favorites) > 0 {
+		title := b.catalog.T(user.Locale, "flow.watch.facility") + "\n\nИзбранные клиники:"
+		b.sendFacilityOptions(
+			user,
+			title,
+			favorites,
+			facilityResultsKeyboard(favorites, "favs", 0, "", "", state.Watch.FacilityIDs, b.catalog, user.Locale),
+		)
+		return
+	}
+
+	b.send(
+		user,
+		b.catalog.T(user.Locale, "flow.watch.facility")+"\n\nМожно выбрать все клиники в городе или открыть список и выбрать несколько.",
+		facilityMenuKeyboard(nil, b.catalog, user.Locale),
+	)
 }
 
 func (b *Bot) showFavoriteFacilities(ctx context.Context, user domain.User, state *flow, limit int) {
-	favorites, err := b.db.FavoriteFacilities(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, limit)
-	if err != nil || len(favorites) == 0 {
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_no_favorites"), facilityMenuKeyboard(nil, b.catalog, user.Locale))
-		return
-	}
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_favorites"), facilityListKeyboard(favorites, b.catalog, user.Locale))
+	_ = limit
+	b.showFacilityPage(ctx, user, state, "favs", 0)
 }
 
 func (b *Bot) showAllFacilities(ctx context.Context, user domain.User, state *flow) {
-	facilities, err := b.db.Facilities(ctx, state.Watch.CityID, state.Watch.ServiceID, 20)
-	if err != nil || len(facilities) == 0 {
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_empty"), facilityMenuKeyboard(nil, b.catalog, user.Locale))
-		return
-	}
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_all"), facilityListKeyboard(facilities, b.catalog, user.Locale))
+	b.showFacilityPage(ctx, user, state, "all", 0)
 }
 
 func (b *Bot) handleFacility(ctx context.Context, user domain.User, data string) {
@@ -598,26 +873,378 @@ func (b *Bot) handleFacility(ctx context.Context, user domain.User, data string)
 	if state == nil {
 		return
 	}
+
 	id, err := strconv.Atoi(strings.TrimPrefix(data, "fac:"))
 	if err != nil {
 		return
 	}
-	facilities, err := b.db.Facilities(ctx, state.Watch.CityID, state.Watch.ServiceID, 0)
+
+	facility, err := b.findFacilityByID(ctx, state, id)
+	if err != nil {
+		b.logger.Warn(
+			"facility callback not found",
+			"user_id", user.ID,
+			"city_id", state.Watch.CityID,
+			"procedure_id", state.Watch.ServiceID,
+			"facility_id", id,
+			"err", err,
+		)
+		return
+	}
+
+	state.Watch.FacilityMode = domain.FacilityModeSelected
+	state.Watch.FacilityIDs = []int{facility.ID}
+	state.Watch.FacilityNames = []string{facility.Name}
+
+	_ = b.db.SaveFavoriteFacility(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, facility)
+
+	b.setFlow(user.ID, state)
+	b.showTimeStep(user, state)
+}
+
+func (b *Bot) handleFacilityText(ctx context.Context, user domain.User, state *flow, text string) {
+	text = strings.TrimSpace(text)
+
+	if strings.EqualFold(text, "all") || strings.EqualFold(text, "все") {
+		state.Watch.FacilityMode = domain.FacilityModeAll
+		state.Watch.FacilityIDs = nil
+		state.Watch.FacilityNames = nil
+		b.setFlow(user.ID, state)
+		b.showTimeStep(user, state)
+		return
+	}
+
+	id, _, ok := parseIDName(text)
+	if !ok {
+		b.showFacilityPage(ctx, user, state, "all", 0)
+		return
+	}
+
+	facility, err := b.findFacilityByID(ctx, state, id)
+	if err != nil {
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility"), facilityMenuKeyboard(nil, b.catalog, user.Locale))
+		return
+	}
+
+	state.Watch.FacilityMode = domain.FacilityModeSelected
+	state.Watch.FacilityIDs = []int{facility.ID}
+	state.Watch.FacilityNames = []string{facility.Name}
+
+	_ = b.db.SaveFavoriteFacility(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, facility)
+
+	b.setFlow(user.ID, state)
+	b.showTimeStep(user, state)
+}
+
+func (b *Bot) handleFacilityPage(ctx context.Context, user domain.User, state *flow, data string) {
+	parts := strings.Split(data, ":")
+	if len(parts) != 3 {
+		return
+	}
+
+	mode := parts[1]
+	page, err := strconv.Atoi(parts[2])
+	if err != nil || page < 0 {
+		page = 0
+	}
+
+	b.showFacilityPage(ctx, user, state, mode, page)
+}
+
+func (b *Bot) showFacilityPage(ctx context.Context, user domain.User, state *flow, mode string, page int) {
+	const pageSize = 10
+
+	if page < 0 {
+		page = 0
+	}
+
+	offset := page * pageSize
+
+	var (
+		facilities []domain.Facility
+		err        error
+		title      string
+	)
+
+	switch mode {
+	case "favs":
+		facilities, err = b.db.FavoriteFacilitiesPage(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, pageSize+1, offset)
+		title = "Избранные клиники"
+	default:
+		mode = "all"
+		facilities, err = b.db.FacilitiesPage(ctx, state.Watch.CityID, state.Watch.ServiceID, pageSize+1, offset)
+		title = "Клиники"
+	}
+
+	if err != nil || len(facilities) == 0 {
+		if mode == "favs" {
+			b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_no_favorites"), facilityMenuKeyboard(nil, b.catalog, user.Locale))
+			return
+		}
+
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_empty"), facilityMenuKeyboard(nil, b.catalog, user.Locale))
+		return
+	}
+
+	hasNext := len(facilities) > pageSize
+	if hasNext {
+		facilities = facilities[:pageSize]
+	}
+
+	previousCallback := ""
+	if page > 0 {
+		previousCallback = fmt.Sprintf("facpage:%s:%d", mode, page-1)
+	}
+
+	nextCallback := ""
+	if hasNext {
+		nextCallback = fmt.Sprintf("facpage:%s:%d", mode, page+1)
+	}
+
+	text := fmt.Sprintf(
+		"%s. Показаны %d–%d.\n\nНажмите номера клиник, которые хотите выбрать. Потом нажмите “Готово”.",
+		title,
+		offset+1,
+		offset+len(facilities),
+	)
+
+	if len(state.Watch.FacilityIDs) > 0 {
+		text += fmt.Sprintf("\n\nВыбрано клиник: %d.", len(state.Watch.FacilityIDs))
+	}
+
+	b.sendFacilityOptions(
+		user,
+		text,
+		facilities,
+		facilityResultsKeyboard(facilities, mode, page, previousCallback, nextCallback, state.Watch.FacilityIDs, b.catalog, user.Locale),
+	)
+}
+
+func (b *Bot) handleFacilityToggle(ctx context.Context, user domain.User, state *flow, data string) {
+	parts := strings.Split(data, ":")
+	if len(parts) != 4 {
+		return
+	}
+
+	mode := parts[1]
+
+	page, err := strconv.Atoi(parts[2])
+	if err != nil || page < 0 {
+		page = 0
+	}
+
+	id, err := strconv.Atoi(parts[3])
 	if err != nil {
 		return
 	}
-	for _, facility := range facilities {
-		if facility.ID != id {
-			continue
-		}
-		state.Watch.FacilityMode = domain.FacilityModeSelected
-		state.Watch.FacilityIDs = []int{facility.ID}
-		state.Watch.FacilityNames = []string{facility.Name}
-		_ = b.db.SaveFavoriteFacility(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, facility)
-		b.setFlow(user.ID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
+
+	facility, err := b.findFacilityByID(ctx, state, id)
+	if err != nil {
 		return
 	}
+
+	if facilityIDSelected(state.Watch.FacilityIDs, facility.ID) {
+		state.Watch.FacilityIDs, state.Watch.FacilityNames = removeFacilitySelection(state.Watch.FacilityIDs, state.Watch.FacilityNames, facility.ID)
+	} else {
+		state.Watch.FacilityIDs = append(state.Watch.FacilityIDs, facility.ID)
+		state.Watch.FacilityNames = append(state.Watch.FacilityNames, facility.Name)
+		_ = b.db.SaveFavoriteFacility(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, facility)
+	}
+
+	if len(state.Watch.FacilityIDs) > 0 {
+		state.Watch.FacilityMode = domain.FacilityModeSelected
+	} else {
+		state.Watch.FacilityMode = ""
+	}
+
+	b.setFlow(user.ID, state)
+	b.showFacilityPage(ctx, user, state, mode, page)
+}
+
+func (b *Bot) finishSelectedFacilities(ctx context.Context, user domain.User, state *flow) {
+	if len(state.Watch.FacilityIDs) == 0 {
+		b.send(user, "Выберите хотя бы одну клинику или нажмите “Все клиники в городе”.", facilityMenuKeyboard(nil, b.catalog, user.Locale))
+		return
+	}
+
+	state.Watch.FacilityMode = domain.FacilityModeSelected
+	b.setFlow(user.ID, state)
+
+	b.showTimeStep(user, state)
+}
+
+func (b *Bot) findFacilityByID(ctx context.Context, state *flow, id int) (domain.Facility, error) {
+	facilities, err := b.db.Facilities(ctx, state.Watch.CityID, state.Watch.ServiceID, 0)
+	if err != nil {
+		return domain.Facility{}, err
+	}
+
+	for _, facility := range facilities {
+		if facility.ID == id {
+			return facility, nil
+		}
+	}
+
+	return domain.Facility{}, fmt.Errorf("facility %d not found", id)
+}
+
+func (b *Bot) sendFacilityOptions(user domain.User, title string, facilities []domain.Facility, markup any) {
+	state := b.getFlow(user.ID)
+
+	var selectedIDs []int
+	if state != nil {
+		selectedIDs = state.Watch.FacilityIDs
+	}
+
+	var lines []string
+	lines = append(lines, strings.TrimSpace(title))
+
+	for i, facility := range facilities {
+		prefix := "⬜"
+		if facilityIDSelected(selectedIDs, facility.ID) {
+			prefix = "✅"
+		}
+
+		label := facility.Name
+		if facility.Address != "" {
+			label += ", " + facility.Address
+		}
+
+		lines = append(lines, fmt.Sprintf("%s %d. %s\n   ID: %d", prefix, i+1, label, facility.ID))
+	}
+
+	b.send(user, strings.Join(lines, "\n\n"), markup)
+}
+
+func facilityIDSelected(ids []int, id int) bool {
+	for _, selectedID := range ids {
+		if selectedID == id {
+			return true
+		}
+	}
+
+	return false
+}
+
+func removeFacilitySelection(ids []int, names []string, id int) ([]int, []string) {
+	nextIDs := make([]int, 0, len(ids))
+	nextNames := make([]string, 0, len(names))
+
+	for i, selectedID := range ids {
+		if selectedID == id {
+			continue
+		}
+
+		nextIDs = append(nextIDs, selectedID)
+
+		if i < len(names) {
+			nextNames = append(nextNames, names[i])
+		}
+	}
+
+	return nextIDs, nextNames
+}
+
+func (b *Bot) showTimeStep(user domain.User, state *flow) {
+	state.Kind = flowWatchTime
+	b.setFlow(user.ID, state)
+
+	b.send(
+		user,
+		"Шаг 4/8: выберите время приёма.\n\nФильтр времени применяется на нашей стороне после получения слотов из LuxMed.",
+		timeWindowKeyboard(b.catalog, user.Locale),
+	)
+}
+
+func (b *Bot) handleTimeCallback(ctx context.Context, user domain.User, state *flow, data string) {
+	value := strings.TrimPrefix(data, "time:")
+
+	switch value {
+	case "any":
+		state.Watch.TimeWindows = nil
+	case "morning":
+		state.Watch.TimeWindows = []domain.TimeWindow{{From: "08:00", To: "12:00"}}
+	case "day":
+		state.Watch.TimeWindows = []domain.TimeWindow{{From: "12:00", To: "16:00"}}
+	case "evening":
+		state.Watch.TimeWindows = []domain.TimeWindow{{From: "16:00", To: "20:00"}}
+	case "workday":
+		state.Watch.TimeWindows = []domain.TimeWindow{{From: "09:00", To: "18:00"}}
+	default:
+		b.send(user, "Выберите время кнопкой или напишите диапазон, например: 09:00-13:00", timeWindowKeyboard(b.catalog, user.Locale))
+		return
+	}
+
+	b.finishTimeStep(ctx, user, state)
+}
+
+func (b *Bot) handleTimeText(ctx context.Context, user domain.User, state *flow, text string) {
+	text = strings.TrimSpace(strings.ToLower(text))
+
+	if text == "" || text == "any" || text == "все" || text == "любое" {
+		state.Watch.TimeWindows = nil
+		b.finishTimeStep(ctx, user, state)
+		return
+	}
+
+	window, ok := parseTimeWindow(text)
+	if !ok {
+		b.send(user, "Не понял время. Напишите диапазон в формате 09:00-13:00 или выберите кнопку.", timeWindowKeyboard(b.catalog, user.Locale))
+		return
+	}
+
+	state.Watch.TimeWindows = []domain.TimeWindow{window}
+	b.finishTimeStep(ctx, user, state)
+}
+
+func (b *Bot) finishTimeStep(ctx context.Context, user domain.User, state *flow) {
+	b.setFlow(user.ID, state)
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
+	_ = ctx
+}
+
+func parseTimeWindow(text string) (domain.TimeWindow, bool) {
+	text = strings.ReplaceAll(text, " ", "")
+	text = strings.ReplaceAll(text, "–", "-")
+	text = strings.ReplaceAll(text, "—", "-")
+
+	parts := strings.Split(text, "-")
+	if len(parts) != 2 {
+		return domain.TimeWindow{}, false
+	}
+
+	from := normalizeTime(parts[0])
+	to := normalizeTime(parts[1])
+
+	fromTime, errFrom := time.Parse("15:04", from)
+	toTime, errTo := time.Parse("15:04", to)
+
+	if errFrom != nil || errTo != nil || !fromTime.Before(toTime) {
+		return domain.TimeWindow{}, false
+	}
+
+	return domain.TimeWindow{
+		From: from,
+		To:   to,
+	}, true
+}
+
+func normalizeTime(value string) string {
+	value = strings.TrimSpace(value)
+
+	if len(value) == 1 {
+		return "0" + value + ":00"
+	}
+
+	if len(value) == 2 {
+		return value + ":00"
+	}
+
+	if len(value) == 4 && strings.Contains(value, ":") {
+		return "0" + value
+	}
+
+	return value
 }
 
 func (b *Bot) ensureCities(ctx context.Context, user domain.User) ([]domain.City, error) {

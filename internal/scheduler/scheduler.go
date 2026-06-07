@@ -72,6 +72,9 @@ func (r *Runner) CheckWatch(ctx context.Context, watch domain.Watch) error {
 		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, err.Error())
 		return err
 	}
+
+	apps = filterAppointmentsByTimeWindows(apps, watch.TimeWindows)
+
 	user, err = r.userByID(ctx, watch.UserID)
 	if err != nil {
 		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, err.Error())
@@ -147,4 +150,53 @@ func (s *Scheduler) tick(ctx context.Context) {
 			s.logger.Warn("watch check failed", "watch_id", watch.ID, "err", err)
 		}
 	}
+}
+
+func filterAppointmentsByTimeWindows(apps []domain.Appointment, windows []domain.TimeWindow) []domain.Appointment {
+	if len(windows) == 0 {
+		return apps
+	}
+
+	filtered := make([]domain.Appointment, 0, len(apps))
+
+	for _, app := range apps {
+		if appointmentMatchesTimeWindows(app, windows) {
+			filtered = append(filtered, app)
+		}
+	}
+
+	return filtered
+}
+
+func appointmentMatchesTimeWindows(app domain.Appointment, windows []domain.TimeWindow) bool {
+	appMinutes := app.DateTime.Hour()*60 + app.DateTime.Minute()
+	appWeekday := int(app.DateTime.Weekday())
+
+	for _, window := range windows {
+		if window.Weekday > 0 && window.Weekday != appWeekday {
+			continue
+		}
+
+		from, okFrom := parseClockMinutes(window.From)
+		to, okTo := parseClockMinutes(window.To)
+
+		if !okFrom || !okTo {
+			continue
+		}
+
+		if appMinutes >= from && appMinutes <= to {
+			return true
+		}
+	}
+
+	return false
+}
+
+func parseClockMinutes(value string) (int, bool) {
+	parsed, err := time.Parse("15:04", value)
+	if err != nil {
+		return 0, false
+	}
+
+	return parsed.Hour()*60 + parsed.Minute(), true
 }

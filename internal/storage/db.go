@@ -468,7 +468,7 @@ func (db *DB) UpsertProcedures(ctx context.Context, city domain.City, procedures
 				is_recent=luxmed_procedures.is_recent OR excluded.is_recent,
 				updated_at=excluded.updated_at
 		`, proc.ID, city.ID, city.Name, proc.Name, proc.IsRecent, now); err != nil {
-			return err
+					return err
 		}
 	}
 	return tx.Commit()
@@ -639,6 +639,37 @@ func (db *DB) Facilities(ctx context.Context, cityID int, procedureID int, limit
 	return facilities, rows.Err()
 }
 
+func (db *DB) FacilitiesPage(ctx context.Context, cityID int, procedureID int, limit int, offset int) ([]domain.Facility, error) {
+	query := `
+		SELECT id, name, address
+		FROM luxmed_facilities
+		WHERE city_id=? AND procedure_id=?
+		ORDER BY name`
+	args := []any{cityID, procedureID}
+
+	if limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var facilities []domain.Facility
+	for rows.Next() {
+		var facility domain.Facility
+		if err := rows.Scan(&facility.ID, &facility.Name, &facility.Address); err != nil {
+			return nil, err
+		}
+		facilities = append(facilities, facility)
+	}
+
+	return facilities, rows.Err()
+}
+
 func (db *DB) FavoriteFacilities(ctx context.Context, userID int64, cityID int, procedureID int, limit int) ([]domain.Facility, error) {
 	query := `
 		SELECT f.id, f.name, f.address
@@ -664,6 +695,38 @@ func (db *DB) FavoriteFacilities(ctx context.Context, userID int64, cityID int, 
 		}
 		facilities = append(facilities, facility)
 	}
+	return facilities, rows.Err()
+}
+
+func (db *DB) FavoriteFacilitiesPage(ctx context.Context, userID int64, cityID int, procedureID int, limit int, offset int) ([]domain.Facility, error) {
+	query := `
+		SELECT f.id, f.name, f.address
+		FROM favorite_facilities fav
+		JOIN luxmed_facilities f ON f.id=fav.facility_id AND f.city_id=fav.city_id AND f.procedure_id=fav.procedure_id
+		WHERE fav.user_id=? AND fav.city_id=? AND fav.procedure_id=?
+		ORDER BY fav.last_used_at DESC`
+	args := []any{userID, cityID, procedureID}
+
+	if limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var facilities []domain.Facility
+	for rows.Next() {
+		var facility domain.Facility
+		if err := rows.Scan(&facility.ID, &facility.Name, &facility.Address); err != nil {
+			return nil, err
+		}
+		facilities = append(facilities, facility)
+	}
+
 	return facilities, rows.Err()
 }
 

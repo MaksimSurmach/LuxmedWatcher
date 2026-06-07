@@ -27,6 +27,7 @@ const (
 	CitiesURL                = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Dictionary/cities"
 	DoctorsAndFacilitiesURL  = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Dictionary/facilitiesAndDoctors"
 	RecentSearchesURL        = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/RecentSearchTermsParameters/recentSearchData?includeRecentSearchParameters=true"
+	PopularServicesURL       = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/PopularServicesParameters/popularServicesParameters"
 	TermsURL                 = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/terms/index"
 )
 
@@ -41,6 +42,7 @@ type Client interface {
 	GetCities(ctx context.Context) ([]domain.City, error)
 	GetServices(ctx context.Context) ([]domain.Service, error)
 	GetRecentProcedures(ctx context.Context) ([]domain.Procedure, error)
+	GetPopularProcedures(ctx context.Context) ([]domain.Procedure, error)
 	GetDoctorsAndFacilities(ctx context.Context, cityID int, serviceID int) (domain.DoctorsAndFacilities, error)
 }
 
@@ -195,18 +197,48 @@ func (c *HTTPClient) GetRecentProcedures(ctx context.Context) ([]domain.Procedur
 	if err := c.getJSON(ctx, RecentSearchesURL, &payload); err != nil {
 		return nil, err
 	}
+
+	return proceduresFromLuxMedPayload(payload, true), nil
+}
+
+func (c *HTTPClient) GetPopularProcedures(ctx context.Context) ([]domain.Procedure, error) {
+	var payload any
+	if err := c.getJSON(ctx, PopularServicesURL, &payload); err != nil {
+		return nil, err
+	}
+
+	return proceduresFromLuxMedPayload(payload, false), nil
+}
+
+func proceduresFromLuxMedPayload(payload any, isRecent bool) []domain.Procedure {
 	seen := make(map[int]bool)
 	var procedures []domain.Procedure
+
 	walkJSON(payload, func(node map[string]any) {
-		id := intFromAny(firstValue(node, "serviceVariantId", "serviceId"))
-		name := stringFromAny(firstValue(node, "serviceVariantName", "serviceName"))
+		id := intFromAny(firstValue(node,
+			"serviceVariantId",
+			"serviceId",
+		))
+
+		name := stringFromAny(firstValue(node,
+			"serviceVariantName",
+			"serviceName",
+			"searchName",
+		))
+
 		if id <= 0 || name == "" || seen[id] {
 			return
 		}
+
 		seen[id] = true
-		procedures = append(procedures, domain.Procedure{ID: id, Name: name, IsRecent: true})
+		procedures = append(procedures, domain.Procedure{
+			ID:       id,
+			Name:     name,
+			IsRecent: isRecent,
+		})
 	})
-	return procedures, nil
+
+	return procedures
 }
 
 func (c *HTTPClient) GetDoctorsAndFacilities(ctx context.Context, cityID int, serviceID int) (domain.DoctorsAndFacilities, error) {

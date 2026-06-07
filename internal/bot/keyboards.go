@@ -61,6 +61,21 @@ func intervalKeyboard() tgbotapi.InlineKeyboardMarkup {
 	)
 }
 
+func timeWindowKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Любое время", "time:any")),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Утро 08–12", "time:morning"),
+			tgbotapi.NewInlineKeyboardButtonData("День 12–16", "time:day"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Вечер 16–20", "time:evening"),
+			tgbotapi.NewInlineKeyboardButtonData("Рабочее 09–18", "time:workday"),
+		),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
+	)
+}
+
 func watchKeyboard(c *i18n.Catalog, locale string, watch domain.Watch) tgbotapi.InlineKeyboardMarkup {
 	statusButton := tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.pause"), fmt.Sprintf("watch:pause:%d", watch.ID))
 	if watch.Status == domain.WatchStatusPaused {
@@ -106,6 +121,7 @@ func citySearchKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardM
 
 func procedureMenuKeyboard(_ []domain.Procedure, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.popular_procedures"), "proc:popular")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.search"), "proc:search")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_procedures"), "proc:all")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
@@ -155,6 +171,7 @@ func procedureResultsKeyboard(procedures []domain.Procedure, previousCallback st
 	}
 
 	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.popular_procedures"), "proc:popular")),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.search"), "proc:search"),
 			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_procedures"), "proc:all"),
@@ -182,17 +199,56 @@ func procedureListKeyboard(procedures []domain.Procedure, c *i18n.Catalog, local
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
-func facilityMenuKeyboard(favorites []domain.Facility, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
-	var rows [][]tgbotapi.InlineKeyboardButton
-	for _, facility := range favorites {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(facilityLabel(facility), fmt.Sprintf("fac:%d", facility.ID))))
-	}
-	rows = append(rows,
+func facilityMenuKeyboard(_ []domain.Facility, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.all_places_in_city"), "fac:any")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_favorite_places"), "fac:favs")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_places"), "fac:all")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
 	)
+}
+
+func facilityResultsKeyboard(facilities []domain.Facility, mode string, page int, previousCallback string, nextCallback string, selectedIDs []int, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	for i := 0; i < len(facilities); i += 5 {
+		var row []tgbotapi.InlineKeyboardButton
+
+		for j := i; j < len(facilities) && j < i+5; j++ {
+			label := fmt.Sprintf("%d", j+1)
+			if facilityIDSelected(selectedIDs, facilities[j].ID) {
+				label = "✅ " + label
+			}
+
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(
+				label,
+				fmt.Sprintf("facsel:%s:%d:%d", mode, page, facilities[j].ID),
+			))
+		}
+
+		rows = append(rows, row)
+	}
+
+	var nav []tgbotapi.InlineKeyboardButton
+	if previousCallback != "" {
+		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.previous"), previousCallback))
+	}
+	if nextCallback != "" {
+		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.next"), nextCallback))
+	}
+	if len(nav) > 0 {
+		rows = append(rows, nav)
+	}
+
+	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Готово", "facdone"),
+			tgbotapi.NewInlineKeyboardButtonData("Очистить", "facclear"),
+		),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.all_places_in_city"), "fac:any")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
+	)
+
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }
 
