@@ -1,0 +1,12 @@
+services:
+  luxmed-watcher:
+    build: .
+    env_file: .env
+    restart: unless-stopped
+    volumes:
+      - luxmed-watcher-data:/app/data
+    ports:
+      - "8080:8080"
+
+volumes:
+  luxmed-watcher-data:
