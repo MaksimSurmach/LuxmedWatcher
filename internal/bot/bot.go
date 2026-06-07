@@ -360,7 +360,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 			state.Watch.FacilityIDs = nil
 			state.Watch.FacilityNames = nil
 			b.setFlow(user.ID, state)
-			b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
+			b.showTimeStep(user, state)
 		}
 
 	case data == "fac:all":
@@ -457,6 +457,8 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		if state != nil {
 			b.handleTimeCallback(ctx, user, state, data)
 		}
+	case strings.HasPrefix(data, "interval:"):
+		b.finishWatch(ctx, user, data)
 	case strings.HasPrefix(data, "fac:"):
 		b.handleFacility(ctx, user, data)
 	case data == "doctor:any":
@@ -516,7 +518,7 @@ func (b *Bot) finishFacilityStep(ctx context.Context, user domain.User, state *f
 		state.Watch.FacilityNames = []string{name}
 	}
 	b.setFlow(user.ID, state)
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
+	b.showTimeStep(user, state)
 	_ = ctx
 }
 
@@ -543,6 +545,108 @@ func (b *Bot) showCityPicker(ctx context.Context, user domain.User, settings boo
 		prefix = "prefcity:"
 	}
 	b.send(user, b.catalog.T(user.Locale, "flow.watch.city"), cityKeyboard(cities, prefix, page, page > 0, hasNext, b.catalog, user.Locale))
+}
+
+func (b *Bot) showTimeStep(user domain.User, state *flow) {
+	state.Kind = flowWatchTime
+	b.setFlow(user.ID, state)
+
+	b.send(
+		user,
+		"Шаг 4/5: выберите время приёма.\n\nМожно выбрать готовый вариант или написать диапазон, например: 09:00-13:00.",
+		timeWindowKeyboard(b.catalog, user.Locale),
+	)
+}
+
+func (b *Bot) handleTimeCallback(ctx context.Context, user domain.User, state *flow, data string) {
+	value := strings.TrimPrefix(data, "time:")
+
+	switch value {
+	case "any":
+		state.Watch.TimeWindows = nil
+	case "morning":
+		state.Watch.TimeWindows = []domain.TimeWindow{{From: "08:00", To: "12:00"}}
+	case "day":
+		state.Watch.TimeWindows = []domain.TimeWindow{{From: "12:00", To: "16:00"}}
+	case "evening":
+		state.Watch.TimeWindows = []domain.TimeWindow{{From: "16:00", To: "20:00"}}
+	case "workday":
+		state.Watch.TimeWindows = []domain.TimeWindow{{From: "09:00", To: "18:00"}}
+	default:
+		b.send(user, "Выберите время кнопкой или напишите диапазон, например: 09:00-13:00", timeWindowKeyboard(b.catalog, user.Locale))
+		return
+	}
+
+	b.finishTimeStep(ctx, user, state)
+}
+
+func (b *Bot) handleTimeText(ctx context.Context, user domain.User, state *flow, text string) {
+	text = strings.TrimSpace(strings.ToLower(text))
+
+	if text == "" || text == "any" || text == "все" || text == "любое" {
+		state.Watch.TimeWindows = nil
+		b.finishTimeStep(ctx, user, state)
+		return
+	}
+
+	window, ok := parseTimeWindow(text)
+	if !ok {
+		b.send(user, "Не понял время. Напишите диапазон в формате 09:00-13:00 или выберите кнопку.", timeWindowKeyboard(b.catalog, user.Locale))
+		return
+	}
+
+	state.Watch.TimeWindows = []domain.TimeWindow{window}
+	b.finishTimeStep(ctx, user, state)
+}
+
+func (b *Bot) finishTimeStep(ctx context.Context, user domain.User, state *flow) {
+	b.setFlow(user.ID, state)
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
+	_ = ctx
+}
+
+func parseTimeWindow(text string) (domain.TimeWindow, bool) {
+	text = strings.ReplaceAll(text, " ", "")
+	text = strings.ReplaceAll(text, "–", "-")
+	text = strings.ReplaceAll(text, "—", "-")
+
+	parts := strings.Split(text, "-")
+	if len(parts) != 2 {
+		return domain.TimeWindow{}, false
+	}
+
+	from := normalizeTime(parts[0])
+	to := normalizeTime(parts[1])
+
+	fromTime, errFrom := time.Parse("15:04", from)
+	toTime, errTo := time.Parse("15:04", to)
+
+	if errFrom != nil || errTo != nil || !fromTime.Before(toTime) {
+		return domain.TimeWindow{}, false
+	}
+
+	return domain.TimeWindow{
+		From: from,
+		To:   to,
+	}, true
+}
+
+func normalizeTime(value string) string {
+	value = strings.TrimSpace(value)
+
+	if len(value) == 1 {
+		return "0" + value + ":00"
+	}
+
+	if len(value) == 2 {
+		return value + ":00"
+	}
+
+	if len(value) == 4 && strings.Contains(value, ":") {
+		return "0" + value
+	}
+
+	return value
 }
 
 func (b *Bot) showCitySearchResults(ctx context.Context, user domain.User, state *flow, query string) {
@@ -1143,108 +1247,6 @@ func removeFacilitySelection(ids []int, names []string, id int) ([]int, []string
 	}
 
 	return nextIDs, nextNames
-}
-
-func (b *Bot) showTimeStep(user domain.User, state *flow) {
-	state.Kind = flowWatchTime
-	b.setFlow(user.ID, state)
-
-	b.send(
-		user,
-		"Шаг 4/8: выберите время приёма.\n\nФильтр времени применяется на нашей стороне после получения слотов из LuxMed.",
-		timeWindowKeyboard(b.catalog, user.Locale),
-	)
-}
-
-func (b *Bot) handleTimeCallback(ctx context.Context, user domain.User, state *flow, data string) {
-	value := strings.TrimPrefix(data, "time:")
-
-	switch value {
-	case "any":
-		state.Watch.TimeWindows = nil
-	case "morning":
-		state.Watch.TimeWindows = []domain.TimeWindow{{From: "08:00", To: "12:00"}}
-	case "day":
-		state.Watch.TimeWindows = []domain.TimeWindow{{From: "12:00", To: "16:00"}}
-	case "evening":
-		state.Watch.TimeWindows = []domain.TimeWindow{{From: "16:00", To: "20:00"}}
-	case "workday":
-		state.Watch.TimeWindows = []domain.TimeWindow{{From: "09:00", To: "18:00"}}
-	default:
-		b.send(user, "Выберите время кнопкой или напишите диапазон, например: 09:00-13:00", timeWindowKeyboard(b.catalog, user.Locale))
-		return
-	}
-
-	b.finishTimeStep(ctx, user, state)
-}
-
-func (b *Bot) handleTimeText(ctx context.Context, user domain.User, state *flow, text string) {
-	text = strings.TrimSpace(strings.ToLower(text))
-
-	if text == "" || text == "any" || text == "все" || text == "любое" {
-		state.Watch.TimeWindows = nil
-		b.finishTimeStep(ctx, user, state)
-		return
-	}
-
-	window, ok := parseTimeWindow(text)
-	if !ok {
-		b.send(user, "Не понял время. Напишите диапазон в формате 09:00-13:00 или выберите кнопку.", timeWindowKeyboard(b.catalog, user.Locale))
-		return
-	}
-
-	state.Watch.TimeWindows = []domain.TimeWindow{window}
-	b.finishTimeStep(ctx, user, state)
-}
-
-func (b *Bot) finishTimeStep(ctx context.Context, user domain.User, state *flow) {
-	b.setFlow(user.ID, state)
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
-	_ = ctx
-}
-
-func parseTimeWindow(text string) (domain.TimeWindow, bool) {
-	text = strings.ReplaceAll(text, " ", "")
-	text = strings.ReplaceAll(text, "–", "-")
-	text = strings.ReplaceAll(text, "—", "-")
-
-	parts := strings.Split(text, "-")
-	if len(parts) != 2 {
-		return domain.TimeWindow{}, false
-	}
-
-	from := normalizeTime(parts[0])
-	to := normalizeTime(parts[1])
-
-	fromTime, errFrom := time.Parse("15:04", from)
-	toTime, errTo := time.Parse("15:04", to)
-
-	if errFrom != nil || errTo != nil || !fromTime.Before(toTime) {
-		return domain.TimeWindow{}, false
-	}
-
-	return domain.TimeWindow{
-		From: from,
-		To:   to,
-	}, true
-}
-
-func normalizeTime(value string) string {
-	value = strings.TrimSpace(value)
-
-	if len(value) == 1 {
-		return "0" + value + ":00"
-	}
-
-	if len(value) == 2 {
-		return value + ":00"
-	}
-
-	if len(value) == 4 && strings.Contains(value, ":") {
-		return "0" + value
-	}
-
-	return value
 }
 
 func (b *Bot) ensureCities(ctx context.Context, user domain.User) ([]domain.City, error) {
