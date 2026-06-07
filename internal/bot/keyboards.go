@@ -21,6 +21,7 @@ func mainKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup 
 func settingsKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.language"), "settings:language")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.city"), "settings:city")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.menu"), "menu")),
 	)
 }
@@ -69,4 +70,80 @@ func watchKeyboard(c *i18n.Catalog, locale string, watch domain.Watch) tgbotapi.
 		tgbotapi.NewInlineKeyboardRow(statusButton, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.check_now"), fmt.Sprintf("watch:check:%d", watch.ID))),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.history"), "history"), tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.delete"), fmt.Sprintf("watch:delete:%d", watch.ID))),
 	)
+}
+
+func cityKeyboard(cities []domain.City, prefix string, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for i := 0; i < len(cities); i += 2 {
+		row := []tgbotapi.InlineKeyboardButton{
+			tgbotapi.NewInlineKeyboardButtonData(cities[i].Name, fmt.Sprintf("%s%d", prefix, cities[i].ID)),
+		}
+		if i+1 < len(cities) {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(cities[i+1].Name, fmt.Sprintf("%s%d", prefix, cities[i+1].ID)))
+		}
+		rows = append(rows, row)
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func procedureMenuKeyboard(recent []domain.Procedure, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, proc := range recent {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(proc.Name, fmt.Sprintf("proc:%d", proc.ID))))
+	}
+	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.search"), "proc:search")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_procedures"), "proc:all")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
+	)
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func procedureSearchKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_procedures"), "proc:all")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
+	)
+}
+
+func procedureListKeyboard(procedures []domain.Procedure, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, proc := range procedures {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(proc.Name, fmt.Sprintf("proc:%d", proc.ID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.search"), "proc:search")))
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func facilityMenuKeyboard(favorites []domain.Facility, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, facility := range favorites {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(facilityLabel(facility), fmt.Sprintf("fac:%d", facility.ID))))
+	}
+	rows = append(rows,
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.all_places_in_city"), "fac:any")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_favorite_places"), "fac:favs")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.show_all_places"), "fac:all")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
+	)
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func facilityListKeyboard(facilities []domain.Facility, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+	for _, facility := range facilities {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(facilityLabel(facility), fmt.Sprintf("fac:%d", facility.ID))))
+	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.all_places_in_city"), "fac:any")))
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")))
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func facilityLabel(facility domain.Facility) string {
+	if facility.Address == "" {
+		return facility.Name
+	}
+	return facility.Name + ", " + facility.Address
 }

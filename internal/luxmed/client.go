@@ -25,6 +25,7 @@ const (
 	ServiceVariantsGroupsURL = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Dictionary/serviceVariantsGroups"
 	CitiesURL                = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Dictionary/cities"
 	DoctorsAndFacilitiesURL  = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Dictionary/facilitiesAndDoctors"
+	RecentSearchesURL        = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/RecentSearchTermsParameters/recentSearchData?includeRecentSearchParameters=true"
 	TermsURL                 = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/terms/index"
 )
 
@@ -38,6 +39,7 @@ type Client interface {
 	SearchAppointments(ctx context.Context, watch domain.Watch) ([]domain.Appointment, error)
 	GetCities(ctx context.Context) ([]domain.City, error)
 	GetServices(ctx context.Context) ([]domain.Service, error)
+	GetRecentProcedures(ctx context.Context) ([]domain.Procedure, error)
 	GetDoctorsAndFacilities(ctx context.Context, cityID int, serviceID int) (domain.DoctorsAndFacilities, error)
 }
 
@@ -179,6 +181,25 @@ func (c *HTTPClient) GetServices(ctx context.Context) ([]domain.Service, error) 
 	return services, nil
 }
 
+func (c *HTTPClient) GetRecentProcedures(ctx context.Context) ([]domain.Procedure, error) {
+	var payload any
+	if err := c.getJSON(ctx, RecentSearchesURL, &payload); err != nil {
+		return nil, err
+	}
+	seen := make(map[int]bool)
+	var procedures []domain.Procedure
+	walkJSON(payload, func(node map[string]any) {
+		id := intFromAny(firstValue(node, "serviceVariantId", "serviceId"))
+		name := stringFromAny(firstValue(node, "serviceVariantName", "serviceName"))
+		if id <= 0 || name == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		procedures = append(procedures, domain.Procedure{ID: id, Name: name, IsRecent: true})
+	})
+	return procedures, nil
+}
+
 func (c *HTTPClient) GetDoctorsAndFacilities(ctx context.Context, cityID int, serviceID int) (domain.DoctorsAndFacilities, error) {
 	u, _ := url.Parse(DoctorsAndFacilitiesURL)
 	q := u.Query()
@@ -219,6 +240,52 @@ func (c *HTTPClient) GetDoctorsAndFacilities(ctx context.Context, cityID int, se
 		result.Facilities = append(result.Facilities, domain.Facility{ID: facility.ID, Name: facility.Name, Address: facility.Address})
 	}
 	return result, nil
+}
+
+func walkJSON(value any, visit func(map[string]any)) {
+	switch typed := value.(type) {
+	case map[string]any:
+		visit(typed)
+		for _, child := range typed {
+			walkJSON(child, visit)
+		}
+	case []any:
+		for _, child := range typed {
+			walkJSON(child, visit)
+		}
+	}
+}
+
+func firstValue(node map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := node[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func intFromAny(value any) int {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case int:
+		return typed
+	case string:
+		parsed, _ := strconv.Atoi(typed)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return ""
+	}
 }
 
 func (c *HTTPClient) getJSON(ctx context.Context, endpoint string, target any) error {

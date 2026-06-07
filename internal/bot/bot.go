@@ -14,6 +14,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
@@ -47,6 +48,7 @@ const (
 	flowAccountPass   flowKind = "account_pass"
 	flowWatchCity     flowKind = "watch_city"
 	flowWatchService  flowKind = "watch_service"
+	flowWatchSearch   flowKind = "watch_search"
 	flowWatchDoctor   flowKind = "watch_doctor"
 	flowWatchFacility flowKind = "watch_facility"
 )
@@ -225,27 +227,11 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 		}
 		b.send(user, b.catalog.T(user.Locale, "flow.account.saved"), mainKeyboard(b.catalog, user.Locale))
 	case flowWatchCity:
-		id, name, ok := parseIDName(text)
-		if !ok {
-			b.send(user, b.catalog.T(user.Locale, "flow.watch.city"), cancelKeyboard(b.catalog, user.Locale))
-			return
-		}
-		state.Watch.CityID = id
-		state.Watch.CityName = name
-		state.Kind = flowWatchService
-		b.setFlow(user.ID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.service"), cancelKeyboard(b.catalog, user.Locale))
+		b.showCityPicker(ctx, user, false)
 	case flowWatchService:
-		id, name, ok := parseIDName(text)
-		if !ok {
-			b.send(user, b.catalog.T(user.Locale, "flow.watch.service"), cancelKeyboard(b.catalog, user.Locale))
-			return
-		}
-		state.Watch.ServiceID = id
-		state.Watch.ServiceName = name
-		state.Kind = flowWatchDoctor
-		b.setFlow(user.ID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.doctor"), doctorModeKeyboard(b.catalog, user.Locale))
+		b.showProcedureMenu(ctx, user, state)
+	case flowWatchSearch:
+		b.showProcedureSearchResults(ctx, user, state, text)
 	case flowWatchDoctor:
 		id, name, ok := parseIDName(text)
 		if !ok {
@@ -299,9 +285,49 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		b.send(user, b.catalog.T(user.Locale, "settings.title"), settingsKeyboard(b.catalog, user.Locale))
 	case data == "settings:language":
 		b.send(user, b.catalog.T(user.Locale, "flow.language.choose"), languageKeyboard())
+	case data == "settings:city":
+		b.showCityPicker(ctx, user, true)
 	case data == "cancel":
 		b.clearFlow(user.ID)
 		b.showMenu(user)
+	case strings.HasPrefix(data, "prefcity:"):
+		b.handlePreferredCity(ctx, user, data)
+	case strings.HasPrefix(data, "city:"):
+		b.handleWatchCity(ctx, user, data)
+	case data == "proc:search":
+		state := b.getFlow(user.ID)
+		if state == nil {
+			return
+		}
+		state.Kind = flowWatchSearch
+		b.setFlow(user.ID, state)
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
+	case data == "proc:all":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.showAllProcedures(ctx, user, state)
+		}
+	case strings.HasPrefix(data, "proc:"):
+		b.handleProcedure(ctx, user, data)
+	case data == "fac:any":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			state.Watch.FacilityMode = domain.FacilityModeAll
+			b.setFlow(user.ID, state)
+			b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
+		}
+	case data == "fac:all":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.showAllFacilities(ctx, user, state)
+		}
+	case data == "fac:favs":
+		state := b.getFlow(user.ID)
+		if state != nil {
+			b.showFavoriteFacilities(ctx, user, state, 0)
+		}
+	case strings.HasPrefix(data, "fac:"):
+		b.handleFacility(ctx, user, data)
 	case data == "doctor:any":
 		state := b.getFlow(user.ID)
 		if state == nil {
@@ -332,8 +358,17 @@ func (b *Bot) startWatchFlow(ctx context.Context, user domain.User) {
 		b.send(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
-	b.setFlow(user.ID, &flow{Kind: flowWatchCity, Watch: domain.Watch{UserID: user.ID, NextDays: 14, DoctorMode: domain.DoctorModeAny, FacilityMode: domain.FacilityModeAll}})
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.city"), cancelKeyboard(b.catalog, user.Locale))
+	state := &flow{Kind: flowWatchCity, Watch: domain.Watch{UserID: user.ID, NextDays: 14, DoctorMode: domain.DoctorModeAny, FacilityMode: domain.FacilityModeAll}}
+	b.setFlow(user.ID, state)
+	if user.PreferredCityID != nil {
+		state.Watch.CityID = *user.PreferredCityID
+		state.Watch.CityName = user.PreferredCityName
+		state.Kind = flowWatchService
+		b.setFlow(user.ID, state)
+		b.showProcedureMenu(ctx, user, state)
+		return
+	}
+	b.showCityPicker(ctx, user, false)
 }
 
 func (b *Bot) finishFacilityStep(ctx context.Context, user domain.User, state *flow, text string) {
@@ -352,6 +387,239 @@ func (b *Bot) finishFacilityStep(ctx context.Context, user domain.User, state *f
 	b.setFlow(user.ID, state)
 	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
 	_ = ctx
+}
+
+func (b *Bot) showCityPicker(ctx context.Context, user domain.User, settings bool) {
+	cities, err := b.ensureCities(ctx, user)
+	if err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
+		return
+	}
+	prefix := "city:"
+	if settings {
+		prefix = "prefcity:"
+	}
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.city"), cityKeyboard(cities, prefix, b.catalog, user.Locale))
+}
+
+func (b *Bot) handlePreferredCity(ctx context.Context, user domain.User, data string) {
+	id, err := strconv.Atoi(strings.TrimPrefix(data, "prefcity:"))
+	if err != nil {
+		return
+	}
+	city, err := b.db.City(ctx, id)
+	if err != nil {
+		return
+	}
+	_ = b.db.SetUserPreferredCity(ctx, user.ID, city)
+	b.send(user, b.catalog.T(user.Locale, "settings.city_saved", city.Name), mainKeyboard(b.catalog, user.Locale))
+}
+
+func (b *Bot) handleWatchCity(ctx context.Context, user domain.User, data string) {
+	state := b.getFlow(user.ID)
+	if state == nil {
+		return
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(data, "city:"))
+	if err != nil {
+		return
+	}
+	city, err := b.db.City(ctx, id)
+	if err != nil {
+		return
+	}
+	state.Watch.CityID = city.ID
+	state.Watch.CityName = city.Name
+	state.Kind = flowWatchService
+	b.setFlow(user.ID, state)
+	b.showProcedureMenu(ctx, user, state)
+}
+
+func (b *Bot) showProcedureMenu(ctx context.Context, user domain.User, state *flow) {
+	if err := b.ensureProcedures(ctx, user, domain.City{ID: state.Watch.CityID, Name: state.Watch.CityName}); err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
+		return
+	}
+	recent, _ := b.db.RecentProcedures(ctx, state.Watch.CityID, 6)
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.service"), procedureMenuKeyboard(recent, b.catalog, user.Locale))
+}
+
+func (b *Bot) showProcedureSearchResults(ctx context.Context, user domain.User, state *flow, query string) {
+	procedures, err := b.db.SearchProcedures(ctx, state.Watch.CityID, query, 8)
+	if err != nil || len(procedures) == 0 {
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
+		return
+	}
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.service_results"), procedureListKeyboard(procedures, b.catalog, user.Locale))
+}
+
+func (b *Bot) showAllProcedures(ctx context.Context, user domain.User, state *flow) {
+	procedures, err := b.db.SearchProcedures(ctx, state.Watch.CityID, "", 20)
+	if err != nil || len(procedures) == 0 {
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
+		return
+	}
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.service_all"), procedureListKeyboard(procedures, b.catalog, user.Locale))
+}
+
+func (b *Bot) handleProcedure(ctx context.Context, user domain.User, data string) {
+	state := b.getFlow(user.ID)
+	if state == nil {
+		return
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(data, "proc:"))
+	if err != nil {
+		return
+	}
+	proc, err := b.db.Procedure(ctx, state.Watch.CityID, id)
+	if err != nil {
+		return
+	}
+	state.Watch.ServiceID = proc.ID
+	state.Watch.ServiceName = proc.Name
+	state.Watch.DoctorMode = domain.DoctorModeAny
+	state.Kind = flowWatchFacility
+	b.setFlow(user.ID, state)
+	b.showFacilityMenu(ctx, user, state)
+}
+
+func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flow) {
+	city := domain.City{ID: state.Watch.CityID, Name: state.Watch.CityName}
+	if err := b.ensureFacilities(ctx, user, city, state.Watch.ServiceID); err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
+		return
+	}
+	favorites, _ := b.db.FavoriteFacilities(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, 3)
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.facility"), facilityMenuKeyboard(favorites, b.catalog, user.Locale))
+}
+
+func (b *Bot) showFavoriteFacilities(ctx context.Context, user domain.User, state *flow, limit int) {
+	favorites, err := b.db.FavoriteFacilities(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, limit)
+	if err != nil || len(favorites) == 0 {
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_no_favorites"), facilityMenuKeyboard(nil, b.catalog, user.Locale))
+		return
+	}
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_favorites"), facilityListKeyboard(favorites, b.catalog, user.Locale))
+}
+
+func (b *Bot) showAllFacilities(ctx context.Context, user domain.User, state *flow) {
+	facilities, err := b.db.Facilities(ctx, state.Watch.CityID, state.Watch.ServiceID, 20)
+	if err != nil || len(facilities) == 0 {
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_empty"), facilityMenuKeyboard(nil, b.catalog, user.Locale))
+		return
+	}
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_all"), facilityListKeyboard(facilities, b.catalog, user.Locale))
+}
+
+func (b *Bot) handleFacility(ctx context.Context, user domain.User, data string) {
+	state := b.getFlow(user.ID)
+	if state == nil {
+		return
+	}
+	id, err := strconv.Atoi(strings.TrimPrefix(data, "fac:"))
+	if err != nil {
+		return
+	}
+	facilities, err := b.db.Facilities(ctx, state.Watch.CityID, state.Watch.ServiceID, 0)
+	if err != nil {
+		return
+	}
+	for _, facility := range facilities {
+		if facility.ID != id {
+			continue
+		}
+		state.Watch.FacilityMode = domain.FacilityModeSelected
+		state.Watch.FacilityIDs = []int{facility.ID}
+		state.Watch.FacilityNames = []string{facility.Name}
+		_ = b.db.SaveFavoriteFacility(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, facility)
+		b.setFlow(user.ID, state)
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
+		return
+	}
+}
+
+func (b *Bot) ensureCities(ctx context.Context, user domain.User) ([]domain.City, error) {
+	cities, err := b.db.Cities(ctx, 24)
+	if err != nil {
+		return nil, err
+	}
+	if len(cities) > 0 {
+		return cities, nil
+	}
+	client, err := b.authenticatedLuxMedClient(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	cities, err = client.GetCities(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.db.UpsertCities(ctx, cities); err != nil {
+		return nil, err
+	}
+	return b.db.Cities(ctx, 24)
+}
+
+func (b *Bot) ensureProcedures(ctx context.Context, user domain.User, city domain.City) error {
+	existing, err := b.db.SearchProcedures(ctx, city.ID, "", 1)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		return nil
+	}
+	client, err := b.authenticatedLuxMedClient(ctx, user)
+	if err != nil {
+		return err
+	}
+	services, err := client.GetServices(ctx)
+	if err != nil {
+		return err
+	}
+	procedures := make([]domain.Procedure, 0, len(services))
+	for _, service := range services {
+		procedures = append(procedures, domain.Procedure{ID: service.ID, Name: service.Name})
+	}
+	recent, err := client.GetRecentProcedures(ctx)
+	if err == nil {
+		procedures = append(procedures, recent...)
+	}
+	return b.db.UpsertProcedures(ctx, city, procedures)
+}
+
+func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domain.City, procedureID int) error {
+	existing, err := b.db.Facilities(ctx, city.ID, procedureID, 1)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		return nil
+	}
+	client, err := b.authenticatedLuxMedClient(ctx, user)
+	if err != nil {
+		return err
+	}
+	data, err := client.GetDoctorsAndFacilities(ctx, city.ID, procedureID)
+	if err != nil {
+		return err
+	}
+	return b.db.UpsertFacilities(ctx, city, procedureID, data.Facilities)
+}
+
+func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (luxmed.Client, error) {
+	account, err := b.db.LuxMedAccount(ctx, user.ID)
+	if err != nil {
+		return nil, err
+	}
+	password, err := b.cryptor.Decrypt(account.EncryptedPassword)
+	if err != nil {
+		return nil, err
+	}
+	client := luxmed.NewHTTPClient(false)
+	if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
+		return nil, err
+	}
+	return client, nil
 }
 
 func (b *Bot) finishWatch(ctx context.Context, user domain.User, data string) {
