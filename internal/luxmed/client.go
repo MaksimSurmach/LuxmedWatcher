@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -25,6 +26,8 @@ const (
 	ServiceVariantsGroupsURL = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Dictionary/serviceVariantsGroups"
 	CitiesURL                = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Dictionary/cities"
 	DoctorsAndFacilitiesURL  = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Dictionary/facilitiesAndDoctors"
+	RecentSearchesURL        = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/RecentSearchTermsParameters/recentSearchData?includeRecentSearchParameters=true"
+	PopularServicesURL       = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/PopularServicesParameters/popularServicesParameters"
 	TermsURL                 = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/terms/index"
 )
 
@@ -38,6 +41,8 @@ type Client interface {
 	SearchAppointments(ctx context.Context, watch domain.Watch) ([]domain.Appointment, error)
 	GetCities(ctx context.Context) ([]domain.City, error)
 	GetServices(ctx context.Context) ([]domain.Service, error)
+	GetRecentProcedures(ctx context.Context) ([]domain.Procedure, error)
+	GetPopularProcedures(ctx context.Context) ([]domain.Procedure, error)
 	GetDoctorsAndFacilities(ctx context.Context, cityID int, serviceID int) (domain.DoctorsAndFacilities, error)
 }
 
@@ -163,20 +168,77 @@ func (c *HTTPClient) GetCities(ctx context.Context) ([]domain.City, error) {
 }
 
 func (c *HTTPClient) GetServices(ctx context.Context) ([]domain.Service, error) {
-	var raw struct {
-		Children []struct {
-			ID   int    `json:"id"`
-			Name string `json:"name"`
-		} `json:"children"`
-	}
-	if err := c.getJSON(ctx, ServiceVariantsGroupsURL, &raw); err != nil {
+	var payload any
+	if err := c.getJSON(ctx, ServiceVariantsGroupsURL, &payload); err != nil {
+		slog.Default().Warn("luxmed get services failed", "err", err)
 		return nil, err
 	}
-	services := make([]domain.Service, 0, len(raw.Children))
-	for _, item := range raw.Children {
-		services = append(services, domain.Service{ID: item.ID, Name: item.Name})
+
+	raw, _ := json.Marshal(payload)
+	sample := string(raw)
+	if len(sample) > 2000 {
+		sample = sample[:2000]
 	}
+
+	services := normalizeServices(payload)
+
+	slog.Default().Info(
+		"luxmed services loaded",
+		"raw_bytes", len(raw),
+		"parsed_services", len(services),
+		"sample", sample,
+	)
+
 	return services, nil
+}
+
+func (c *HTTPClient) GetRecentProcedures(ctx context.Context) ([]domain.Procedure, error) {
+	var payload any
+	if err := c.getJSON(ctx, RecentSearchesURL, &payload); err != nil {
+		return nil, err
+	}
+
+	return proceduresFromLuxMedPayload(payload, true), nil
+}
+
+func (c *HTTPClient) GetPopularProcedures(ctx context.Context) ([]domain.Procedure, error) {
+	var payload any
+	if err := c.getJSON(ctx, PopularServicesURL, &payload); err != nil {
+		return nil, err
+	}
+
+	return proceduresFromLuxMedPayload(payload, false), nil
+}
+
+func proceduresFromLuxMedPayload(payload any, isRecent bool) []domain.Procedure {
+	seen := make(map[int]bool)
+	var procedures []domain.Procedure
+
+	walkJSON(payload, func(node map[string]any) {
+		id := intFromAny(firstValue(node,
+			"serviceVariantId",
+			"serviceId",
+		))
+
+		name := stringFromAny(firstValue(node,
+			"serviceVariantName",
+			"serviceName",
+			"searchName",
+		))
+
+		if id <= 0 || name == "" || seen[id] {
+			return
+		}
+
+		seen[id] = true
+		procedures = append(procedures, domain.Procedure{
+			ID:       id,
+			Name:     name,
+			IsRecent: isRecent,
+		})
+	})
+
+	return procedures
 }
 
 func (c *HTTPClient) GetDoctorsAndFacilities(ctx context.Context, cityID int, serviceID int) (domain.DoctorsAndFacilities, error) {
@@ -219,6 +281,52 @@ func (c *HTTPClient) GetDoctorsAndFacilities(ctx context.Context, cityID int, se
 		result.Facilities = append(result.Facilities, domain.Facility{ID: facility.ID, Name: facility.Name, Address: facility.Address})
 	}
 	return result, nil
+}
+
+func walkJSON(value any, visit func(map[string]any)) {
+	switch typed := value.(type) {
+	case map[string]any:
+		visit(typed)
+		for _, child := range typed {
+			walkJSON(child, visit)
+		}
+	case []any:
+		for _, child := range typed {
+			walkJSON(child, visit)
+		}
+	}
+}
+
+func firstValue(node map[string]any, keys ...string) any {
+	for _, key := range keys {
+		if value, ok := node[key]; ok {
+			return value
+		}
+	}
+	return nil
+}
+
+func intFromAny(value any) int {
+	switch typed := value.(type) {
+	case float64:
+		return int(typed)
+	case int:
+		return typed
+	case string:
+		parsed, _ := strconv.Atoi(typed)
+		return parsed
+	default:
+		return 0
+	}
+}
+
+func stringFromAny(value any) string {
+	switch typed := value.(type) {
+	case string:
+		return strings.TrimSpace(typed)
+	default:
+		return ""
+	}
 }
 
 func (c *HTTPClient) getJSON(ctx context.Context, endpoint string, target any) error {

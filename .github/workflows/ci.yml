@@ -4,9 +4,6 @@ on:
   pull_request:
     types:
       - synchronize
-  push:
-    branches:
-      - "**"
 
 permissions:
   contents: read

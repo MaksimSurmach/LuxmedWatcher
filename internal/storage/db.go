@@ -42,8 +42,13 @@ func (db *DB) Close() error {
 }
 
 func (db *DB) Migrate(ctx context.Context) error {
-	_, err := db.sql.ExecContext(ctx, schema)
-	return err
+	if _, err := db.sql.ExecContext(ctx, schema); err != nil {
+		return err
+	}
+	for _, stmt := range compatibilityMigrations {
+		_, _ = db.sql.ExecContext(ctx, stmt)
+	}
+	return nil
 }
 
 func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.User, error) {
@@ -75,7 +80,7 @@ func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.
 
 func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, status, role, created_at, updated_at, last_seen_at
+		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at
 		FROM users WHERE telegram_user_id=?
 	`, telegramID)
 	return scanUser(row)
@@ -83,7 +88,7 @@ func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.Us
 
 func (db *DB) UserByID(ctx context.Context, id int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, status, role, created_at, updated_at, last_seen_at
+		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at
 		FROM users WHERE id=?
 	`, id)
 	return scanUser(row)
@@ -96,6 +101,11 @@ func (db *DB) SetUserActive(ctx context.Context, userID int64, role domain.UserR
 
 func (db *DB) SetUserLocale(ctx context.Context, userID int64, locale string) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE users SET locale=?, updated_at=? WHERE id=?`, locale, time.Now().UTC(), userID)
+	return err
+}
+
+func (db *DB) SetUserPreferredCity(ctx context.Context, userID int64, city domain.City) error {
+	_, err := db.sql.ExecContext(ctx, `UPDATE users SET preferred_city_id=?, preferred_city_name=?, updated_at=? WHERE id=?`, city.ID, city.Name, time.Now().UTC(), userID)
 	return err
 }
 
@@ -345,13 +355,416 @@ func (db *DB) LastNotificationAt(ctx context.Context, watchID int64, fingerprint
 	return &sentAt.Time, nil
 }
 
+func (db *DB) UpsertCities(ctx context.Context, cities []domain.City) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC()
+	for _, city := range cities {
+		if city.ID == 0 || city.Name == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO luxmed_cities (id, name, updated_at) VALUES (?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at
+		`, city.ID, city.Name, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (db *DB) Cities(ctx context.Context, limit int) ([]domain.City, error) {
+	return db.CitiesPage(ctx, limit, 0)
+}
+
+func (db *DB) CitiesPage(ctx context.Context, limit int, offset int) ([]domain.City, error) {
+	query := `SELECT id, name FROM luxmed_cities ORDER BY name`
+	args := []any{}
+	if limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var cities []domain.City
+	for rows.Next() {
+		var city domain.City
+		if err := rows.Scan(&city.ID, &city.Name); err != nil {
+			return nil, err
+		}
+		cities = append(cities, city)
+	}
+	return cities, rows.Err()
+}
+
+func (db *DB) SearchCities(ctx context.Context, query string, limit int) ([]domain.City, error) {
+	query = normalizeCitySearch(query)
+	rows, err := db.sql.QueryContext(ctx, `SELECT id, name FROM luxmed_cities ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var cities []domain.City
+	for rows.Next() {
+		var city domain.City
+		if err := rows.Scan(&city.ID, &city.Name); err != nil {
+			return nil, err
+		}
+		if query == "" || strings.Contains(normalizeCitySearch(city.Name), query) {
+			cities = append(cities, city)
+		}
+		if limit > 0 && len(cities) >= limit {
+			break
+		}
+	}
+	return cities, rows.Err()
+}
+
+func normalizeCitySearch(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer(
+		"ą", "a",
+		"ć", "c",
+		"ę", "e",
+		"ł", "l",
+		"ń", "n",
+		"ó", "o",
+		"ś", "s",
+		"ż", "z",
+		"ź", "z",
+	)
+	return replacer.Replace(value)
+}
+
+func (db *DB) City(ctx context.Context, id int) (domain.City, error) {
+	var city domain.City
+	err := db.sql.QueryRowContext(ctx, `SELECT id, name FROM luxmed_cities WHERE id=?`, id).Scan(&city.ID, &city.Name)
+	return city, err
+}
+
+func (db *DB) UpsertProcedures(ctx context.Context, city domain.City, procedures []domain.Procedure) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC()
+	for _, proc := range procedures {
+		if proc.ID == 0 || proc.Name == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO luxmed_procedures (id, city_id, city_name, name, is_recent, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id, city_id) DO UPDATE SET
+				city_name=excluded.city_name,
+				name=excluded.name,
+				is_recent=luxmed_procedures.is_recent OR excluded.is_recent,
+				updated_at=excluded.updated_at
+		`, proc.ID, city.ID, city.Name, proc.Name, proc.IsRecent, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (db *DB) RecentProcedures(ctx context.Context, cityID int, limit int) ([]domain.Procedure, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id, city_id, city_name, name, is_recent, updated_at
+		FROM luxmed_procedures
+		WHERE city_id=? AND is_recent=1
+		ORDER BY updated_at DESC, name
+		LIMIT ?
+	`, cityID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanProcedures(rows)
+}
+
+func (db *DB) SearchProcedures(ctx context.Context, cityID int, query string, limit int) ([]domain.Procedure, error) {
+	return db.SearchProceduresPage(ctx, cityID, query, limit, 0)
+}
+
+func (db *DB) SearchProceduresPage(ctx context.Context, cityID int, query string, limit int, offset int) ([]domain.Procedure, error) {
+	query = strings.TrimSpace(strings.ToLower(query))
+	sqlQuery := `
+		SELECT id, city_id, city_name, name, is_recent, updated_at
+		FROM luxmed_procedures
+		WHERE city_id=?`
+	args := []any{cityID}
+
+	if query != "" {
+		sqlQuery += ` AND lower(name) LIKE ?`
+		args = append(args, "%"+query+"%")
+	}
+
+	sqlQuery += ` ORDER BY name`
+
+	if limit > 0 {
+		sqlQuery += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+
+	rows, err := db.sql.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanProcedures(rows)
+}
+
+func (db *DB) ProcedureLetters(ctx context.Context, cityID int) ([]string, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT DISTINCT substr(name, 1, 1)
+		FROM luxmed_procedures
+		WHERE city_id=? AND name <> ''
+		ORDER BY substr(name, 1, 1)
+	`, cityID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var letters []string
+	for rows.Next() {
+		var letter string
+		if err := rows.Scan(&letter); err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(letter) != "" {
+			letters = append(letters, letter)
+		}
+	}
+
+	return letters, rows.Err()
+}
+
+func (db *DB) ProceduresByLetter(ctx context.Context, cityID int, letter string, limit int, offset int) ([]domain.Procedure, error) {
+	letter = strings.TrimSpace(letter)
+	if letter == "" {
+		return nil, nil
+	}
+
+	sqlQuery := `
+		SELECT id, city_id, city_name, name, is_recent, updated_at
+		FROM luxmed_procedures
+		WHERE city_id=? AND substr(name, 1, 1)=?
+		ORDER BY name`
+	args := []any{cityID, letter}
+
+	if limit > 0 {
+		sqlQuery += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+
+	rows, err := db.sql.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return scanProcedures(rows)
+}
+
+func (db *DB) Procedure(ctx context.Context, cityID int, procedureID int) (domain.Procedure, error) {
+	row := db.sql.QueryRowContext(ctx, `
+		SELECT id, city_id, city_name, name, is_recent, updated_at
+		FROM luxmed_procedures
+		WHERE city_id=? AND id=?
+	`, cityID, procedureID)
+	var proc domain.Procedure
+	err := row.Scan(&proc.ID, &proc.CityID, &proc.CityName, &proc.Name, &proc.IsRecent, &proc.UpdatedAt)
+	return proc, err
+}
+
+func (db *DB) UpsertFacilities(ctx context.Context, city domain.City, procedureID int, facilities []domain.Facility) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC()
+	for _, facility := range facilities {
+		if facility.ID == 0 || facility.Name == "" {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO luxmed_facilities (id, city_id, city_name, procedure_id, name, address, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id, city_id, procedure_id) DO UPDATE SET
+				city_name=excluded.city_name,
+				name=excluded.name,
+				address=excluded.address,
+				updated_at=excluded.updated_at
+		`, facility.ID, city.ID, city.Name, procedureID, facility.Name, facility.Address, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (db *DB) Facilities(ctx context.Context, cityID int, procedureID int, limit int) ([]domain.Facility, error) {
+	query := `
+		SELECT id, name, address
+		FROM luxmed_facilities
+		WHERE city_id=? AND procedure_id=?
+		ORDER BY name`
+	args := []any{cityID, procedureID}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var facilities []domain.Facility
+	for rows.Next() {
+		var facility domain.Facility
+		if err := rows.Scan(&facility.ID, &facility.Name, &facility.Address); err != nil {
+			return nil, err
+		}
+		facilities = append(facilities, facility)
+	}
+	return facilities, rows.Err()
+}
+
+func (db *DB) FacilitiesPage(ctx context.Context, cityID int, procedureID int, limit int, offset int) ([]domain.Facility, error) {
+	query := `
+		SELECT id, name, address
+		FROM luxmed_facilities
+		WHERE city_id=? AND procedure_id=?
+		ORDER BY name`
+	args := []any{cityID, procedureID}
+
+	if limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var facilities []domain.Facility
+	for rows.Next() {
+		var facility domain.Facility
+		if err := rows.Scan(&facility.ID, &facility.Name, &facility.Address); err != nil {
+			return nil, err
+		}
+		facilities = append(facilities, facility)
+	}
+
+	return facilities, rows.Err()
+}
+
+func (db *DB) FavoriteFacilities(ctx context.Context, userID int64, cityID int, procedureID int, limit int) ([]domain.Facility, error) {
+	query := `
+		SELECT f.id, f.name, f.address
+		FROM favorite_facilities fav
+		JOIN luxmed_facilities f ON f.id=fav.facility_id AND f.city_id=fav.city_id AND f.procedure_id=fav.procedure_id
+		WHERE fav.user_id=? AND fav.city_id=? AND fav.procedure_id=?
+		ORDER BY fav.last_used_at DESC`
+	args := []any{userID, cityID, procedureID}
+	if limit > 0 {
+		query += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var facilities []domain.Facility
+	for rows.Next() {
+		var facility domain.Facility
+		if err := rows.Scan(&facility.ID, &facility.Name, &facility.Address); err != nil {
+			return nil, err
+		}
+		facilities = append(facilities, facility)
+	}
+	return facilities, rows.Err()
+}
+
+func (db *DB) FavoriteFacilitiesPage(ctx context.Context, userID int64, cityID int, procedureID int, limit int, offset int) ([]domain.Facility, error) {
+	query := `
+		SELECT f.id, f.name, f.address
+		FROM favorite_facilities fav
+		JOIN luxmed_facilities f ON f.id=fav.facility_id AND f.city_id=fav.city_id AND f.procedure_id=fav.procedure_id
+		WHERE fav.user_id=? AND fav.city_id=? AND fav.procedure_id=?
+		ORDER BY fav.last_used_at DESC`
+	args := []any{userID, cityID, procedureID}
+
+	if limit > 0 {
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
+	}
+
+	rows, err := db.sql.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var facilities []domain.Facility
+	for rows.Next() {
+		var facility domain.Facility
+		if err := rows.Scan(&facility.ID, &facility.Name, &facility.Address); err != nil {
+			return nil, err
+		}
+		facilities = append(facilities, facility)
+	}
+
+	return facilities, rows.Err()
+}
+
+func (db *DB) SaveFavoriteFacility(ctx context.Context, userID int64, cityID int, procedureID int, facility domain.Facility) error {
+	_, err := db.sql.ExecContext(ctx, `
+		INSERT INTO favorite_facilities (user_id, city_id, procedure_id, facility_id, facility_name, last_used_at)
+		VALUES (?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id, city_id, procedure_id, facility_id) DO UPDATE SET
+			facility_name=excluded.facility_name,
+			last_used_at=excluded.last_used_at
+	`, userID, cityID, procedureID, facility.ID, facility.Name, time.Now().UTC())
+	return err
+}
+
+func scanProcedures(rows *sql.Rows) ([]domain.Procedure, error) {
+	var procedures []domain.Procedure
+	for rows.Next() {
+		var proc domain.Procedure
+		if err := rows.Scan(&proc.ID, &proc.CityID, &proc.CityName, &proc.Name, &proc.IsRecent, &proc.UpdatedAt); err != nil {
+			return nil, err
+		}
+		procedures = append(procedures, proc)
+	}
+	return procedures, rows.Err()
+}
+
 type scanner interface {
 	Scan(dest ...any) error
 }
 
 func scanUser(row scanner) (domain.User, error) {
 	var u domain.User
-	err := row.Scan(&u.ID, &u.TelegramUserID, &u.TelegramChatID, &u.Username, &u.DisplayName, &u.Locale, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastSeenAt)
+	var preferredCityID sql.NullInt64
+	err := row.Scan(&u.ID, &u.TelegramUserID, &u.TelegramChatID, &u.Username, &u.DisplayName, &u.Locale, &preferredCityID, &u.PreferredCityName, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastSeenAt)
+	if preferredCityID.Valid {
+		id := int(preferredCityID.Int64)
+		u.PreferredCityID = &id
+	}
 	return u, err
 }
 
@@ -451,6 +864,8 @@ CREATE TABLE IF NOT EXISTS users (
 	telegram_username TEXT NOT NULL DEFAULT '',
 	display_name TEXT NOT NULL DEFAULT '',
 	locale TEXT NOT NULL,
+	preferred_city_id INTEGER,
+	preferred_city_name TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL,
 	role TEXT NOT NULL,
 	created_at TIMESTAMP NOT NULL,
@@ -544,7 +959,51 @@ CREATE TABLE IF NOT EXISTS notification_history (
 	error TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS luxmed_cities (
+	id INTEGER PRIMARY KEY,
+	name TEXT NOT NULL,
+	updated_at TIMESTAMP NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS luxmed_procedures (
+	id INTEGER NOT NULL,
+	city_id INTEGER NOT NULL,
+	city_name TEXT NOT NULL,
+	name TEXT NOT NULL,
+	is_recent BOOLEAN NOT NULL DEFAULT 0,
+	updated_at TIMESTAMP NOT NULL,
+	PRIMARY KEY (id, city_id)
+);
+
+CREATE TABLE IF NOT EXISTS luxmed_facilities (
+	id INTEGER NOT NULL,
+	city_id INTEGER NOT NULL,
+	city_name TEXT NOT NULL,
+	procedure_id INTEGER NOT NULL,
+	name TEXT NOT NULL,
+	address TEXT NOT NULL DEFAULT '',
+	updated_at TIMESTAMP NOT NULL,
+	PRIMARY KEY (id, city_id, procedure_id)
+);
+
+CREATE TABLE IF NOT EXISTS favorite_facilities (
+	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	city_id INTEGER NOT NULL,
+	procedure_id INTEGER NOT NULL,
+	facility_id INTEGER NOT NULL,
+	facility_name TEXT NOT NULL,
+	last_used_at TIMESTAMP NOT NULL,
+	PRIMARY KEY (user_id, city_id, procedure_id, facility_id)
+);
+
 CREATE INDEX IF NOT EXISTS idx_watches_due ON watches(status, last_checked_at);
 CREATE INDEX IF NOT EXISTS idx_history_watch ON appointment_history(watch_id, date_time);
 CREATE INDEX IF NOT EXISTS idx_notifications_fingerprint ON notification_history(watch_id, appointment_fingerprint, sent_at);
+CREATE INDEX IF NOT EXISTS idx_luxmed_procedures_search ON luxmed_procedures(city_id, name);
+CREATE INDEX IF NOT EXISTS idx_luxmed_facilities_lookup ON luxmed_facilities(city_id, procedure_id, name);
 `, domain.WatchStatusActive, domain.WatchStatusPaused, domain.WatchStatusDeleted)
+
+var compatibilityMigrations = []string{
+	`ALTER TABLE users ADD COLUMN preferred_city_id INTEGER`,
+	`ALTER TABLE users ADD COLUMN preferred_city_name TEXT NOT NULL DEFAULT ''`,
+}

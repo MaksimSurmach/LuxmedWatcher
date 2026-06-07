@@ -46,17 +46,19 @@ const (
 )
 
 type User struct {
-	ID             int64
-	TelegramUserID int64
-	TelegramChatID int64
-	Username       string
-	DisplayName    string
-	Locale         string
-	Status         UserStatus
-	Role           UserRole
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
-	LastSeenAt     time.Time
+	ID                int64
+	TelegramUserID    int64
+	TelegramChatID    int64
+	Username          string
+	DisplayName       string
+	Locale            string
+	PreferredCityID   *int
+	PreferredCityName string
+	Status            UserStatus
+	Role              UserRole
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	LastSeenAt        time.Time
 }
 
 func (u User) IsActive() bool {
@@ -170,6 +172,15 @@ type City struct {
 type Service struct {
 	ID   int
 	Name string
+}
+
+type Procedure struct {
+	ID        int
+	Name      string
+	CityID    int
+	CityName  string
+	IsRecent  bool
+	UpdatedAt time.Time
 }
 
 type Doctor struct {
