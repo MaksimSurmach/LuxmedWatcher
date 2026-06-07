@@ -468,7 +468,7 @@ func (db *DB) UpsertProcedures(ctx context.Context, city domain.City, procedures
 				is_recent=luxmed_procedures.is_recent OR excluded.is_recent,
 				updated_at=excluded.updated_at
 		`, proc.ID, city.ID, city.Name, proc.Name, proc.IsRecent, now); err != nil {
-					return err
+			return err
 		}
 	}
 	return tx.Commit()
