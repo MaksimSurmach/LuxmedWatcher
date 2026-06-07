@@ -47,6 +47,7 @@ const (
 	flowAccountLogin  flowKind = "account_login"
 	flowAccountPass   flowKind = "account_pass"
 	flowWatchCity     flowKind = "watch_city"
+	flowCitySearch    flowKind = "city_search"
 	flowWatchService  flowKind = "watch_service"
 	flowWatchSearch   flowKind = "watch_search"
 	flowWatchDoctor   flowKind = "watch_doctor"
@@ -54,9 +55,10 @@ const (
 )
 
 type flow struct {
-	Kind  flowKind
-	Login string
-	Watch domain.Watch
+	Kind         flowKind
+	Login        string
+	CitySettings bool
+	Watch        domain.Watch
 }
 
 func New(api *tgbotapi.BotAPI, db *storage.DB, catalog *i18n.Catalog, cryptor *security.Cryptor, cfg Config, logger *slog.Logger) *Bot {
@@ -227,7 +229,9 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 		}
 		b.send(user, b.catalog.T(user.Locale, "flow.account.saved"), mainKeyboard(b.catalog, user.Locale))
 	case flowWatchCity:
-		b.showCityPicker(ctx, user, false)
+		b.showCityPicker(ctx, user, false, 0)
+	case flowCitySearch:
+		b.showCitySearchResults(ctx, user, state, text)
 	case flowWatchService:
 		b.showProcedureMenu(ctx, user, state)
 	case flowWatchSearch:
@@ -286,10 +290,29 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	case data == "settings:language":
 		b.send(user, b.catalog.T(user.Locale, "flow.language.choose"), languageKeyboard())
 	case data == "settings:city":
-		b.showCityPicker(ctx, user, true)
+		b.setFlow(user.ID, &flow{Kind: flowWatchCity, CitySettings: true})
+		b.showCityPicker(ctx, user, true, 0)
 	case data == "cancel":
 		b.clearFlow(user.ID)
 		b.showMenu(user)
+	case data == "city:search":
+		state := b.getFlow(user.ID)
+		if state == nil {
+			state = &flow{Kind: flowCitySearch}
+		}
+		state.Kind = flowCitySearch
+		state.CitySettings = false
+		b.setFlow(user.ID, state)
+		b.send(user, b.catalog.T(user.Locale, "flow.city_search"), citySearchKeyboard(b.catalog, user.Locale))
+	case data == "prefcity:search":
+		b.setFlow(user.ID, &flow{Kind: flowCitySearch, CitySettings: true})
+		b.send(user, b.catalog.T(user.Locale, "flow.city_search"), citySearchKeyboard(b.catalog, user.Locale))
+	case strings.HasPrefix(data, "city:page:"):
+		page, _ := strconv.Atoi(strings.TrimPrefix(data, "city:page:"))
+		b.showCityPicker(ctx, user, false, page)
+	case strings.HasPrefix(data, "prefcity:page:"):
+		page, _ := strconv.Atoi(strings.TrimPrefix(data, "prefcity:page:"))
+		b.showCityPicker(ctx, user, true, page)
 	case strings.HasPrefix(data, "prefcity:"):
 		b.handlePreferredCity(ctx, user, data)
 	case strings.HasPrefix(data, "city:"):
@@ -368,7 +391,7 @@ func (b *Bot) startWatchFlow(ctx context.Context, user domain.User) {
 		b.showProcedureMenu(ctx, user, state)
 		return
 	}
-	b.showCityPicker(ctx, user, false)
+	b.showCityPicker(ctx, user, false, 0)
 }
 
 func (b *Bot) finishFacilityStep(ctx context.Context, user domain.User, state *flow, text string) {
@@ -389,17 +412,46 @@ func (b *Bot) finishFacilityStep(ctx context.Context, user domain.User, state *f
 	_ = ctx
 }
 
-func (b *Bot) showCityPicker(ctx context.Context, user domain.User, settings bool) {
-	cities, err := b.ensureCities(ctx, user)
+func (b *Bot) showCityPicker(ctx context.Context, user domain.User, settings bool, page int) {
+	const pageSize = 12
+	if page < 0 {
+		page = 0
+	}
+	if _, err := b.ensureCities(ctx, user); err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
+		return
+	}
+	cities, err := b.db.CitiesPage(ctx, pageSize+1, page*pageSize)
 	if err != nil {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
 		return
+	}
+	hasNext := len(cities) > pageSize
+	if hasNext {
+		cities = cities[:pageSize]
 	}
 	prefix := "city:"
 	if settings {
 		prefix = "prefcity:"
 	}
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.city"), cityKeyboard(cities, prefix, b.catalog, user.Locale))
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.city"), cityKeyboard(cities, prefix, page, page > 0, hasNext, b.catalog, user.Locale))
+}
+
+func (b *Bot) showCitySearchResults(ctx context.Context, user domain.User, state *flow, query string) {
+	if _, err := b.ensureCities(ctx, user); err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
+		return
+	}
+	cities, err := b.db.SearchCities(ctx, query, 12)
+	if err != nil || len(cities) == 0 {
+		b.send(user, b.catalog.T(user.Locale, "flow.city_not_found"), citySearchKeyboard(b.catalog, user.Locale))
+		return
+	}
+	prefix := "city:"
+	if state.CitySettings {
+		prefix = "prefcity:"
+	}
+	b.send(user, b.catalog.T(user.Locale, "flow.city_results"), cityKeyboard(cities, prefix, 0, false, false, b.catalog, user.Locale))
 }
 
 func (b *Bot) handlePreferredCity(ctx context.Context, user domain.User, data string) {

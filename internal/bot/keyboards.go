@@ -72,7 +72,7 @@ func watchKeyboard(c *i18n.Catalog, locale string, watch domain.Watch) tgbotapi.
 	)
 }
 
-func cityKeyboard(cities []domain.City, prefix string, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+func cityKeyboard(cities []domain.City, prefix string, page int, hasPrevious bool, hasNext bool, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
 	var rows [][]tgbotapi.InlineKeyboardButton
 	for i := 0; i < len(cities); i += 2 {
 		row := []tgbotapi.InlineKeyboardButton{
@@ -83,8 +83,25 @@ func cityKeyboard(cities []domain.City, prefix string, c *i18n.Catalog, locale s
 		}
 		rows = append(rows, row)
 	}
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.search_city"), prefix+"search")))
+	var nav []tgbotapi.InlineKeyboardButton
+	if hasPrevious {
+		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.previous"), fmt.Sprintf("%spage:%d", prefix, page-1)))
+	}
+	if hasNext {
+		nav = append(nav, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.next"), fmt.Sprintf("%spage:%d", prefix, page+1)))
+	}
+	if len(nav) > 0 {
+		rows = append(rows, nav)
+	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")))
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+func citySearchKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
+	)
 }
 
 func procedureMenuKeyboard(recent []domain.Procedure, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {

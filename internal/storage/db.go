@@ -377,11 +377,15 @@ func (db *DB) UpsertCities(ctx context.Context, cities []domain.City) error {
 }
 
 func (db *DB) Cities(ctx context.Context, limit int) ([]domain.City, error) {
+	return db.CitiesPage(ctx, limit, 0)
+}
+
+func (db *DB) CitiesPage(ctx context.Context, limit int, offset int) ([]domain.City, error) {
 	query := `SELECT id, name FROM luxmed_cities ORDER BY name`
 	args := []any{}
 	if limit > 0 {
-		query += ` LIMIT ?`
-		args = append(args, limit)
+		query += ` LIMIT ? OFFSET ?`
+		args = append(args, limit, offset)
 	}
 	rows, err := db.sql.QueryContext(ctx, query, args...)
 	if err != nil {
@@ -397,6 +401,45 @@ func (db *DB) Cities(ctx context.Context, limit int) ([]domain.City, error) {
 		cities = append(cities, city)
 	}
 	return cities, rows.Err()
+}
+
+func (db *DB) SearchCities(ctx context.Context, query string, limit int) ([]domain.City, error) {
+	query = normalizeCitySearch(query)
+	rows, err := db.sql.QueryContext(ctx, `SELECT id, name FROM luxmed_cities ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var cities []domain.City
+	for rows.Next() {
+		var city domain.City
+		if err := rows.Scan(&city.ID, &city.Name); err != nil {
+			return nil, err
+		}
+		if query == "" || strings.Contains(normalizeCitySearch(city.Name), query) {
+			cities = append(cities, city)
+		}
+		if limit > 0 && len(cities) >= limit {
+			break
+		}
+	}
+	return cities, rows.Err()
+}
+
+func normalizeCitySearch(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	replacer := strings.NewReplacer(
+		"ą", "a",
+		"ć", "c",
+		"ę", "e",
+		"ł", "l",
+		"ń", "n",
+		"ó", "o",
+		"ś", "s",
+		"ż", "z",
+		"ź", "z",
+	)
+	return replacer.Replace(value)
 }
 
 func (db *DB) City(ctx context.Context, id int) (domain.City, error) {
