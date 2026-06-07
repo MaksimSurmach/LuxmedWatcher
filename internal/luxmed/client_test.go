@@ -1,6 +1,7 @@
 package luxmed
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -14,5 +15,77 @@ func TestFingerprintStable(t *testing.T) {
 	second := Fingerprint(app)
 	if first == "" || first != second {
 		t.Fatalf("fingerprint is not stable: %q %q", first, second)
+	}
+}
+
+func TestNormalizeServicesAcceptsGroupedArrayResponse(t *testing.T) {
+	payload := decodePayload(t, `[
+		{"id": 1, "name": "Konsultacje", "children": [
+			{"id": 101, "name": "Konsultacja internisty"},
+			{"id": 102, "name": "Konsultacja kardiologa"}
+		]},
+		{"id": 2, "name": "Badania", "children": [
+			{"id": 201, "name": "USG jamy brzusznej"}
+		]}
+	]`)
+
+	services := normalizeServices(payload)
+	assertServices(t, services, []domain.Service{
+		{ID: 101, Name: "Konsultacja internisty"},
+		{ID: 102, Name: "Konsultacja kardiologa"},
+		{ID: 201, Name: "USG jamy brzusznej"},
+	})
+}
+
+func TestNormalizeServicesAcceptsRootChildrenResponse(t *testing.T) {
+	payload := decodePayload(t, `{
+		"children": [
+			{"id": "301", "name": "Dermatologia"},
+			{"id": "302", "name": "Ortopedia"}
+		]
+	}`)
+
+	services := normalizeServices(payload)
+	assertServices(t, services, []domain.Service{
+		{ID: 301, Name: "Dermatologia"},
+		{ID: 302, Name: "Ortopedia"},
+	})
+}
+
+func TestNormalizeServicesAcceptsWrappedResponse(t *testing.T) {
+	payload := decodePayload(t, `{
+		"success": true,
+		"data": [
+			{"serviceVariantId": 401, "serviceVariantName": "Pediatria"},
+			{"serviceId": 402, "serviceName": "Laryngologia"},
+			{"serviceVariantId": 401, "serviceVariantName": "Pediatria"}
+		]
+	}`)
+
+	services := normalizeServices(payload)
+	assertServices(t, services, []domain.Service{
+		{ID: 401, Name: "Pediatria"},
+		{ID: 402, Name: "Laryngologia"},
+	})
+}
+
+func decodePayload(t *testing.T, raw string) any {
+	t.Helper()
+	var payload any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatal(err)
+	}
+	return payload
+}
+
+func assertServices(t *testing.T, got []domain.Service, want []domain.Service) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("expected %d services, got %d: %#v", len(want), len(got), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("service %d = %#v, want %#v", i, got[i], want[i])
+		}
 	}
 }
