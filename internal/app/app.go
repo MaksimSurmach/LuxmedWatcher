@@ -2,9 +2,12 @@ package app
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"time"
 
@@ -52,24 +55,38 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	api, err := tgbotapi.NewBotAPI(a.cfg.TelegramToken)
+	api, err := tgbotapi.NewBotAPIWithClient(a.cfg.TelegramToken, tgbotapi.APIEndpoint, &http.Client{
+		Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second,
+	})
 	if err != nil {
-		return err
+		return errors.New("connect to Telegram Bot API: check the token and network")
 	}
 
 	tgBot := bot.New(api, db, catalog, cryptor, bot.Config{
 		DefaultLocale:    a.cfg.DefaultLocale,
 		AdminTelegramIDs: a.cfg.AdminTelegramIDs,
 		MinimumInterval:  a.cfg.MinimumInterval,
+		DefaultInterval:  a.cfg.DefaultInterval,
 		PollTimeout:      a.cfg.PollTimeout,
 	}, a.logger)
-	runner := scheduler.NewRunner(db, cryptor, tgBot, a.cfg.NotificationCooldown, a.cfg.EnableRawLuxMedPayload, a.logger)
+	runner := scheduler.NewRunner(db, cryptor, tgBot, a.cfg.MinimumInterval, a.cfg.NotificationCooldown, a.cfg.EnableRawLuxMedPayload)
 	tgBot.SetRunner(runner)
-	watcher := scheduler.New(db, runner, 15*time.Second, a.logger)
+	watcher := scheduler.New(db, runner, 15*time.Second, a.cfg.HistoryRetention, a.logger)
 
-	go observability.RunHealth(ctx, a.cfg.HealthAddr, a.logger)
-	go watcher.Run(ctx)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	go func() {
+		defer workers.Done()
+		observability.RunHealth(ctx, a.cfg.HealthAddr, db.Ping, a.logger)
+	}()
+	go func() {
+		defer workers.Done()
+		watcher.Run(ctx)
+	}()
 
 	a.logger.Info("luxmed watcher started", "bot", api.Self.UserName, "db", backend)
-	return tgBot.Run(ctx)
+	err = tgBot.Run(ctx)
+	stop()
+	workers.Wait()
+	return err
 }

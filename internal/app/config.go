@@ -20,6 +20,7 @@ type Config struct {
 	MinimumInterval        time.Duration
 	DefaultInterval        time.Duration
 	NotificationCooldown   time.Duration
+	HistoryRetention       time.Duration
 	PollTimeout            int
 	LogLevel               slog.Level
 	EnableRawLuxMedPayload bool
@@ -54,6 +55,14 @@ func LoadConfig() (Config, error) {
 	if cfg.DefaultLocale != "en" && cfg.DefaultLocale != "ru" && cfg.DefaultLocale != "pl" {
 		return Config{}, fmt.Errorf("DEFAULT_LOCALE must be one of en, ru, pl")
 	}
+	if cfg.MinimumInterval < time.Second || cfg.PollTimeout < 1 || cfg.PollTimeout > 60 || cfg.NotificationCooldown < 0 {
+		return Config{}, fmt.Errorf("invalid check interval, polling timeout or notification cooldown")
+	}
+	retentionDays := envInt("DATA_RETENTION_DAYS", 180)
+	if retentionDays < 0 || retentionDays > 3650 {
+		return Config{}, fmt.Errorf("DATA_RETENTION_DAYS must be between 0 and 3650")
+	}
+	cfg.HistoryRetention = time.Duration(retentionDays) * 24 * time.Hour
 	if cfg.DefaultInterval < cfg.MinimumInterval {
 		cfg.DefaultInterval = cfg.MinimumInterval
 	}

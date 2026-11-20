@@ -237,7 +237,7 @@ func TestDueHistoryAndAccount(t *testing.T) {
 			}
 		}
 		must(db.Migrate(ctx))
-		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 4_294_967_296, TelegramChatID: 4_294_967_297})
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 4_294_967_296, TelegramChatID: 4_294_967_297, Status: domain.UserStatusActive})
 		must(err)
 		watch := domain.Watch{UserID: user.ID, Name: "Original watch", CheckIntervalSeconds: 60, NextDays: 14}
 		watch.ID, err = db.CreateWatch(ctx, watch)

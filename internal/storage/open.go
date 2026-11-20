@@ -123,6 +123,9 @@ func (db *DB) Migrate(ctx context.Context) error {
 			return fmt.Errorf("correct legacy SQLite appointment times: %w", err)
 		}
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM luxmed_procedures WHERE is_recent = TRUE`); err != nil {
+		return fmt.Errorf("remove private procedures from shared cache: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit storage migration: %w", err)
 	}

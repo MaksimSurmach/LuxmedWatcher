@@ -1,0 +1,166 @@
+package scheduler
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/security"
+	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
+)
+
+type fakeLuxMed struct {
+	luxmed.Client
+	search func(context.Context) ([]domain.Appointment, error)
+	logins int
+}
+
+func (f *fakeLuxMed) Authenticate(context.Context, luxmed.Credentials) error {
+	f.logins++
+	return nil
+}
+
+func (f *fakeLuxMed) SearchAppointments(ctx context.Context, _ domain.Watch) ([]domain.Appointment, error) {
+	return f.search(ctx)
+}
+
+type notifyFunc func(context.Context, domain.User, domain.Watch, []domain.AppointmentHistory, int) (int, error)
+
+func (n notifyFunc) NotifyAppointments(ctx context.Context, user domain.User, watch domain.Watch, items []domain.AppointmentHistory, count int) (int, error) {
+	return n(ctx, user, watch, items, count)
+}
+
+func TestRunnerPersistsBeforeDeliveryAndDoesNotRepeatSuccess(t *testing.T) {
+	ctx := context.Background()
+	var delivered int
+	var notifications int
+	var db *storage.DB
+	runner, database, watch := testRunner(t, notifyFunc(func(ctx context.Context, user domain.User, _ domain.Watch, items []domain.AppointmentHistory, total int) (int, error) {
+		history, err := db.RecentHistory(ctx, user.ID, 50, 0)
+		if err != nil || len(history) != 12 || len(items) != 10 || total != 12 {
+			t.Fatalf("history=%d, preview=%d, total=%d, error=%v", len(history), len(items), total, err)
+		}
+		notifications++
+		if notifications == 1 {
+			return 0, errors.New("temporary Telegram error")
+		}
+		delivered += total
+		return 23, nil
+	}))
+	db = database
+	var slots []domain.Appointment
+	for i := range 12 {
+		slots = append(slots, domain.Appointment{
+			Fingerprint: fmt.Sprint(i), DateTime: time.Now().Add(time.Duration(i+1) * time.Hour),
+		})
+	}
+	client := &fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) {
+		return append(append([]domain.Appointment(nil), slots...), slots[0]), nil
+	}}
+	runner.newClient = func(bool) luxmed.Client { return client }
+
+	count, err := runner.ManualCheck(ctx, watch)
+	if count != 12 || err == nil || delivered != 0 {
+		t.Fatalf("first check returned count=%d error=%v delivered=%d", count, err, delivered)
+	}
+	if count, err := runner.ManualCheck(ctx, watch); err != nil || count != 12 {
+		t.Fatalf("retry returned count=%d error=%v", count, err)
+	}
+	if err := runner.CheckWatch(ctx, watch); err != nil {
+		t.Fatal(err)
+	}
+	if notifications != 2 || delivered != 12 || client.logins != 1 {
+		t.Fatalf("notifications=%d delivered=%d logins=%d", notifications, delivered, client.logins)
+	}
+}
+
+func TestRunnerSerializesChecksAndRejectsStaleWatch(t *testing.T) {
+	ctx := context.Background()
+	runner, db, watch := testRunner(t, nil)
+	started := make(chan struct{})
+	finish := make(chan struct{})
+	runner.newClient = func(bool) luxmed.Client {
+		return &fakeLuxMed{search: func(ctx context.Context) ([]domain.Appointment, error) {
+			close(started)
+			select {
+			case <-finish:
+				return nil, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}}
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- runner.CheckWatch(ctx, watch) }()
+	select {
+	case <-started:
+	case err := <-done:
+		t.Fatalf("check didn't reach upstream: %v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("check didn't start")
+	}
+
+	if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, ErrRateLimited) {
+		t.Errorf("concurrent check: %v", err)
+	}
+	if err := db.SetWatchStatus(ctx, watch.ID, domain.WatchStatusPaused); err != nil {
+		t.Error(err)
+	}
+	close(finish)
+	if err := <-done; !errors.Is(err, ErrInactive) {
+		t.Fatalf("in-flight check after pause: %v", err)
+	}
+	if err := runner.CheckWatch(ctx, watch); !errors.Is(err, ErrInactive) {
+		t.Fatalf("stale active snapshot after pause: %v", err)
+	}
+}
+
+func TestSundayFilterUsesWarsawTime(t *testing.T) {
+	slot := domain.Appointment{DateTime: time.Date(2026, 6, 6, 22, 30, 0, 0, time.UTC)}
+	window := []domain.TimeWindow{{Weekday: 7, From: "00:00", To: "01:00"}}
+	if len(filterAppointmentsByTimeWindows([]domain.Appointment{slot}, window)) != 1 {
+		t.Fatal("midnight Warsaw time was not recognized as Sunday")
+	}
+}
+
+func testRunner(t *testing.T, notifier Notifier) (*Runner, *storage.DB, domain.Watch) {
+	t.Helper()
+	ctx := context.Background()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "watcher.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	user, err := db.UpsertTelegramUser(ctx, domain.User{
+		TelegramUserID: 42, TelegramChatID: 42, Status: domain.UserStatusActive, Role: domain.UserRoleUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cryptor, err := security.NewCryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encrypted, err := cryptor.Encrypt("synthetic-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Login: "test", EncryptedPassword: encrypted}); err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	watch, err := db.Watch(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewRunner(db, cryptor, notifier, 0, time.Hour, false), db, watch
+}

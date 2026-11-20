@@ -243,10 +243,16 @@ func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error)
 	if db.postgres {
 		due = `last_checked_at + check_interval_seconds * interval '1 second' <= $2`
 	}
-	rows, err := db.sql.QueryContext(ctx, watchSelect()+`
-		WHERE status=$1 AND (last_checked_at IS NULL OR `+due+`)
-		ORDER BY COALESCE(last_checked_at, created_at) ASC LIMIT $3
-	`, domain.WatchStatusActive, time.Now().UTC(), limit)
+	query := watchSelect() + `
+		WHERE status=$1 AND (last_checked_at IS NULL OR ` + due + `)
+		AND user_id IN (SELECT id FROM users WHERE status=$3)
+		ORDER BY COALESCE(last_checked_at, created_at), id`
+	args := []any{domain.WatchStatusActive, time.Now().UTC(), domain.UserStatusActive}
+	if limit > 0 {
+		query += ` LIMIT $4`
+		args = append(args, limit)
+	}
+	rows, err := db.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

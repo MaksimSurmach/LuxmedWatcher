@@ -2,22 +2,31 @@ package observability
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 )
 
-func RunHealth(ctx context.Context, addr string, logger *slog.Logger) {
+func RunHealth(ctx context.Context, addr string, ping func(context.Context) error, logger *slog.Logger) {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
+	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), time.Second)
+		defer cancel()
+		if err := ping(ctx); err != nil {
+			http.Error(w, "database unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		_, _ = w.Write([]byte("ok\n"))
 	})
-	server := &http.Server{Addr: addr, Handler: mux}
+	server := &http.Server{Addr: addr, Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() {
 		<-ctx.Done()
-		_ = server.Shutdown(context.Background())
+		shutdown, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		_ = server.Shutdown(shutdown)
 	}()
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		logger.Warn("health server stopped", "err", err)
 	}
 }
