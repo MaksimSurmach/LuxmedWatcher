@@ -94,7 +94,8 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 		return 0, ctx.Err()
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 70*time.Second)
+	parent := ctx
+	ctx, cancel := context.WithTimeout(parent, 70*time.Second)
 	defer cancel()
 
 	watch, err := r.db.Watch(ctx, requested.ID)
@@ -121,13 +122,16 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 	}
 	started := time.Now().UTC()
 	count, err = r.run(ctx, user, watch, state, started)
+	if parent.Err() != nil {
+		return count, errors.Join(err, parent.Err())
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = errors.Join(err, luxmed.ErrUnavailable, ctx.Err())
+	}
 	state.next = time.Now().Add(r.minimumInterval + jitter(r.minimumInterval/10))
 	var status string
 	if err != nil {
 		status = checkStatus(err)
-		if errors.Is(err, luxmed.ErrAuthentication) {
-			state.next = maxTime(state.next, time.Now().Add(15*time.Minute))
-		}
 		if errors.Is(err, luxmed.ErrUnavailable) {
 			state.failures = min(state.failures+1, 5)
 			backoff := (15 * time.Second) << (state.failures - 1)
@@ -140,13 +144,12 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 	} else {
 		state.failures = 0
 	}
-	if ctx.Err() != nil {
-		return count, errors.Join(err, ctx.Err())
-	}
 	if errors.Is(err, ErrInactive) {
 		return count, err
 	}
-	if writeErr := r.db.MarkWatchChecked(ctx, watch.ID, err == nil, status); writeErr != nil {
+	recordCtx, stop := context.WithTimeout(parent, 5*time.Second)
+	defer stop()
+	if writeErr := r.db.MarkWatchChecked(recordCtx, watch.ID, err == nil, status); writeErr != nil {
 		err = errors.Join(err, fmt.Errorf("record watch result: %w", writeErr))
 	}
 	return count, err
@@ -161,6 +164,9 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 	}
 	if err != nil {
 		return 0, fmt.Errorf("load LuxMed account: %w", err)
+	}
+	if account.Status == domain.AccountStatusAuthFailed {
+		return 0, luxmed.ErrAuthentication
 	}
 	if state.client == nil || state.login != account.Login || state.encryptedPassword != account.EncryptedPassword || time.Since(state.authenticatedAt) > 15*time.Minute {
 		state.client = nil
@@ -188,7 +194,7 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 	appointments, searchErr := state.client.SearchAppointments(ctx, watch)
 	if errors.Is(searchErr, luxmed.ErrAuthentication) {
 		state.client = nil
-		return 0, errors.Join(searchErr, r.recordAuthFailure(ctx, account))
+		return 0, searchErr
 	}
 	if searchErr != nil && len(appointments) == 0 {
 		return 0, searchErr

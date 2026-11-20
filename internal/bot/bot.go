@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -32,15 +33,17 @@ type Config struct {
 }
 
 type Bot struct {
-	api       *tgbotapi.BotAPI
-	db        *storage.DB
-	catalog   *i18n.Catalog
-	cryptor   *security.Cryptor
-	cfg       Config
-	runner    *scheduler.Runner
-	logger    *slog.Logger
-	newClient func(bool) luxmed.Client
-	flowState map[int64]*flow
+	api           *tgbotapi.BotAPI
+	db            *storage.DB
+	catalog       *i18n.Catalog
+	cryptor       *security.Cryptor
+	cfg           Config
+	runner        *scheduler.Runner
+	manualChecks  chan struct{}
+	manualWorkers sync.WaitGroup
+	logger        *slog.Logger
+	newClient     func(bool) luxmed.Client
+	flowState     map[int64]*flow
 }
 
 type flowKind string
@@ -76,7 +79,7 @@ type flow struct {
 }
 
 func New(api *tgbotapi.BotAPI, db *storage.DB, catalog *i18n.Catalog, cryptor *security.Cryptor, cfg Config, logger *slog.Logger) *Bot {
-	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow),
+	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow), manualChecks: make(chan struct{}, 3),
 		newClient: func(raw bool) luxmed.Client { return luxmed.NewHTTPClient(raw) }}
 }
 
@@ -85,6 +88,7 @@ func (b *Bot) SetRunner(runner *scheduler.Runner) {
 }
 
 func (b *Bot) Run(ctx context.Context) error {
+	defer b.manualWorkers.Wait()
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = b.cfg.PollTimeout
 	config.AllowedUpdates = []string{"message", "callback_query"}
@@ -1494,7 +1498,15 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "delete":
 		state = domain.WatchStatusDeleted
 	case "check":
-		b.checkWatchNow(ctx, user, watch)
+		select {
+		case b.manualChecks <- struct{}{}:
+			b.manualWorkers.Go(func() {
+				defer func() { <-b.manualChecks }()
+				b.checkWatchNow(ctx, user, watch)
+			})
+		default:
+			b.send(user, b.catalog.T(user.Locale, "watch.check_rate_limited"), watchKeyboard(b.catalog, user.Locale, watch))
+		}
 		return
 	case "edit":
 		b.editWatch(ctx, user, watch)

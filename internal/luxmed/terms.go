@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	randv2 "math/rand/v2"
 	"net/url"
 	"slices"
 	"strconv"
@@ -125,7 +126,7 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 				continue
 			}
 			requested[info.Day] = true
-			if info.Status != 0 || len(details) >= maxDayDetailRequests {
+			if info.Status != 0 {
 				uncovered++
 				continue
 			}
@@ -140,6 +141,15 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 		from = end.AddDate(0, 0, 1)
 	}
 
+	if len(details) > maxDayDetailRequests {
+		uncovered += len(details) - maxDayDetailRequests
+		if watch.LastCheckedAt != nil {
+			// Preserve the earliest day and give later days a chance on subsequent checks.
+			rest := details[1:]
+			randv2.Shuffle(len(rest), func(i, j int) { rest[i], rest[j] = rest[j], rest[i] })
+		}
+		details = details[:maxDayDetailRequests]
+	}
 	for _, detail := range details {
 		data, err := c.get(ctx, oneDayTermsURL+"?"+detail.query.Encode())
 		if err != nil {

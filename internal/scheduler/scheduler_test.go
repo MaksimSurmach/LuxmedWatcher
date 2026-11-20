@@ -16,13 +16,14 @@ import (
 
 type fakeLuxMed struct {
 	luxmed.Client
-	search func(context.Context) ([]domain.Appointment, error)
-	logins int
+	search  func(context.Context) ([]domain.Appointment, error)
+	logins  int
+	authErr error
 }
 
 func (f *fakeLuxMed) Authenticate(context.Context, luxmed.Credentials) error {
 	f.logins++
-	return nil
+	return f.authErr
 }
 
 func (f *fakeLuxMed) SearchAppointments(ctx context.Context, _ domain.Watch) ([]domain.Appointment, error) {
@@ -118,6 +119,23 @@ func TestRunnerSerializesChecksAndRejectsStaleWatch(t *testing.T) {
 	}
 	if err := runner.CheckWatch(ctx, watch); !errors.Is(err, ErrInactive) {
 		t.Fatalf("stale active snapshot after pause: %v", err)
+	}
+}
+
+func TestRejectedCredentialsAreNotRetried(t *testing.T) {
+	ctx := context.Background()
+	runner, db, watch := testRunner(t, nil)
+	client := &fakeLuxMed{authErr: luxmed.ErrAuthentication}
+	runner.newClient = func(bool) luxmed.Client { return client }
+
+	for range 2 {
+		if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
+			t.Fatalf("check error = %v", err)
+		}
+	}
+	account, err := db.LuxMedAccount(ctx, watch.UserID)
+	if err != nil || account.Status != domain.AccountStatusAuthFailed || client.logins != 1 {
+		t.Fatalf("account status=%s, logins=%d, error=%v", account.Status, client.logins, err)
 	}
 }
 
