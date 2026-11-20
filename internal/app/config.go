@@ -13,6 +13,7 @@ import (
 type Config struct {
 	TelegramToken          string
 	DatabasePath           string
+	DatabaseURL            string
 	MasterKey              []byte
 	DefaultLocale          string
 	AdminTelegramIDs       map[int64]bool
@@ -29,6 +30,7 @@ func LoadConfig() (Config, error) {
 	cfg := Config{
 		TelegramToken:        strings.TrimSpace(os.Getenv("TELEGRAM_BOT_TOKEN")),
 		DatabasePath:         envString("DATABASE_PATH", "data/luxmed-watcher.sqlite"),
+		DatabaseURL:          strings.TrimSpace(os.Getenv("DATABASE_URL")),
 		DefaultLocale:        envString("DEFAULT_LOCALE", "ru"),
 		AdminTelegramIDs:     parseIDSet(os.Getenv("ADMIN_TELEGRAM_IDS")),
 		MinimumInterval:      envDuration("MIN_CHECK_INTERVAL", 2*time.Minute),

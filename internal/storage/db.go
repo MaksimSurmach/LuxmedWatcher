@@ -7,49 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
-	_ "modernc.org/sqlite"
 )
-
-type DB struct {
-	sql *sql.DB
-}
-
-func Open(ctx context.Context, path string) (*DB, error) {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
-	if err != nil {
-		return nil, err
-	}
-	store := &DB{sql: db}
-	if err := store.Migrate(ctx); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return store, nil
-}
-
-func (db *DB) Close() error {
-	return db.sql.Close()
-}
-
-func (db *DB) Migrate(ctx context.Context) error {
-	if _, err := db.sql.ExecContext(ctx, schema); err != nil {
-		return err
-	}
-	for _, stmt := range compatibilityMigrations {
-		_, _ = db.sql.ExecContext(ctx, stmt)
-	}
-	return nil
-}
 
 func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.User, error) {
 	now := time.Now().UTC()
@@ -64,7 +26,7 @@ func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.
 	}
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO users (telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, status, role, created_at, updated_at, last_seen_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		ON CONFLICT(telegram_user_id) DO UPDATE SET
 			telegram_chat_id=excluded.telegram_chat_id,
 			telegram_username=excluded.telegram_username,
@@ -81,7 +43,7 @@ func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.
 func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at
-		FROM users WHERE telegram_user_id=?
+		FROM users WHERE telegram_user_id=$1
 	`, telegramID)
 	return scanUser(row)
 }
@@ -89,62 +51,86 @@ func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.Us
 func (db *DB) UserByID(ctx context.Context, id int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at
-		FROM users WHERE id=?
+		FROM users WHERE id=$1
 	`, id)
 	return scanUser(row)
 }
 
 func (db *DB) SetUserActive(ctx context.Context, userID int64, role domain.UserRole) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE users SET status=?, role=?, updated_at=? WHERE id=?`, domain.UserStatusActive, role, time.Now().UTC(), userID)
+	_, err := db.sql.ExecContext(ctx, `UPDATE users SET status=$1, role=$2, updated_at=$3 WHERE id=$4`, domain.UserStatusActive, role, time.Now().UTC(), userID)
 	return err
 }
 
 func (db *DB) SetUserLocale(ctx context.Context, userID int64, locale string) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE users SET locale=?, updated_at=? WHERE id=?`, locale, time.Now().UTC(), userID)
+	_, err := db.sql.ExecContext(ctx, `UPDATE users SET locale=$1, updated_at=$2 WHERE id=$3`, locale, time.Now().UTC(), userID)
 	return err
 }
 
 func (db *DB) SetUserPreferredCity(ctx context.Context, userID int64, city domain.City) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE users SET preferred_city_id=?, preferred_city_name=?, updated_at=? WHERE id=?`, city.ID, city.Name, time.Now().UTC(), userID)
+	_, err := db.sql.ExecContext(ctx, `UPDATE users SET preferred_city_id=$1, preferred_city_name=$2, updated_at=$3 WHERE id=$4`, city.ID, city.Name, time.Now().UTC(), userID)
 	return err
 }
 
 func (db *DB) CreateInvite(ctx context.Context, code string, createdBy int64, maxUses int, expiresAt *time.Time) error {
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO invite_codes (code_hash, created_by_user_id, max_uses, used_count, expires_at, created_at)
-		VALUES (?, ?, ?, 0, ?, ?)
+		VALUES ($1, $2, $3, 0, $4, $5)
 	`, HashInviteCode(code), createdBy, maxUses, nullableTime(expiresAt), time.Now().UTC())
 	return err
 }
 
 func (db *DB) RedeemInvite(ctx context.Context, code string) (bool, error) {
+	return db.redeemInvite(ctx, code, 0)
+}
+
+func (db *DB) RedeemInviteForUser(ctx context.Context, code string, userID int64) (bool, error) {
+	return db.redeemInvite(ctx, code, userID)
+}
+
+func (db *DB) redeemInvite(ctx context.Context, code string, userID int64) (bool, error) {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
 
-	var id int64
-	var maxUses, usedCount int
-	var expiresAt sql.NullTime
-	var disabledAt sql.NullTime
-	err = tx.QueryRowContext(ctx, `
-		SELECT id, max_uses, used_count, expires_at, disabled_at
-		FROM invite_codes WHERE code_hash=?
-	`, HashInviteCode(code)).Scan(&id, &maxUses, &usedCount, &expiresAt, &disabledAt)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
+	now := time.Now().UTC()
+	res, err := tx.ExecContext(ctx, `
+		UPDATE invite_codes SET used_count=used_count+1
+		WHERE code_hash=$1 AND used_count < max_uses AND disabled_at IS NULL
+		AND (expires_at IS NULL OR `+db.dateTimeSQL("expires_at")+` > `+db.dateTimeSQL("$2")+`)
+	`, HashInviteCode(code), now)
+	if err := requireOneRow(res, err); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
 	}
+	if userID != 0 {
+		res, err := tx.ExecContext(ctx, `UPDATE users SET status=$1, updated_at=$2 WHERE id=$3 AND status=$4`,
+			domain.UserStatusActive, now, userID, domain.UserStatusPendingInvite)
+		if err := requireOneRow(res, err); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return false, nil
+			}
+			return false, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func requireOneRow(result sql.Result, err error) error {
 	if err != nil {
-		return false, err
+		return err
 	}
-	if disabledAt.Valid || usedCount >= maxUses || (expiresAt.Valid && time.Now().After(expiresAt.Time)) {
-		return false, nil
+	n, err := result.RowsAffected()
+	if err == nil && n == 0 {
+		return sql.ErrNoRows
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE invite_codes SET used_count=used_count+1 WHERE id=?`, id); err != nil {
-		return false, err
-	}
-	return true, tx.Commit()
+	return err
 }
 
 func HashInviteCode(code string) string {
@@ -155,7 +141,7 @@ func HashInviteCode(code string) string {
 func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT(user_id) DO UPDATE SET
 			login=excluded.login,
 			encrypted_password=excluded.encrypted_password,
@@ -171,7 +157,7 @@ func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAcco
 func (db *DB) LuxMedAccount(ctx context.Context, userID int64) (domain.LuxMedAccount, error) {
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status
-		FROM luxmed_accounts WHERE user_id=?
+		FROM luxmed_accounts WHERE user_id=$1
 	`, userID)
 	var account domain.LuxMedAccount
 	var sessionExpiresAt, lastLoginAt sql.NullTime
@@ -185,28 +171,66 @@ func (db *DB) LuxMedAccount(ctx context.Context, userID int64) (domain.LuxMedAcc
 	return account, err
 }
 
+func (db *DB) UpdateLuxMedAccountAuth(ctx context.Context, account domain.LuxMedAccount) error {
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE luxmed_accounts SET last_login_at=$1, last_login_error=$2, status=$3
+		WHERE user_id=$4 AND login=$5 AND encrypted_password=$6
+	`, nullableTime(account.LastLoginAt), account.LastLoginError, account.Status, account.UserID, account.Login, account.EncryptedPassword)
+	return requireOneRow(res, err)
+}
+
+func (db *DB) DeleteLuxMedAccount(ctx context.Context, userID int64) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM luxmed_accounts WHERE user_id=$1`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE watches SET status=$1, updated_at=$2 WHERE user_id=$3 AND status=$4`,
+		domain.WatchStatusPaused, time.Now().UTC(), userID, domain.WatchStatusActive); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (db *DB) CreateWatch(ctx context.Context, watch domain.Watch) (int64, error) {
 	now := time.Now().UTC()
+	var id int64
+	err := db.sql.QueryRowContext(ctx, `
+		INSERT INTO watches (
+			name, city_id, city_name, service_id, service_name, doctor_id, doctor_name, doctor_mode,
+			facility_mode, facility_ids, facility_names, date_from, date_to, next_days, time_windows,
+			check_interval_seconds, user_id, status, created_at, updated_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19)
+		RETURNING id
+	`, append(watchParameters(watch), watch.UserID, domain.WatchStatusActive, now)...).Scan(&id)
+	return id, err
+}
+
+func (db *DB) UpdateWatch(ctx context.Context, watch domain.Watch) error {
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE watches SET name=$1, city_id=$2, city_name=$3, service_id=$4, service_name=$5, doctor_id=$6,
+			doctor_name=$7, doctor_mode=$8, facility_mode=$9, facility_ids=$10, facility_names=$11, date_from=$12,
+			date_to=$13, next_days=$14, time_windows=$15, check_interval_seconds=$16, updated_at=$17,
+			last_checked_at=NULL, last_success_at=NULL, last_error=''
+		WHERE id=$18 AND user_id=$19 AND status <> $20
+	`, append(watchParameters(watch), time.Now().UTC(), watch.ID, watch.UserID, domain.WatchStatusDeleted)...)
+	return requireOneRow(res, err)
+}
+
+func watchParameters(watch domain.Watch) []any {
 	facilityIDs, _ := json.Marshal(watch.FacilityIDs)
 	facilityNames, _ := json.Marshal(watch.FacilityNames)
 	timeWindows, _ := json.Marshal(watch.TimeWindows)
-	res, err := db.sql.ExecContext(ctx, `
-		INSERT INTO watches (
-			user_id, name, status, city_id, city_name, service_id, service_name, doctor_id, doctor_name, doctor_mode,
-			facility_mode, facility_ids, facility_names, date_from, date_to, next_days, time_windows,
-			check_interval_seconds, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`, watch.UserID, watch.Name, domain.WatchStatusActive, watch.CityID, watch.CityName, watch.ServiceID, watch.ServiceName,
+	return []any{watch.Name, watch.CityID, watch.CityName, watch.ServiceID, watch.ServiceName,
 		nullableInt(watch.DoctorID), watch.DoctorName, watch.DoctorMode, watch.FacilityMode, string(facilityIDs), string(facilityNames),
-		nullableTime(watch.DateFrom), nullableTime(watch.DateTo), watch.NextDays, string(timeWindows), watch.CheckIntervalSeconds, now, now)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+		nullableTime(watch.DateFrom), nullableTime(watch.DateTo), watch.NextDays, string(timeWindows), watch.CheckIntervalSeconds}
 }
 
 func (db *DB) WatchesByUser(ctx context.Context, userID int64) ([]domain.Watch, error) {
-	rows, err := db.sql.QueryContext(ctx, watchSelect()+` WHERE user_id=? AND status <> ? ORDER BY created_at DESC`, userID, domain.WatchStatusDeleted)
+	rows, err := db.sql.QueryContext(ctx, watchSelect()+` WHERE user_id=$1 AND status <> $2 ORDER BY created_at DESC`, userID, domain.WatchStatusDeleted)
 	if err != nil {
 		return nil, err
 	}
@@ -215,12 +239,14 @@ func (db *DB) WatchesByUser(ctx context.Context, userID int64) ([]domain.Watch, 
 }
 
 func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error) {
+	due := db.dateTimeSQL("last_checked_at") + ` <= ` + db.dateTimeSQL("$2") + ` - check_interval_seconds / 86400.0`
+	if db.postgres {
+		due = `last_checked_at + check_interval_seconds * interval '1 second' <= $2`
+	}
 	rows, err := db.sql.QueryContext(ctx, watchSelect()+`
-		WHERE status=? AND (
-			last_checked_at IS NULL OR datetime(last_checked_at, '+' || check_interval_seconds || ' seconds') <= datetime('now')
-		)
-		ORDER BY COALESCE(last_checked_at, created_at) ASC LIMIT ?
-	`, domain.WatchStatusActive, limit)
+		WHERE status=$1 AND (last_checked_at IS NULL OR `+due+`)
+		ORDER BY COALESCE(last_checked_at, created_at) ASC LIMIT $3
+	`, domain.WatchStatusActive, time.Now().UTC(), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -228,83 +254,69 @@ func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error)
 	return scanWatches(rows)
 }
 
+func (db *DB) dateTimeSQL(value string) string {
+	if db.postgres {
+		return value
+	}
+	// Legacy SQLite rows use Go's Time.String format, which julianday cannot read directly.
+	offset := `instr(substr(` + value + `, 12), ' ') + 12`
+	legacy := `substr(` + value + `, 1, ` + offset + ` - 2) || substr(` + value + `, ` + offset + `, 3) || ':' || substr(` + value + `, ` + offset + ` + 3, 2)`
+	return `COALESCE(julianday(` + value + `), julianday(` + legacy + `))`
+}
+
 func (db *DB) Watch(ctx context.Context, id int64) (domain.Watch, error) {
-	row := db.sql.QueryRowContext(ctx, watchSelect()+` WHERE id=?`, id)
+	row := db.sql.QueryRowContext(ctx, watchSelect()+` WHERE id=$1`, id)
 	return scanWatch(row)
 }
 
 func (db *DB) SetWatchStatus(ctx context.Context, id int64, status domain.WatchStatus) error {
-	_, err := db.sql.ExecContext(ctx, `UPDATE watches SET status=?, updated_at=? WHERE id=?`, status, time.Now().UTC(), id)
+	_, err := db.sql.ExecContext(ctx, `UPDATE watches SET status=$1, updated_at=$2 WHERE id=$3`, status, time.Now().UTC(), id)
 	return err
 }
 
 func (db *DB) MarkWatchChecked(ctx context.Context, id int64, success bool, errText string) error {
 	now := time.Now().UTC()
 	if success {
-		_, err := db.sql.ExecContext(ctx, `UPDATE watches SET last_checked_at=?, last_success_at=?, last_error='', updated_at=? WHERE id=?`, now, now, now, id)
+		_, err := db.sql.ExecContext(ctx, `UPDATE watches SET last_checked_at=$1, last_success_at=$2, last_error='', updated_at=$3 WHERE id=$4`, now, now, now, id)
 		return err
 	}
-	_, err := db.sql.ExecContext(ctx, `UPDATE watches SET last_checked_at=?, last_error=?, updated_at=? WHERE id=?`, now, errText, now, id)
+	_, err := db.sql.ExecContext(ctx, `UPDATE watches SET last_checked_at=$1, last_error=$2, updated_at=$3 WHERE id=$4`, now, errText, now, id)
 	return err
 }
 
 func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {
 	now := time.Now().UTC()
-	tx, err := db.sql.BeginTx(ctx, nil)
-	if err != nil {
-		return domain.AppointmentHistory{}, false, err
-	}
-	defer tx.Rollback()
-
-	var id int64
-	err = tx.QueryRowContext(ctx, `SELECT id FROM appointment_history WHERE watch_id=? AND fingerprint=?`, watchID, app.Fingerprint).Scan(&id)
-	if errors.Is(err, sql.ErrNoRows) {
-		_, err = tx.ExecContext(ctx, `
-			INSERT INTO appointment_history (
-				watch_id, external_id, fingerprint, date_time, service_id, service_name, doctor_id, doctor_name,
-				facility_id, facility_name, address, city_id, city_name, booking_url, first_seen_at, last_seen_at, seen_count, status, raw_payload
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
-		`, watchID, app.ExternalID, app.Fingerprint, app.DateTime, app.ServiceID, app.ServiceName, app.DoctorID, app.DoctorName,
-			app.FacilityID, app.FacilityName, app.Address, app.CityID, app.CityName, app.BookingURL, now, now, domain.HistoryStatusNew, app.RawPayload)
-		if err != nil {
-			return domain.AppointmentHistory{}, false, err
-		}
-		id, err = lastInsertID(ctx, tx)
-		if err != nil {
-			return domain.AppointmentHistory{}, false, err
-		}
-		if err := tx.Commit(); err != nil {
-			return domain.AppointmentHistory{}, false, err
-		}
-		history, err := db.AppointmentHistoryByID(ctx, id)
-		return history, true, err
-	}
-	if err != nil {
-		return domain.AppointmentHistory{}, false, err
-	}
-	_, err = tx.ExecContext(ctx, `
-		UPDATE appointment_history SET last_seen_at=?, seen_count=seen_count+1, status=? WHERE id=?
-	`, now, domain.HistoryStatusSeenAgain, id)
-	if err != nil {
-		return domain.AppointmentHistory{}, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return domain.AppointmentHistory{}, false, err
-	}
-	history, err := db.AppointmentHistoryByID(ctx, id)
-	return history, false, err
+	row := db.sql.QueryRowContext(ctx, `
+		INSERT INTO appointment_history (
+			watch_id, external_id, fingerprint, date_time, service_id, service_name, doctor_id, doctor_name,
+			facility_id, facility_name, address, city_id, city_name, booking_url, first_seen_at, last_seen_at, seen_count, status, raw_payload
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, 1, $16, $17)
+		ON CONFLICT(watch_id, fingerprint) DO UPDATE SET
+			last_seen_at=excluded.last_seen_at,
+			seen_count=appointment_history.seen_count+1,
+			status=CASE WHEN appointment_history.status=$18 THEN appointment_history.status ELSE $19 END
+		RETURNING `+historyColumns,
+		watchID, app.ExternalID, app.Fingerprint, app.DateTime, app.ServiceID, app.ServiceName, app.DoctorID, app.DoctorName,
+		app.FacilityID, app.FacilityName, app.Address, app.CityID, app.CityName, app.BookingURL, now, domain.HistoryStatusNew,
+		app.RawPayload, domain.HistoryStatusHidden, domain.HistoryStatusSeenAgain)
+	history, err := scanHistory(row)
+	return history, history.SeenCount == 1, err
 }
 
 func (db *DB) AppointmentHistoryByID(ctx context.Context, id int64) (domain.AppointmentHistory, error) {
-	row := db.sql.QueryRowContext(ctx, historySelect()+` WHERE id=?`, id)
+	row := db.sql.QueryRowContext(ctx, historySelect()+` WHERE id=$1`, id)
 	return scanHistory(row)
 }
 
 func (db *DB) RecentHistory(ctx context.Context, userID int64, limit, offset int) ([]domain.AppointmentHistory, error) {
+	return db.WatchHistory(ctx, userID, 0, limit, offset)
+}
+
+func (db *DB) WatchHistory(ctx context.Context, userID, watchID int64, limit, offset int) ([]domain.AppointmentHistory, error) {
 	rows, err := db.sql.QueryContext(ctx, historySelect()+`
-		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=?) AND status <> ?
-		ORDER BY date_time DESC LIMIT ? OFFSET ?
-	`, userID, domain.HistoryStatusHidden, limit, offset)
+		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1 AND (id=$2 OR $2=0)) AND status <> $3
+		ORDER BY `+db.dateTimeSQL("date_time")+` DESC, id DESC LIMIT $4 OFFSET $5
+	`, userID, watchID, domain.HistoryStatusHidden, limit, offset)
 	if err != nil {
 		return nil, err
 	}
@@ -320,39 +332,87 @@ func (db *DB) RecentHistory(ctx context.Context, userID int64, limit, offset int
 	return items, rows.Err()
 }
 
+func (db *DB) HideAppointmentHistory(ctx context.Context, userID, historyID int64) error {
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE appointment_history SET status=$1
+		WHERE id=$2 AND watch_id IN (SELECT id FROM watches WHERE user_id=$3)
+	`, domain.HistoryStatusHidden, historyID, userID)
+	return requireOneRow(res, err)
+}
+
 func (db *DB) CountHistoryForWatch(ctx context.Context, watchID int64) (int, error) {
 	var count int
-	err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM appointment_history WHERE watch_id=?`, watchID).Scan(&count)
+	err := db.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM appointment_history WHERE watch_id=$1`, watchID).Scan(&count)
 	return count, err
 }
 
 func (db *DB) MarkNotified(ctx context.Context, watchID int64, historyID int64, fingerprint string, messageID int, status domain.NotificationStatus, errText string) error {
+	return db.MarkNotifications(ctx, []domain.AppointmentHistory{{
+		ID: historyID, WatchID: watchID, Appointment: domain.Appointment{Fingerprint: fingerprint},
+	}}, messageID, status, errText)
+}
+
+func (db *DB) MarkNotifications(ctx context.Context, histories []domain.AppointmentHistory, messageID int, status domain.NotificationStatus, errText string) error {
 	now := time.Now().UTC()
-	_, err := db.sql.ExecContext(ctx, `
-		INSERT INTO notification_history (watch_id, appointment_history_id, appointment_fingerprint, sent_at, message_id, status, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-	`, watchID, historyID, fingerprint, now, messageID, status, errText)
+	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if status == domain.NotificationStatusSent {
-		_, err = db.sql.ExecContext(ctx, `UPDATE appointment_history SET last_notified_at=?, status=? WHERE id=?`, now, domain.HistoryStatusNotified, historyID)
+	defer tx.Rollback()
+	for _, h := range histories {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO notification_history (watch_id, appointment_history_id, appointment_fingerprint, sent_at, message_id, status, error)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`, h.WatchID, h.ID, h.Fingerprint, now, messageID, status, errText); err != nil {
+			return err
+		}
+		if status == domain.NotificationStatusSent {
+			if _, err := tx.ExecContext(ctx, `UPDATE appointment_history SET last_notified_at=$1,
+				status=CASE WHEN status=$2 THEN status ELSE $3 END WHERE id=$4`,
+				now, domain.HistoryStatusHidden, domain.HistoryStatusNotified, h.ID); err != nil {
+				return err
+			}
+		}
 	}
-	return err
+	return tx.Commit()
 }
 
 func (db *DB) LastNotificationAt(ctx context.Context, watchID int64, fingerprint string) (*time.Time, error) {
-	var sentAt sql.NullTime
+	var sentAt time.Time
 	err := db.sql.QueryRowContext(ctx, `
-		SELECT MAX(sent_at) FROM notification_history WHERE watch_id=? AND appointment_fingerprint=? AND status=?
+		SELECT sent_at FROM notification_history WHERE watch_id=$1 AND appointment_fingerprint=$2 AND status=$3
+		ORDER BY `+db.dateTimeSQL("sent_at")+` DESC LIMIT 1
 	`, watchID, fingerprint, domain.NotificationStatusSent).Scan(&sentAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}
-	if !sentAt.Valid {
-		return nil, nil
+	return &sentAt, nil
+}
+
+func (db *DB) PurgeHistory(ctx context.Context, before time.Time) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-	return &sentAt.Time, nil
+	defer tx.Rollback()
+	cutoff := db.dateTimeSQL("$1")
+	if _, err := tx.ExecContext(ctx, `DELETE FROM appointment_history
+		WHERE `+db.dateTimeSQL("date_time")+` < `+cutoff+` AND `+db.dateTimeSQL("last_seen_at")+` < `+cutoff+`
+		AND NOT EXISTS (SELECT 1 FROM notification_history n WHERE n.watch_id=appointment_history.watch_id
+			AND n.appointment_fingerprint=appointment_history.fingerprint AND `+db.dateTimeSQL("n.sent_at")+` >= `+cutoff+`)
+	`, before.UTC()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM notification_history WHERE `+db.dateTimeSQL("sent_at")+` < `+cutoff, before.UTC()); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM invite_codes WHERE `+db.dateTimeSQL("expires_at")+` < `+cutoff, before.UTC()); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (db *DB) UpsertCities(ctx context.Context, cities []domain.City) error {
@@ -367,7 +427,7 @@ func (db *DB) UpsertCities(ctx context.Context, cities []domain.City) error {
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO luxmed_cities (id, name, updated_at) VALUES (?, ?, ?)
+			INSERT INTO luxmed_cities (id, name, updated_at) VALUES ($1, $2, $3)
 			ON CONFLICT(id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at
 		`, city.ID, city.Name, now); err != nil {
 			return err
@@ -384,7 +444,7 @@ func (db *DB) CitiesPage(ctx context.Context, limit int, offset int) ([]domain.C
 	query := `SELECT id, name FROM luxmed_cities ORDER BY name`
 	args := []any{}
 	if limit > 0 {
-		query += ` LIMIT ? OFFSET ?`
+		query += ` LIMIT $1 OFFSET $2`
 		args = append(args, limit, offset)
 	}
 	rows, err := db.sql.QueryContext(ctx, query, args...)
@@ -444,7 +504,7 @@ func normalizeCitySearch(value string) string {
 
 func (db *DB) City(ctx context.Context, id int) (domain.City, error) {
 	var city domain.City
-	err := db.sql.QueryRowContext(ctx, `SELECT id, name FROM luxmed_cities WHERE id=?`, id).Scan(&city.ID, &city.Name)
+	err := db.sql.QueryRowContext(ctx, `SELECT id, name FROM luxmed_cities WHERE id=$1`, id).Scan(&city.ID, &city.Name)
 	return city, err
 }
 
@@ -461,7 +521,7 @@ func (db *DB) UpsertProcedures(ctx context.Context, city domain.City, procedures
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO luxmed_procedures (id, city_id, city_name, name, is_recent, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?)
+			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT(id, city_id) DO UPDATE SET
 				city_name=excluded.city_name,
 				name=excluded.name,
@@ -478,9 +538,9 @@ func (db *DB) RecentProcedures(ctx context.Context, cityID int, limit int) ([]do
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT id, city_id, city_name, name, is_recent, updated_at
 		FROM luxmed_procedures
-		WHERE city_id=? AND is_recent=1
+		WHERE city_id=$1 AND is_recent=TRUE
 		ORDER BY updated_at DESC, name
-		LIMIT ?
+		LIMIT $2
 	`, cityID, limit)
 	if err != nil {
 		return nil, err
@@ -498,18 +558,13 @@ func (db *DB) SearchProceduresPage(ctx context.Context, cityID int, query string
 	sqlQuery := `
 		SELECT id, city_id, city_name, name, is_recent, updated_at
 		FROM luxmed_procedures
-		WHERE city_id=?`
-	args := []any{cityID}
-
-	if query != "" {
-		sqlQuery += ` AND lower(name) LIKE ?`
-		args = append(args, "%"+query+"%")
-	}
+		WHERE city_id=$1 AND ($2='' OR lower(name) LIKE '%' || $2 || '%')`
+	args := []any{cityID, query}
 
 	sqlQuery += ` ORDER BY name`
 
 	if limit > 0 {
-		sqlQuery += ` LIMIT ? OFFSET ?`
+		sqlQuery += ` LIMIT $3 OFFSET $4`
 		args = append(args, limit, offset)
 	}
 
@@ -526,7 +581,7 @@ func (db *DB) ProcedureLetters(ctx context.Context, cityID int) ([]string, error
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT DISTINCT substr(name, 1, 1)
 		FROM luxmed_procedures
-		WHERE city_id=? AND name <> ''
+		WHERE city_id=$1 AND name <> ''
 		ORDER BY substr(name, 1, 1)
 	`, cityID)
 	if err != nil {
@@ -557,12 +612,12 @@ func (db *DB) ProceduresByLetter(ctx context.Context, cityID int, letter string,
 	sqlQuery := `
 		SELECT id, city_id, city_name, name, is_recent, updated_at
 		FROM luxmed_procedures
-		WHERE city_id=? AND substr(name, 1, 1)=?
+		WHERE city_id=$1 AND substr(name, 1, 1)=$2
 		ORDER BY name`
 	args := []any{cityID, letter}
 
 	if limit > 0 {
-		sqlQuery += ` LIMIT ? OFFSET ?`
+		sqlQuery += ` LIMIT $3 OFFSET $4`
 		args = append(args, limit, offset)
 	}
 
@@ -579,7 +634,7 @@ func (db *DB) Procedure(ctx context.Context, cityID int, procedureID int) (domai
 	row := db.sql.QueryRowContext(ctx, `
 		SELECT id, city_id, city_name, name, is_recent, updated_at
 		FROM luxmed_procedures
-		WHERE city_id=? AND id=?
+		WHERE city_id=$1 AND id=$2
 	`, cityID, procedureID)
 	var proc domain.Procedure
 	err := row.Scan(&proc.ID, &proc.CityID, &proc.CityName, &proc.Name, &proc.IsRecent, &proc.UpdatedAt)
@@ -599,7 +654,7 @@ func (db *DB) UpsertFacilities(ctx context.Context, city domain.City, procedureI
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO luxmed_facilities (id, city_id, city_name, procedure_id, name, address, updated_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT(id, city_id, procedure_id) DO UPDATE SET
 				city_name=excluded.city_name,
 				name=excluded.name,
@@ -616,11 +671,11 @@ func (db *DB) Facilities(ctx context.Context, cityID int, procedureID int, limit
 	query := `
 		SELECT id, name, address
 		FROM luxmed_facilities
-		WHERE city_id=? AND procedure_id=?
+		WHERE city_id=$1 AND procedure_id=$2
 		ORDER BY name`
 	args := []any{cityID, procedureID}
 	if limit > 0 {
-		query += ` LIMIT ?`
+		query += ` LIMIT $3`
 		args = append(args, limit)
 	}
 	rows, err := db.sql.QueryContext(ctx, query, args...)
@@ -643,12 +698,12 @@ func (db *DB) FacilitiesPage(ctx context.Context, cityID int, procedureID int, l
 	query := `
 		SELECT id, name, address
 		FROM luxmed_facilities
-		WHERE city_id=? AND procedure_id=?
+		WHERE city_id=$1 AND procedure_id=$2
 		ORDER BY name`
 	args := []any{cityID, procedureID}
 
 	if limit > 0 {
-		query += ` LIMIT ? OFFSET ?`
+		query += ` LIMIT $3 OFFSET $4`
 		args = append(args, limit, offset)
 	}
 
@@ -675,11 +730,11 @@ func (db *DB) FavoriteFacilities(ctx context.Context, userID int64, cityID int, 
 		SELECT f.id, f.name, f.address
 		FROM favorite_facilities fav
 		JOIN luxmed_facilities f ON f.id=fav.facility_id AND f.city_id=fav.city_id AND f.procedure_id=fav.procedure_id
-		WHERE fav.user_id=? AND fav.city_id=? AND fav.procedure_id=?
+		WHERE fav.user_id=$1 AND fav.city_id=$2 AND fav.procedure_id=$3
 		ORDER BY fav.last_used_at DESC`
 	args := []any{userID, cityID, procedureID}
 	if limit > 0 {
-		query += ` LIMIT ?`
+		query += ` LIMIT $4`
 		args = append(args, limit)
 	}
 	rows, err := db.sql.QueryContext(ctx, query, args...)
@@ -703,12 +758,12 @@ func (db *DB) FavoriteFacilitiesPage(ctx context.Context, userID int64, cityID i
 		SELECT f.id, f.name, f.address
 		FROM favorite_facilities fav
 		JOIN luxmed_facilities f ON f.id=fav.facility_id AND f.city_id=fav.city_id AND f.procedure_id=fav.procedure_id
-		WHERE fav.user_id=? AND fav.city_id=? AND fav.procedure_id=?
+		WHERE fav.user_id=$1 AND fav.city_id=$2 AND fav.procedure_id=$3
 		ORDER BY fav.last_used_at DESC`
 	args := []any{userID, cityID, procedureID}
 
 	if limit > 0 {
-		query += ` LIMIT ? OFFSET ?`
+		query += ` LIMIT $4 OFFSET $5`
 		args = append(args, limit, offset)
 	}
 
@@ -733,7 +788,7 @@ func (db *DB) FavoriteFacilitiesPage(ctx context.Context, userID int64, cityID i
 func (db *DB) SaveFavoriteFacility(ctx context.Context, userID int64, cityID int, procedureID int, facility domain.Facility) error {
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO favorite_facilities (user_id, city_id, procedure_id, facility_id, facility_name, last_used_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		ON CONFLICT(user_id, city_id, procedure_id, facility_id) DO UPDATE SET
 			facility_name=excluded.facility_name,
 			last_used_at=excluded.last_used_at
@@ -819,10 +874,11 @@ func scanWatch(row scanner) (domain.Watch, error) {
 	return watch, nil
 }
 
+const historyColumns = `id, watch_id, external_id, fingerprint, date_time, service_id, service_name, doctor_id, doctor_name,
+		facility_id, facility_name, address, city_id, city_name, booking_url, first_seen_at, last_seen_at, last_notified_at, seen_count, status, raw_payload`
+
 func historySelect() string {
-	return `SELECT id, watch_id, external_id, fingerprint, date_time, service_id, service_name, doctor_id, doctor_name,
-		facility_id, facility_name, address, city_id, city_name, booking_url, first_seen_at, last_seen_at, last_notified_at, seen_count, status, raw_payload
-		FROM appointment_history`
+	return `SELECT ` + historyColumns + ` FROM appointment_history`
 }
 
 func scanHistory(row scanner) (domain.AppointmentHistory, error) {
@@ -848,162 +904,4 @@ func nullableInt(value *int) any {
 		return nil
 	}
 	return *value
-}
-
-func lastInsertID(ctx context.Context, tx *sql.Tx) (int64, error) {
-	var id int64
-	err := tx.QueryRowContext(ctx, `SELECT last_insert_rowid()`).Scan(&id)
-	return id, err
-}
-
-var schema = fmt.Sprintf(`
-CREATE TABLE IF NOT EXISTS users (
-	id INTEGER PRIMARY KEY,
-	telegram_user_id INTEGER NOT NULL UNIQUE,
-	telegram_chat_id INTEGER NOT NULL,
-	telegram_username TEXT NOT NULL DEFAULT '',
-	display_name TEXT NOT NULL DEFAULT '',
-	locale TEXT NOT NULL,
-	preferred_city_id INTEGER,
-	preferred_city_name TEXT NOT NULL DEFAULT '',
-	status TEXT NOT NULL,
-	role TEXT NOT NULL,
-	created_at TIMESTAMP NOT NULL,
-	updated_at TIMESTAMP NOT NULL,
-	last_seen_at TIMESTAMP NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS invite_codes (
-	id INTEGER PRIMARY KEY,
-	code_hash TEXT NOT NULL UNIQUE,
-	created_by_user_id INTEGER NOT NULL,
-	max_uses INTEGER NOT NULL,
-	used_count INTEGER NOT NULL DEFAULT 0,
-	expires_at TIMESTAMP,
-	disabled_at TIMESTAMP,
-	created_at TIMESTAMP NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS luxmed_accounts (
-	id INTEGER PRIMARY KEY,
-	user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-	login TEXT NOT NULL,
-	encrypted_password TEXT NOT NULL,
-	encrypted_session_data TEXT NOT NULL DEFAULT '',
-	session_expires_at TIMESTAMP,
-	last_login_at TIMESTAMP,
-	last_login_error TEXT NOT NULL DEFAULT '',
-	status TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS watches (
-	id INTEGER PRIMARY KEY,
-	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-	name TEXT NOT NULL,
-	status TEXT NOT NULL CHECK (status IN ('%s','%s','%s')),
-	city_id INTEGER NOT NULL,
-	city_name TEXT NOT NULL,
-	service_id INTEGER NOT NULL,
-	service_name TEXT NOT NULL,
-	doctor_id INTEGER,
-	doctor_name TEXT NOT NULL DEFAULT '',
-	doctor_mode TEXT NOT NULL,
-	facility_mode TEXT NOT NULL,
-	facility_ids TEXT NOT NULL DEFAULT '[]',
-	facility_names TEXT NOT NULL DEFAULT '[]',
-	date_from TIMESTAMP,
-	date_to TIMESTAMP,
-	next_days INTEGER NOT NULL DEFAULT 14,
-	time_windows TEXT NOT NULL DEFAULT '[]',
-	check_interval_seconds INTEGER NOT NULL,
-	last_checked_at TIMESTAMP,
-	last_success_at TIMESTAMP,
-	last_error TEXT NOT NULL DEFAULT '',
-	created_at TIMESTAMP NOT NULL,
-	updated_at TIMESTAMP NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS appointment_history (
-	id INTEGER PRIMARY KEY,
-	watch_id INTEGER NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
-	external_id TEXT NOT NULL DEFAULT '',
-	fingerprint TEXT NOT NULL,
-	date_time TIMESTAMP NOT NULL,
-	service_id INTEGER NOT NULL,
-	service_name TEXT NOT NULL,
-	doctor_id INTEGER NOT NULL DEFAULT 0,
-	doctor_name TEXT NOT NULL DEFAULT '',
-	facility_id INTEGER NOT NULL DEFAULT 0,
-	facility_name TEXT NOT NULL DEFAULT '',
-	address TEXT NOT NULL DEFAULT '',
-	city_id INTEGER NOT NULL DEFAULT 0,
-	city_name TEXT NOT NULL DEFAULT '',
-	booking_url TEXT NOT NULL DEFAULT '',
-	first_seen_at TIMESTAMP NOT NULL,
-	last_seen_at TIMESTAMP NOT NULL,
-	last_notified_at TIMESTAMP,
-	seen_count INTEGER NOT NULL DEFAULT 1,
-	status TEXT NOT NULL,
-	raw_payload TEXT NOT NULL DEFAULT '',
-	UNIQUE(watch_id, fingerprint)
-);
-
-CREATE TABLE IF NOT EXISTS notification_history (
-	id INTEGER PRIMARY KEY,
-	watch_id INTEGER NOT NULL REFERENCES watches(id) ON DELETE CASCADE,
-	appointment_history_id INTEGER NOT NULL REFERENCES appointment_history(id) ON DELETE CASCADE,
-	appointment_fingerprint TEXT NOT NULL,
-	sent_at TIMESTAMP NOT NULL,
-	message_id INTEGER NOT NULL DEFAULT 0,
-	status TEXT NOT NULL,
-	error TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS luxmed_cities (
-	id INTEGER PRIMARY KEY,
-	name TEXT NOT NULL,
-	updated_at TIMESTAMP NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS luxmed_procedures (
-	id INTEGER NOT NULL,
-	city_id INTEGER NOT NULL,
-	city_name TEXT NOT NULL,
-	name TEXT NOT NULL,
-	is_recent BOOLEAN NOT NULL DEFAULT 0,
-	updated_at TIMESTAMP NOT NULL,
-	PRIMARY KEY (id, city_id)
-);
-
-CREATE TABLE IF NOT EXISTS luxmed_facilities (
-	id INTEGER NOT NULL,
-	city_id INTEGER NOT NULL,
-	city_name TEXT NOT NULL,
-	procedure_id INTEGER NOT NULL,
-	name TEXT NOT NULL,
-	address TEXT NOT NULL DEFAULT '',
-	updated_at TIMESTAMP NOT NULL,
-	PRIMARY KEY (id, city_id, procedure_id)
-);
-
-CREATE TABLE IF NOT EXISTS favorite_facilities (
-	user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-	city_id INTEGER NOT NULL,
-	procedure_id INTEGER NOT NULL,
-	facility_id INTEGER NOT NULL,
-	facility_name TEXT NOT NULL,
-	last_used_at TIMESTAMP NOT NULL,
-	PRIMARY KEY (user_id, city_id, procedure_id, facility_id)
-);
-
-CREATE INDEX IF NOT EXISTS idx_watches_due ON watches(status, last_checked_at);
-CREATE INDEX IF NOT EXISTS idx_history_watch ON appointment_history(watch_id, date_time);
-CREATE INDEX IF NOT EXISTS idx_notifications_fingerprint ON notification_history(watch_id, appointment_fingerprint, sent_at);
-CREATE INDEX IF NOT EXISTS idx_luxmed_procedures_search ON luxmed_procedures(city_id, name);
-CREATE INDEX IF NOT EXISTS idx_luxmed_facilities_lookup ON luxmed_facilities(city_id, procedure_id, name);
-`, domain.WatchStatusActive, domain.WatchStatusPaused, domain.WatchStatusDeleted)
-
-var compatibilityMigrations = []string{
-	`ALTER TABLE users ADD COLUMN preferred_city_id INTEGER`,
-	`ALTER TABLE users ADD COLUMN preferred_city_name TEXT NOT NULL DEFAULT ''`,
 }

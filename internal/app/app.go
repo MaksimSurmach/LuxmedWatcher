@@ -30,7 +30,15 @@ func (a *App) Run(ctx context.Context) error {
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	db, err := storage.Open(ctx, a.cfg.DatabasePath)
+	var db *storage.DB
+	var err error
+	backend := "sqlite"
+	if a.cfg.DatabaseURL != "" {
+		backend = "postgres"
+		db, err = storage.OpenPostgres(ctx, a.cfg.DatabaseURL)
+	} else {
+		db, err = storage.Open(ctx, a.cfg.DatabasePath)
+	}
 	if err != nil {
 		return err
 	}
@@ -62,6 +70,6 @@ func (a *App) Run(ctx context.Context) error {
 	go observability.RunHealth(ctx, a.cfg.HealthAddr, a.logger)
 	go watcher.Run(ctx)
 
-	a.logger.Info("luxmed watcher started", "bot", api.Self.UserName, "db", a.cfg.DatabasePath)
+	a.logger.Info("luxmed watcher started", "bot", api.Self.UserName, "db", backend)
 	return tgBot.Run(ctx)
 }
