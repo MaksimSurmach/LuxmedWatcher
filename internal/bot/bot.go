@@ -30,6 +30,7 @@ type Config struct {
 	MinimumInterval  time.Duration
 	DefaultInterval  time.Duration
 	PollTimeout      int
+	Browser          *luxmed.Browser
 }
 
 type Bot struct {
@@ -189,7 +190,8 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		b.handleCallback(ctx, update.CallbackQuery)
 		return
 	}
-	if update.Message == nil || !privateChat(update.Message.Chat, update.Message.From) {
+	if update.Message == nil || !privateChat(update.Message.Chat, update.Message.From) ||
+		(b.cfg.Browser != nil && !b.cfg.AdminTelegramIDs[update.Message.From.ID]) {
 		return
 	}
 	user, err := b.upsertUser(ctx, update.Message)
@@ -272,6 +274,8 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 		b.showMenu(user)
 	case "new":
 		b.startWatchFlow(ctx, user)
+	case "connect":
+		b.showAccount(ctx, user)
 	case "watches":
 		b.showWatches(ctx, user)
 	case "history":
@@ -291,7 +295,11 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
-		b.send(user, b.catalog.T(user.Locale, "flow.account.removed"), mainKeyboard(b.catalog, user.Locale))
+		key := "flow.account.removed"
+		if b.cfg.Browser != nil {
+			key = "flow.browser.logout"
+		}
+		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
 	case "invite":
 		b.createInvite(ctx, user, msg.CommandArguments())
 	default:
@@ -382,7 +390,8 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 }
 
 func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
-	if cb.Message == nil || !privateChat(cb.Message.Chat, cb.From) {
+	if cb.Message == nil || !privateChat(cb.Message.Chat, cb.From) ||
+		(b.cfg.Browser != nil && !b.cfg.AdminTelegramIDs[cb.From.ID]) {
 		return
 	}
 	user, err := b.db.UserByTelegramID(ctx, cb.From.ID)
@@ -424,8 +433,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		b.clearFlow(user.ID)
 		b.showMenu(user)
 	case data == "account":
-		b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
-		b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
+		b.showAccount(ctx, user)
 	case data == "new":
 		b.startWatchFlow(ctx, user)
 	case data == "watches":
@@ -571,7 +579,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 }
 
 func (b *Bot) startWatchFlow(ctx context.Context, user domain.User) {
-	if _, err := b.db.LuxMedAccount(ctx, user.ID); err != nil {
+	if err := b.checkAccount(ctx, user); err != nil {
 		b.send(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
@@ -1456,6 +1464,12 @@ func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domai
 }
 
 func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (luxmed.Client, error) {
+	if b.cfg.Browser != nil {
+		if err := b.checkAccount(ctx, user); err != nil {
+			return nil, err
+		}
+		return b.cfg.Browser.Client(), nil
+	}
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil {
 		return nil, err
@@ -1490,7 +1504,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "pause":
 		state = domain.WatchStatusPaused
 	case "resume":
-		if _, err := b.db.LuxMedAccount(ctx, user.ID); err != nil {
+		if err := b.checkAccount(ctx, user); err != nil {
 			b.send(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
 			return
 		}

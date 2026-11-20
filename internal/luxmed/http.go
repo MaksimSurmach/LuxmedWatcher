@@ -54,6 +54,7 @@ type HTTPClient struct {
 	xsrfToken   string
 	creds       Credentials
 	rawPayloads bool
+	browser     bool
 }
 
 func NewHTTPClient(rawPayloads bool) *HTTPClient {
@@ -134,6 +135,18 @@ func (c *HTTPClient) getJSON(ctx context.Context, endpoint string, target any) e
 }
 
 func (c *HTTPClient) get(ctx context.Context, endpoint string) ([]byte, error) {
+	if c.browser {
+		body, err := c.getWithRetry(ctx, endpoint)
+		if status, ok := errors.AsType[*HTTPError](err); ok {
+			if status.StatusCode == http.StatusUnauthorized {
+				return nil, errors.Join(ErrAuthentication, err)
+			}
+			if status.StatusCode == http.StatusConflict {
+				return nil, errors.Join(ErrUnavailable, err)
+			}
+		}
+		return body, err
+	}
 	if c.accessToken == "" {
 		if err := c.Authenticate(ctx, c.creds); err != nil {
 			return nil, err

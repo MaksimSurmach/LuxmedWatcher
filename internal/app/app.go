@@ -14,6 +14,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/bot"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/observability"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
@@ -63,14 +64,27 @@ func (a *App) Run(ctx context.Context) error {
 		return errors.New("connect to Telegram Bot API: check the token and network")
 	}
 
+	var browser *luxmed.Browser
+	if a.cfg.BrowserAPIURL != "" {
+		browser, err = luxmed.NewBrowser(a.cfg.BrowserAPIURL, a.cfg.BrowserViewerURL)
+		if err != nil {
+			return err
+		}
+	}
 	tgBot := bot.New(api, db, catalog, cryptor, bot.Config{
 		DefaultLocale:    a.cfg.DefaultLocale,
 		AdminTelegramIDs: a.cfg.AdminTelegramIDs,
 		MinimumInterval:  a.cfg.MinimumInterval,
 		DefaultInterval:  a.cfg.DefaultInterval,
 		PollTimeout:      a.cfg.PollTimeout,
+		Browser:          browser,
 	}, a.logger)
 	runner := scheduler.NewRunner(db, cryptor, tgBot, a.cfg.MinimumInterval, a.cfg.NotificationCooldown, a.cfg.EnableRawLuxMedPayload)
+	if browser != nil {
+		for id := range a.cfg.AdminTelegramIDs {
+			runner.UseBrowser(browser, id)
+		}
+	}
 	tgBot.SetRunner(runner)
 	watcher := scheduler.New(db, runner, 15*time.Second, a.cfg.HistoryRetention, a.logger)
 

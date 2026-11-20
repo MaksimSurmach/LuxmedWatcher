@@ -271,7 +271,7 @@ func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
-	if _, err := b.db.LuxMedAccount(ctx, user.ID); err != nil {
+	if err := b.checkAccount(ctx, user); err != nil {
 		b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}

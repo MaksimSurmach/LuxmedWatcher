@@ -25,6 +25,8 @@ type Config struct {
 	LogLevel               slog.Level
 	EnableRawLuxMedPayload bool
 	HealthAddr             string
+	BrowserAPIURL          string
+	BrowserViewerURL       string
 }
 
 func LoadConfig() (Config, error) {
@@ -40,6 +42,8 @@ func LoadConfig() (Config, error) {
 		PollTimeout:          envInt("TELEGRAM_POLL_TIMEOUT", 30),
 		LogLevel:             parseLogLevel(envString("LOG_LEVEL", "INFO")),
 		HealthAddr:           envString("HEALTH_ADDR", ":8080"),
+		BrowserAPIURL:        strings.TrimSpace(os.Getenv("LUXMED_BROWSER_API_URL")),
+		BrowserViewerURL:     strings.TrimSpace(os.Getenv("LUXMED_VIEWER_URL")),
 	}
 	cfg.EnableRawLuxMedPayload = envBool("ENABLE_RAW_LUXMED_PAYLOAD", false)
 
@@ -49,6 +53,9 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.MasterKey = key
 
+	if cfg.BrowserAPIURL != "" && len(cfg.AdminTelegramIDs) != 1 {
+		return Config{}, fmt.Errorf("browser mode requires exactly one admin Telegram ID")
+	}
 	if cfg.TelegramToken == "" {
 		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
 	}

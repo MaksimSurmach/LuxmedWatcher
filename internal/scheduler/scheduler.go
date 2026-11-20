@@ -37,6 +37,8 @@ type accountCheck struct {
 }
 
 type Runner struct {
+	browser              *luxmed.Browser
+	browserOwner         int64
 	db                   *storage.DB
 	cryptor              *security.Cryptor
 	notifier             Notifier
@@ -56,6 +58,10 @@ func NewRunner(db *storage.DB, cryptor *security.Cryptor, notifier Notifier, min
 		minimumInterval: minimumInterval, notificationCooldown: cooldown, rawPayloads: rawPayloads,
 		accounts: make(map[int64]*accountCheck), capacity: make(chan struct{}, 3),
 	}
+}
+
+func (r *Runner) UseBrowser(browser *luxmed.Browser, ownerTelegramID int64) {
+	r.browser, r.browserOwner = browser, ownerTelegramID
 }
 
 func (r *Runner) CheckWatch(ctx context.Context, watch domain.Watch) error {
@@ -156,42 +162,20 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 }
 
 func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, state *accountCheck, started time.Time) (int, error) {
-	account, err := r.db.LuxMedAccount(ctx, user.ID)
-	if errors.Is(err, sql.ErrNoRows) {
-		state.client = nil
-		state.login, state.encryptedPassword = "", ""
-		return 0, ErrNoAccount
-	}
-	if err != nil {
-		return 0, fmt.Errorf("load LuxMed account: %w", err)
-	}
-	if account.Status == domain.AccountStatusAuthFailed {
-		return 0, luxmed.ErrAuthentication
-	}
-	if state.client == nil || state.login != account.Login || state.encryptedPassword != account.EncryptedPassword || time.Since(state.authenticatedAt) > 15*time.Minute {
-		state.client = nil
-		password, err := r.cryptor.Decrypt(account.EncryptedPassword)
-		if err != nil {
-			return 0, fmt.Errorf("decrypt LuxMed credentials: %w", err)
+	var client luxmed.Client
+	if r.browser != nil {
+		if user.TelegramUserID != r.browserOwner {
+			return 0, ErrInactive
 		}
-		client := r.newClient(r.rawPayloads)
-		if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
-			if errors.Is(err, luxmed.ErrAuthentication) {
-				return 0, errors.Join(err, r.recordAuthFailure(ctx, account))
-			}
+		client = r.browser.Client()
+	} else {
+		var err error
+		client, err = r.passwordClient(ctx, user.ID, state)
+		if err != nil {
 			return 0, err
 		}
-
-		now := time.Now().UTC()
-		account.Status, account.LastLoginAt, account.LastLoginError = domain.AccountStatusActive, &now, ""
-		if err := r.db.UpdateLuxMedAccountAuth(ctx, account); err != nil {
-			return 0, fmt.Errorf("save LuxMed account status: %w", err)
-		}
-		state.client, state.authenticatedAt = client, now
-		state.login, state.encryptedPassword = account.Login, account.EncryptedPassword
 	}
-
-	appointments, searchErr := state.client.SearchAppointments(ctx, watch)
+	appointments, searchErr := client.SearchAppointments(ctx, watch)
 	if errors.Is(searchErr, luxmed.ErrAuthentication) {
 		state.client = nil
 		return 0, searchErr
@@ -245,6 +229,45 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		recordErr = fmt.Errorf("record notification delivery: %w", recordErr)
 	}
 	return len(seen), errors.Join(searchErr, notifyErr, recordErr)
+}
+
+func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accountCheck) (luxmed.Client, error) {
+	account, err := r.db.LuxMedAccount(ctx, userID)
+	if errors.Is(err, sql.ErrNoRows) {
+		state.client = nil
+		state.login, state.encryptedPassword = "", ""
+		return nil, ErrNoAccount
+	}
+	if err != nil {
+		return nil, fmt.Errorf("load LuxMed account: %w", err)
+	}
+	if account.Status == domain.AccountStatusAuthFailed {
+		return nil, luxmed.ErrAuthentication
+	}
+	if state.client == nil || state.login != account.Login || state.encryptedPassword != account.EncryptedPassword || time.Since(state.authenticatedAt) > 15*time.Minute {
+		state.client = nil
+		password, err := r.cryptor.Decrypt(account.EncryptedPassword)
+		if err != nil {
+			return nil, fmt.Errorf("decrypt LuxMed credentials: %w", err)
+		}
+		client := r.newClient(r.rawPayloads)
+		if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
+			if errors.Is(err, luxmed.ErrAuthentication) {
+				return nil, errors.Join(err, r.recordAuthFailure(ctx, account))
+			}
+			return nil, err
+		}
+
+		now := time.Now().UTC()
+		account.Status, account.LastLoginAt, account.LastLoginError = domain.AccountStatusActive, &now, ""
+		if err := r.db.UpdateLuxMedAccountAuth(ctx, account); err != nil {
+			return nil, fmt.Errorf("save LuxMed account status: %w", err)
+		}
+		state.client, state.authenticatedAt = client, now
+		state.login, state.encryptedPassword = account.Login, account.EncryptedPassword
+	}
+
+	return state.client, nil
 }
 
 func (r *Runner) checkWatchUnchanged(ctx context.Context, watch domain.Watch) error {
@@ -351,7 +374,10 @@ func (s *Scheduler) tick(ctx context.Context) {
 		checks.Add(1)
 		go func() {
 			defer checks.Done()
-			err := s.runner.CheckWatch(ctx, watch)
+			count, err := s.runner.check(ctx, watch, false)
+			if err == nil {
+				s.logger.Info("scheduled slot search completed", "watch_id", watch.ID, "matches", count)
+			}
 			if err != nil && !errors.Is(err, ErrRateLimited) && !errors.Is(err, ErrInactive) {
 				s.logger.Warn("watch check failed", "watch_id", watch.ID, "status", checkStatus(err), "err", err)
 			}

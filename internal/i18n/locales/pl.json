@@ -53,6 +53,8 @@
   "errors.luxmed_unavailable": "LUX MED jest chwilowo niedostępny. Spróbuj ponownie później.",
   "errors.no_account": "Najpierw podłącz konto LuxMed.",
   "errors.no_watches": "Nie masz jeszcze obserwacji.",
+  "flow.browser.open": "Otwórz LUX MED na komputerze, zaloguj się i potwierdź logowanie. Zamknij podgląd przed wyszukiwaniem. Link jest jednorazowy.",
+  "flow.browser.logout": "Obserwacje wstrzymane. Aby zakończyć sesję przeglądarki, wyloguj się w LUX MED.",
   "flow.account.login": "Wyślij login LuxMed.",
   "flow.account.password": "Wyślij hasło LuxMed.",
   "flow.account.removed": "Konto LUX MED odłączone. Obserwacje są wstrzymane.",
