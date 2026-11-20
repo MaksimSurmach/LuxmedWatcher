@@ -1,0 +1,27 @@
+services:
+  luxmed-watcher:
+    environment:
+      LUXMED_MINIAPP_URL: ${LUXMED_MINIAPP_URL:?Mini App HTTPS origin required}
+      LUXMED_MINIAPP_AGENT_URL: http://miniapp-agent:8093
+    depends_on:
+      - miniapp-agent
+
+  miniapp-agent:
+    build:
+      context: .
+      dockerfile: tools/miniapp/Dockerfile
+    init: true
+    restart: unless-stopped
+    ports:
+      - "${LUXMED_MINIAPP_BIND:-127.0.0.1}:19090:8090"
+    environment:
+      LUXMED_MINIAPP_URL: ${LUXMED_MINIAPP_URL:?Mini App HTTPS origin required}
+      LUXMED_BOT_ID: ${LUXMED_BOT_ID:?Telegram bot ID required}
+      ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:?Telegram owner ID required}
+      LUXMED_BROWSER_API_URL: http://browser:8091
+      LUXMED_BROWSER_VIEWER_URL: http://browser:8092/vnc
+      LUXMED_VIEWER_URL: ${LUXMED_VIEWER_URL:-http://localhost:18769}
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    read_only: true

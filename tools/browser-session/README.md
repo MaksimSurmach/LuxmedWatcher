@@ -41,3 +41,16 @@ The watcher uses SQLite in its own named volume by default. The Chrome profile l
 From the workstation that runs Telegram, forward localhost port 18769 to port 18769 on the Docker host over SSH. On that workstation send `/connect` in the owner's private bot chat and open the one-time address. In the server view, sign in to LuxMed, complete MFA and close the viewer. Use `/new` to configure a watch. When the watch runs successfully, the bot's logs include `scheduled slot search completed` with a match count.
 
 The MVP's viewer is available only through the workstation's SSH forward. The bridge expires a launch address after five minutes and closes an interactive viewer after ten minutes. It keeps Chrome running when the viewer disconnects. LuxMed controls the lifetime of the authenticated profile and can require manual steps for particular services.
+
+### Session evidence
+
+The worker logs `luxmed_session_check` after each fresh portal check. A later
+`ready` confirms the browser could still open the protected reservation form.
+The worker does not navigate or call a refresh endpoint for telemetry.
+
+`luxmed_session_refresh_response` records a response from the known LuxMed
+token refresh path when the portal itself requests it. It records HTTP status,
+whether a service worker provided the response, and the presence of
+`Set-Cookie` or `Authorization-Token` headers. Compare those events with later
+`ready` checks to investigate renewal. Header presence alone cannot establish
+that the session was extended. The logs contain status and header presence only.

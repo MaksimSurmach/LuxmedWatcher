@@ -27,6 +27,8 @@ type Config struct {
 	HealthAddr             string
 	BrowserAPIURL          string
 	BrowserViewerURL       string
+	MiniAppURL             string
+	MiniAppAgentURL        string
 }
 
 func LoadConfig() (Config, error) {
@@ -44,6 +46,8 @@ func LoadConfig() (Config, error) {
 		HealthAddr:           envString("HEALTH_ADDR", ":8080"),
 		BrowserAPIURL:        strings.TrimSpace(os.Getenv("LUXMED_BROWSER_API_URL")),
 		BrowserViewerURL:     strings.TrimSpace(os.Getenv("LUXMED_VIEWER_URL")),
+		MiniAppURL:           strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_URL")),
+		MiniAppAgentURL:      strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_AGENT_URL")),
 	}
 	cfg.EnableRawLuxMedPayload = envBool("ENABLE_RAW_LUXMED_PAYLOAD", false)
 
@@ -55,6 +59,9 @@ func LoadConfig() (Config, error) {
 
 	if cfg.BrowserAPIURL != "" && len(cfg.AdminTelegramIDs) != 1 {
 		return Config{}, fmt.Errorf("browser mode requires exactly one admin Telegram ID")
+	}
+	if (cfg.MiniAppURL == "") != (cfg.MiniAppAgentURL == "") || (cfg.MiniAppURL != "" && cfg.BrowserAPIURL == "") {
+		return Config{}, fmt.Errorf("Mini App requires browser mode and both Mini App URLs")
 	}
 	if cfg.TelegramToken == "" {
 		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")

@@ -5,6 +5,42 @@ const portalPage = '/PatientPortal/NewPortal/Page';
 const reservation = `${portalPage}/Reservation`;
 const login = `${portalPage}/Account/Login`;
 
+const refreshPath = '/patientportal/newportal/token/refresh';
+
+// These observations come from existing portal traffic and fresh checks.
+export function observeSession(context, {
+  origin = portalOrigin,
+  write = entry => console.info(JSON.stringify(entry)),
+} = {}) {
+  context.on('response', async (response) => {
+    try {
+      const url = new URL(response.url());
+      if (url.origin !== origin || url.pathname.toLowerCase() !== refreshPath) return;
+      const request = response.request();
+      if (!['GET', 'POST'].includes(request.method()) ||
+          new URL(request.frame().url()).origin !== origin) return;
+      const at = new Date().toISOString();
+      const headerNames = await response.allHeaders().then(Object.keys, () => null);
+      write({
+        event: 'luxmed_session_refresh_response',
+        at,
+        status: response.status(),
+        from_service_worker: response.fromServiceWorker(),
+        set_cookie_present: headerNames?.includes('set-cookie') ?? null,
+        authorization_token_present: headerNames?.includes('authorization-token') ?? null,
+      });
+    } catch {
+      // Detached frames and browser shutdown can race with passive observation.
+    }
+  });
+
+  return (state) => {
+    if (['ready', 'needs_login', 'unavailable'].includes(state)) {
+      write({ event: 'luxmed_session_check', at: new Date().toISOString(), state });
+    }
+  };
+}
+
 export function openProfile(profileDir, { headless = false } = {}) {
   return chromium.launchPersistentContext(profileDir, {
     channel: 'chrome',

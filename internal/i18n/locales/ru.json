@@ -54,6 +54,7 @@
   "errors.no_account": "Сначала подключите аккаунт LuxMed.",
   "errors.no_watches": "У вас пока нет поисков.",
   "flow.browser.open": "Открой LuxMed на рабочем компьютере, войди и пройди MFA. Закрой просмотр перед поиском. Ссылка одноразовая.",
+  "flow.browser.miniapp": "Войди в LuxMed, пройди MFA и закрой просмотр. Кнопка одноразовая.",
   "flow.browser.logout": "Наблюдения на паузе. Чтобы завершить сессию браузера, выйди из аккаунта в LuxMed.",
   "flow.account.login": "Отправьте логин LuxMed.",
   "flow.account.password": "Отправьте пароль LuxMed.",

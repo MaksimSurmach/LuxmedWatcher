@@ -31,6 +31,7 @@ type Config struct {
 	DefaultInterval  time.Duration
 	PollTimeout      int
 	Browser          *luxmed.Browser
+	MiniApp          *luxmed.MiniApp
 }
 
 type Bot struct {

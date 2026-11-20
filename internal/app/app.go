@@ -71,6 +71,13 @@ func (a *App) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	var miniApp *luxmed.MiniApp
+	if a.cfg.MiniAppURL != "" {
+		miniApp, err = luxmed.NewMiniApp(a.cfg.MiniAppAgentURL, a.cfg.MiniAppURL)
+		if err != nil {
+			return err
+		}
+	}
 	tgBot := bot.New(api, db, catalog, cryptor, bot.Config{
 		DefaultLocale:    a.cfg.DefaultLocale,
 		AdminTelegramIDs: a.cfg.AdminTelegramIDs,
@@ -78,6 +85,7 @@ func (a *App) Run(ctx context.Context) error {
 		DefaultInterval:  a.cfg.DefaultInterval,
 		PollTimeout:      a.cfg.PollTimeout,
 		Browser:          browser,
+		MiniApp:          miniApp,
 	}, a.logger)
 	runner := scheduler.NewRunner(db, cryptor, tgBot, a.cfg.MinimumInterval, a.cfg.NotificationCooldown, a.cfg.EnableRawLuxMedPayload)
 	if browser != nil {

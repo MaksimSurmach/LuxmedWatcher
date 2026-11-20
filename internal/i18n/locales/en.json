@@ -54,6 +54,7 @@
   "errors.no_account": "Connect your LuxMed account first.",
   "errors.no_watches": "You do not have watches yet.",
   "flow.browser.open": "Open LuxMed on the workstation, sign in and finish MFA. Close the viewer before starting a search. The link is single use.",
+  "flow.browser.miniapp": "Sign in to LuxMed, complete MFA and close the viewer. This button works once.",
   "flow.browser.logout": "Watches paused. To end the browser session, sign out in LuxMed.",
   "flow.account.login": "Send your LuxMed login.",
   "flow.account.password": "Send your LuxMed password.",

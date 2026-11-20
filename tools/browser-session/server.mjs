@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
-import { checkPortal, portalOrigin } from './session.mjs';
+import { checkPortal, observeSession, portalOrigin } from './session.mjs';
 
 const allowed = new Set([
   'Dictionary/cities',
@@ -22,6 +22,7 @@ const context = await chromium.launchPersistentContext('/profile', {
   acceptDownloads: false,
   viewport: { width: 1180, height: 728 },
 });
+const reportSession = observeSession(context);
 const page = context.pages()[0] ?? await context.newPage();
 const wss = new WebSocketServer({ noServer: true, maxPayload: 1 << 20, handleProtocols: () => 'binary' });
 let viewer;
@@ -39,6 +40,7 @@ async function portalReady(force = false) {
     return 'ready';
   }
   const status = await checkPortal(page);
+  reportSession(status);
   readyUntil = status === 'ready' ? Date.now() + 60_000 : 0;
   return status;
 }

@@ -2,6 +2,8 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
+	"strconv"
 	"strings"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -30,6 +32,10 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 		return
 	}
 	b.clearFlow(user.ID)
+	if b.cfg.MiniApp != nil {
+		b.showMiniApp(ctx, user)
+		return
+	}
 	link, err := b.cfg.Browser.ViewerLink(ctx)
 	if err != nil {
 		b.logger.Warn("open browser viewer failed", "err", err)
@@ -46,4 +52,33 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	}
 	button := tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), link)
 	b.send(user, b.catalog.T(user.Locale, "flow.browser.open"), tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(button)))
+}
+
+func (b *Bot) showMiniApp(ctx context.Context, user domain.User) {
+	link, err := b.cfg.MiniApp.Link(ctx)
+	if err != nil {
+		b.logger.Warn("Mini App unavailable", "err", err)
+		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
+		return
+	}
+	type button struct {
+		Text   string            `json:"text"`
+		WebApp map[string]string `json:"web_app"`
+	}
+	markup, err := json.Marshal(map[string][][]button{"inline_keyboard": {{
+		{Text: b.catalog.T(user.Locale, "button.open_luxmed"), WebApp: map[string]string{"url": link}},
+	}}})
+	if err != nil {
+		b.logger.Error("encode Mini App button", "err", err)
+		return
+	}
+	// The pinned Bot API client predates the web_app field.
+	_, err = b.api.MakeRequest("sendMessage", tgbotapi.Params{
+		"chat_id":      strconv.FormatInt(user.TelegramChatID, 10),
+		"text":         b.catalog.T(user.Locale, "flow.browser.miniapp"),
+		"reply_markup": string(markup),
+	})
+	if err != nil {
+		b.logger.Warn("send Mini App button failed")
+	}
 }
