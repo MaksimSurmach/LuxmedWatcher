@@ -2,12 +2,15 @@ package luxmed
 
 import (
 	"bytes"
+	"cmp"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"slices"
 	"strconv"
@@ -19,10 +22,16 @@ import (
 )
 
 const (
-	TermsURL   = "/PatientPortal/NewPortal/terms/index"
-	dateFormat = "2006-01-02"
-	wallTime   = "2006-01-02T15:04:05"
+	TermsURL       = "/PatientPortal/NewPortal/terms/index"
+	oneDayTermsURL = "/PatientPortal/NewPortal/terms/oneDayTerms"
+	// shortcut: later dates remain partial when four details are exhausted; persist progress if repeated gaps are a problem.
+	maxDayDetailRequests = 4
+	dateFormat           = "2006-01-02"
+	wallTime             = "2006-01-02T15:04:05"
 )
+
+// ErrPartialResults means that any returned slots were verified but some requested days were not.
+var ErrPartialResults = errors.New("luxmed search has incomplete coverage")
 
 var warsaw = loadLocation()
 
@@ -56,42 +65,11 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 
 	from, to := searchRange(watch, time.Now())
 	var results []domain.Appointment
-	for !from.After(to) {
-		end := from.AddDate(0, 0, 13)
-		if end.After(to) {
-			end = to
-		}
-		query := url.Values{
-			"searchPlace.id":   {strconv.Itoa(watch.CityID)},
-			"searchPlace.type": {"0"},
-			"serviceVariantId": {strconv.Itoa(watch.ServiceID)},
-			"languageId":       {"10"},
-			"searchDateFrom":   {from.Format(dateFormat)},
-			"searchDateTo":     {end.Format(dateFormat)},
-			"searchDatePreset": {"14"},
-			"delocalized":      {"false"},
-		}
-		if watch.DoctorID != nil && *watch.DoctorID > 0 {
-			query.Set("doctorsIds", strconv.Itoa(*watch.DoctorID))
-		}
-		for _, id := range facilities {
-			query.Add("facilitiesIds", strconv.Itoa(id))
-		}
-		data, err := c.get(ctx, TermsURL+"?"+query.Encode())
-		if err != nil {
-			return nil, err
-		}
-		payload := ""
-		if c.rawPayloads {
-			payload = string(data)
-		}
-		apps, err := decodeTermsResponse(watch, data, payload)
-		if err != nil {
-			return nil, err
-		}
+	seen := make(map[string]bool)
+	addMatches := func(apps []domain.Appointment, from, to time.Time) {
 		for _, app := range apps {
 			day := startOfDay(app.DateTime)
-			if day.Before(from) || day.After(end) {
+			if day.Before(from) || day.After(to) || seen[app.Fingerprint] {
 				continue
 			}
 			if watch.DoctorID != nil && *watch.DoctorID > 0 && app.DoctorID != *watch.DoctorID {
@@ -101,10 +79,135 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 				continue
 			}
 			results = append(results, app)
+			seen[app.Fingerprint] = true
+		}
+	}
+
+	type detailRequest struct {
+		day   time.Time
+		query url.Values
+	}
+	var details []detailRequest
+	requested := make(map[string]bool)
+	var uncovered int
+	scanned := false
+	for !from.After(to) {
+		end := from.AddDate(0, 0, 13)
+		if end.After(to) {
+			end = to
+		}
+		query, err := termsQuery(watch, facilities, from, end)
+		if err != nil {
+			return results, searchFailure(scanned, err)
+		}
+		data, err := c.get(ctx, TermsURL+"?"+query.Encode())
+		if err != nil {
+			return results, searchFailure(scanned, err)
+		}
+		preview, err := decodeTermsResponse(watch, data, c.rawPayloads)
+		if err != nil {
+			return results, searchFailure(scanned, err)
+		}
+		scanned = true
+		addMatches(preview.apps, from, end)
+		slices.SortFunc(preview.days, func(a, b dayInfo) int { return cmp.Compare(a.Day, b.Day) })
+		for _, info := range preview.days {
+			if info.Counter.Count <= 0 || requested[info.Day] {
+				continue
+			}
+			day, err := time.ParseInLocation(dateFormat, info.Day, warsaw)
+			if err != nil {
+				uncovered++
+				continue
+			}
+			if day.Before(from) || day.After(end) || !matchesWeekday(day, watch.TimeWindows) ||
+				(!info.IsLimitedDay && preview.loadedDays[info.Day] >= info.Counter.Count) {
+				continue
+			}
+			requested[info.Day] = true
+			if info.Status != 0 || len(details) >= maxDayDetailRequests {
+				uncovered++
+				continue
+			}
+			detailQuery := maps.Clone(query)
+			detailQuery.Set("searchDateFrom", info.Day)
+			detailQuery.Set("searchDateTo", info.Day)
+			detailQuery.Set("expectedTermsNumber", strconv.Itoa(info.Counter.Count))
+			detailQuery.Del("searchDatePreset")
+			detailQuery.Del("nextSearch")
+			details = append(details, detailRequest{day: day, query: detailQuery})
 		}
 		from = end.AddDate(0, 0, 1)
 	}
+
+	for _, detail := range details {
+		data, err := c.get(ctx, oneDayTermsURL+"?"+detail.query.Encode())
+		if err != nil {
+			return results, searchFailure(true, err)
+		}
+		apps, err := decodeOneDayTerms(watch, detail.day, data, c.rawPayloads)
+		if err != nil {
+			return results, searchFailure(true, err)
+		}
+		addMatches(apps, detail.day, detail.day)
+	}
+	if uncovered > 0 {
+		return results, fmt.Errorf("%w: %d candidate days could not be verified", ErrPartialResults, uncovered)
+	}
 	return results, nil
+}
+
+func matchesWeekday(day time.Time, windows []domain.TimeWindow) bool {
+	if len(windows) == 0 {
+		return true
+	}
+	weekday := int(day.Weekday())
+	if weekday == 0 {
+		weekday = 7
+	}
+	return slices.ContainsFunc(windows, func(window domain.TimeWindow) bool {
+		return window.Weekday == 0 || window.Weekday == weekday
+	})
+}
+
+func searchFailure(scanned bool, err error) error {
+	if scanned {
+		return fmt.Errorf("%w: %w", ErrPartialResults, err)
+	}
+	return err
+}
+
+func termsQuery(watch domain.Watch, facilities []int, from, to time.Time) (url.Values, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return nil, fmt.Errorf("generate luxmed search correlation ID: %w", err)
+	}
+	id[6] = id[6]&0x0f | 0x40
+	id[8] = id[8]&0x3f | 0x80
+	query := url.Values{
+		"searchPlace.id":            {strconv.Itoa(watch.CityID)},
+		"searchPlace.type":          {"0"},
+		"serviceVariantId":          {strconv.Itoa(watch.ServiceID)},
+		"languageId":                {"10"},
+		"searchDateFrom":            {from.Format(dateFormat)},
+		"searchDateTo":              {to.Format(dateFormat)},
+		"searchDatePreset":          {"14"},
+		"processId":                 {fmt.Sprintf("%x-%x-%x-%x-%x", id[:4], id[4:6], id[6:8], id[8:10], id[10:])},
+		"nextSearch":                {"false"},
+		"searchByMedicalSpecialist": {"false"},
+		"locationReplaced":          {"false"},
+		"delocalized":               {"false"},
+	}
+	if watch.CityName != "" {
+		query.Set("searchPlace.name", watch.CityName)
+	}
+	if watch.DoctorID != nil && *watch.DoctorID > 0 {
+		query.Set("doctorsIds", strconv.Itoa(*watch.DoctorID))
+	}
+	for _, id := range facilities {
+		query.Add("facilitiesIds", strconv.Itoa(id))
+	}
+	return query, nil
 }
 
 func searchRange(watch domain.Watch, now time.Time) (time.Time, time.Time) {
@@ -141,6 +244,7 @@ type termsResponse struct {
 }
 
 type termsDay struct {
+	Day   string `json:"day"`
 	Terms []struct {
 		ID           json.RawMessage `json:"id"`
 		DateTimeFrom string          `json:"dateTimeFrom"`
@@ -156,25 +260,80 @@ type termsDay struct {
 	} `json:"terms"`
 }
 
-func decodeTermsResponse(watch domain.Watch, body []byte, payload string) ([]domain.Appointment, error) {
+type dayInfo struct {
+	Day          string `json:"day"`
+	Status       int    `json:"termsStatus"`
+	IsLimitedDay bool   `json:"isLimitedDay"`
+	Counter      struct {
+		Count int `json:"termsNumber"`
+	} `json:"termsCounter"`
+}
+
+type termsPreview struct {
+	apps       []domain.Appointment
+	days       []dayInfo
+	loadedDays map[string]int
+}
+
+func decodeTermsResponse(watch domain.Watch, body []byte, raw bool) (termsPreview, error) {
 	var response termsResponse
 	if json.Unmarshal(body, &response) != nil {
-		return nil, fmt.Errorf("luxmed terms: %w", ErrResponse)
+		return termsPreview{}, fmt.Errorf("luxmed terms: %w", ErrResponse)
 	}
 	if response.Success != nil && !*response.Success {
-		return nil, fmt.Errorf("luxmed terms rejected: %w", ErrResponse)
+		return termsPreview{}, fmt.Errorf("luxmed terms rejected: %w", ErrResponse)
 	}
 	if bytes.Equal(response.TermsForService, []byte("null")) {
-		return nil, nil
+		return termsPreview{}, nil
 	}
 	var service struct {
 		Days json.RawMessage `json:"termsForDays"`
+		Info []dayInfo       `json:"termsInfoForDays"`
 	}
 	var days []termsDay
 	if json.Unmarshal(response.TermsForService, &service) != nil || json.Unmarshal(service.Days, &days) != nil {
-		return nil, fmt.Errorf("luxmed terms missing days: %w", ErrResponse)
+		return termsPreview{}, fmt.Errorf("luxmed terms missing days: %w", ErrResponse)
 	}
+	apps, err := normalizeTerms(watch, days, payload(body, raw))
+	if err != nil {
+		return termsPreview{}, err
+	}
+	loaded := make(map[string]int)
+	for _, app := range apps {
+		loaded[app.DateTime.Format(dateFormat)]++
+	}
+	return termsPreview{apps: apps, days: service.Info, loadedDays: loaded}, nil
+}
 
+func decodeOneDayTerms(watch domain.Watch, day time.Time, body []byte, raw bool) ([]domain.Appointment, error) {
+	var response struct {
+		ServiceID int       `json:"serviceVariantId"`
+		Day       *termsDay `json:"termsForDay"`
+	}
+	if json.Unmarshal(body, &response) != nil || response.Day == nil || response.Day.Terms == nil ||
+		response.ServiceID != watch.ServiceID || response.Day.Day != day.Format(dateFormat) {
+		return nil, fmt.Errorf("luxmed one-day terms: %w", ErrResponse)
+	}
+	apps, err := normalizeTerms(watch, []termsDay{*response.Day}, payload(body, raw))
+	if err != nil {
+		return nil, err
+	}
+	for _, app := range apps {
+		if !startOfDay(app.DateTime).Equal(day) {
+			return nil, fmt.Errorf("luxmed one-day terms outside requested date: %w", ErrResponse)
+		}
+	}
+	return apps, nil
+}
+
+func payload(body []byte, raw bool) string {
+	if raw {
+		return string(body)
+	}
+	return ""
+}
+
+func normalizeTerms(watch domain.Watch, days []termsDay, payload string) ([]domain.Appointment, error) {
 	var apps []domain.Appointment
 	for _, day := range days {
 		for _, term := range day.Terms {

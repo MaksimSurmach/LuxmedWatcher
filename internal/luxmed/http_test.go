@@ -168,12 +168,12 @@ func TestDecodeTermsFailsOnUnreadableResults(t *testing.T) {
 		`{"termsForService":{}}`,
 		`{"termsForService":{"termsForDays":[{"terms":[{"dateTimeFrom":"broken"}]}]}}`,
 	} {
-		if _, err := decodeTermsResponse(domain.Watch{}, []byte(body), ""); !errors.Is(err, ErrResponse) {
+		if _, err := decodeTermsResponse(domain.Watch{}, []byte(body), false); !errors.Is(err, ErrResponse) {
 			t.Errorf("decode %s: %v", body, err)
 		}
 	}
-	apps, err := decodeTermsResponse(domain.Watch{}, []byte(`{"termsForService":{"termsForDays":[]}}`), "")
-	if err != nil || len(apps) != 0 {
-		t.Fatalf("empty calendar: apps = %v, err = %v", apps, err)
+	preview, err := decodeTermsResponse(domain.Watch{}, []byte(`{"termsForService":{"termsForDays":[]}}`), false)
+	if err != nil || len(preview.apps) != 0 {
+		t.Fatalf("empty calendar: apps = %v, err = %v", preview.apps, err)
 	}
 }
