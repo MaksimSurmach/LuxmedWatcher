@@ -78,6 +78,10 @@ func open(ctx context.Context, db *DB) (*DB, error) {
 	return db, nil
 }
 
+func (db *DB) Ping(ctx context.Context) error {
+	return db.sql.PingContext(ctx)
+}
+
 func (db *DB) Close() error {
 	return db.sql.Close()
 }

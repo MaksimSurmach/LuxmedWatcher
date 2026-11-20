@@ -336,6 +336,51 @@ func TestDueHistoryAndAccount(t *testing.T) {
 	})
 }
 
+func TestAppointmentDisappearanceAndReappearance(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		must(db.Ping(ctx))
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 1})
+		must(err)
+		watchID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, Name: "test"})
+		must(err)
+		app := domain.Appointment{Fingerprint: "slot", DateTime: time.Now().UTC().Add(time.Hour)}
+		history, _, err := db.UpsertAppointmentHistory(ctx, watchID, app)
+		must(err)
+		must(db.MarkNotifications(ctx, []domain.AppointmentHistory{history}, 1, domain.NotificationStatusSent, ""))
+		updated, created, err := db.UpsertAppointmentHistory(ctx, watchID, app)
+		must(err)
+		if created || updated.Status != domain.HistoryStatusNotified || updated.LastNotifiedAt == nil {
+			t.Fatalf("continuously available appointment: %+v, created=%v", updated, created)
+		}
+		cutoff := time.Now().UTC().Add(time.Second)
+		must(db.MarkMissingAppointments(ctx, watchID, cutoff, cutoff.Add(-time.Hour)))
+		updated, err = db.AppointmentHistoryByID(ctx, history.ID)
+		must(err)
+		if updated.Status != domain.HistoryStatusExpired || updated.LastNotifiedAt == nil {
+			t.Fatalf("missing appointment during cooldown: %+v", updated)
+		}
+		must(db.MarkMissingAppointments(ctx, watchID, cutoff, cutoff))
+		updated, created, err = db.UpsertAppointmentHistory(ctx, watchID, app)
+		must(err)
+		if created || updated.Status != domain.HistoryStatusSeenAgain || updated.LastNotifiedAt != nil {
+			t.Fatalf("reappearing appointment after cooldown: %+v, created=%v", updated, created)
+		}
+		must(db.HideAppointmentHistory(ctx, user.ID, history.ID))
+		must(db.MarkMissingAppointments(ctx, watchID, cutoff, cutoff))
+		updated, err = db.AppointmentHistoryByID(ctx, history.ID)
+		must(err)
+		if updated.Status != domain.HistoryStatusHidden {
+			t.Fatalf("missing appointment unhid a user-hidden slot: %+v", updated)
+		}
+	})
+}
+
 func TestConcurrentInviteActivation(t *testing.T) {
 	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
 		const claimants = 5
@@ -436,7 +481,7 @@ func TestLegacySQLiteMigrationAndDueWatch(t *testing.T) {
 func TestOpenPostgresRejectsInvalidURLWithoutCredentials(t *testing.T) {
 	for _, dsn := range []string{
 		"not-a-postgres-url:example-dummy-password",
-		"postgres://user:example-dummy-password@%bad-host/db",
+		"postgres://user:example-dummy-password@%zz-host/db",
 		"postgres://user:example-dummy-password@localhost/db?connect_timeout=%invalid",
 	} {
 		db, err := OpenPostgres(context.Background(), dsn)

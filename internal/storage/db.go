@@ -294,13 +294,23 @@ func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app d
 		ON CONFLICT(watch_id, fingerprint) DO UPDATE SET
 			last_seen_at=excluded.last_seen_at,
 			seen_count=appointment_history.seen_count+1,
-			status=CASE WHEN appointment_history.status=$18 THEN appointment_history.status ELSE $19 END
+			status=CASE WHEN appointment_history.status=$18 THEN appointment_history.status
+				WHEN appointment_history.last_notified_at IS NOT NULL THEN $19 ELSE $20 END
 		RETURNING `+historyColumns,
 		watchID, app.ExternalID, app.Fingerprint, app.DateTime, app.ServiceID, app.ServiceName, app.DoctorID, app.DoctorName,
 		app.FacilityID, app.FacilityName, app.Address, app.CityID, app.CityName, app.BookingURL, now, domain.HistoryStatusNew,
-		app.RawPayload, domain.HistoryStatusHidden, domain.HistoryStatusSeenAgain)
+		app.RawPayload, domain.HistoryStatusHidden, domain.HistoryStatusNotified, domain.HistoryStatusSeenAgain)
 	history, err := scanHistory(row)
 	return history, history.SeenCount == 1, err
+}
+
+func (db *DB) MarkMissingAppointments(ctx context.Context, watchID int64, seenSince, notifiedBefore time.Time) error {
+	_, err := db.sql.ExecContext(ctx, `
+		UPDATE appointment_history SET status=$1,
+			last_notified_at=CASE WHEN `+db.dateTimeSQL("last_notified_at")+` <= `+db.dateTimeSQL("$2")+` THEN NULL ELSE last_notified_at END
+		WHERE watch_id=$3 AND `+db.dateTimeSQL("last_seen_at")+` < `+db.dateTimeSQL("$4")+` AND status <> $5
+	`, domain.HistoryStatusExpired, notifiedBefore.UTC(), watchID, seenSince.UTC(), domain.HistoryStatusHidden)
+	return err
 }
 
 func (db *DB) AppointmentHistoryByID(ctx context.Context, id int64) (domain.AppointmentHistory, error) {
