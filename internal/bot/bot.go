@@ -155,9 +155,9 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 }
 
 func portalURL(raw string) string {
-	const portal = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Reservation"
+	const portal = luxmed.ReservationPageURL
 	u, err := url.Parse(raw)
-	if err != nil || u.Scheme != "https" || u.Host != "portalpacjenta.luxmed.pl" || u.User != nil || !strings.HasPrefix(u.Path, "/PatientPortal/NewPortal/") || u.RawQuery != "" || u.Fragment != "" {
+	if err != nil || u.Scheme != "https" || u.Host != "portalpacjenta.luxmed.pl" || u.User != nil || (u.Path != "/PatientPortal/NewPortal/Page/Reservation" && u.Path != "/PatientPortal/NewPortal/Page/Reservation/Search") || u.RawQuery != "" || u.Fragment != "" {
 		return portal
 	}
 	return u.String()

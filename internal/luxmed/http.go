@@ -16,11 +16,12 @@ import (
 )
 
 const (
-	portalURL       = "https://portalpacjenta.luxmed.pl"
-	LoginURL        = "/PatientPortal/Account/LogIn"
-	XsrfTokenURL    = "/PatientPortal/NewPortal/security/getforgerytoken"
-	maxResponseSize = 8 << 20
-	maxRetryWait    = 3 * time.Second
+	portalURL          = "https://portalpacjenta.luxmed.pl"
+	ReservationPageURL = portalURL + "/PatientPortal/NewPortal/Page/Reservation"
+	LoginURL           = "/PatientPortal/Account/LogIn"
+	XsrfTokenURL       = "/PatientPortal/NewPortal/security/getforgerytoken"
+	maxResponseSize    = 8 << 20
+	maxRetryWait       = 3 * time.Second
 )
 
 var (

@@ -167,3 +167,21 @@ func TestDecodeOneDayTermsChecksRequestedDate(t *testing.T) {
 		t.Fatalf("empty day appointments = %v, err = %v", apps, err)
 	}
 }
+
+func TestMalformedPreviewKeepsVerifiedSlots(t *testing.T) {
+	occasion := startOfDay(time.Now()).AddDate(0, 0, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, `{"termsForService":{"termsForDays":[{"terms":[{"dateTimeFrom":"%sT10:00:00"},{"dateTimeFrom":"invalid"}]}]}}`,
+			occasion.Format(dateFormat))
+	}))
+	defer server.Close()
+
+	client := newHTTPClient(server.URL, false)
+	client.accessToken = "fixture"
+	apps, err := client.SearchAppointments(context.Background(), domain.Watch{
+		CityID: 1, ServiceID: 2, DateFrom: &occasion, DateTo: &occasion,
+	})
+	if !errors.Is(err, ErrPartialResults) || len(apps) != 1 || apps[0].BookingURL != ReservationPageURL {
+		t.Fatalf("verified slots = %d, error = %v", len(apps), err)
+	}
+}

@@ -105,11 +105,11 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 			return results, searchFailure(scanned, err)
 		}
 		preview, err := decodeTermsResponse(watch, data, c.rawPayloads)
+		addMatches(preview.apps, from, end)
 		if err != nil {
-			return results, searchFailure(scanned, err)
+			return results, searchFailure(scanned || len(preview.apps) > 0, err)
 		}
 		scanned = true
-		addMatches(preview.apps, from, end)
 		slices.SortFunc(preview.days, func(a, b dayInfo) int { return cmp.Compare(a.Day, b.Day) })
 		for _, info := range preview.days {
 			if info.Counter.Count <= 0 || requested[info.Day] {
@@ -146,10 +146,10 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 			return results, searchFailure(true, err)
 		}
 		apps, err := decodeOneDayTerms(watch, detail.day, data, c.rawPayloads)
+		addMatches(apps, detail.day, detail.day)
 		if err != nil {
 			return results, searchFailure(true, err)
 		}
-		addMatches(apps, detail.day, detail.day)
 	}
 	if uncovered > 0 {
 		return results, fmt.Errorf("%w: %d candidate days could not be verified", ErrPartialResults, uncovered)
@@ -283,7 +283,7 @@ func decodeTermsResponse(watch domain.Watch, body []byte, raw bool) (termsPrevie
 	if response.Success != nil && !*response.Success {
 		return termsPreview{}, fmt.Errorf("luxmed terms rejected: %w", ErrResponse)
 	}
-	if bytes.Equal(response.TermsForService, []byte("null")) {
+	if bytes.Equal(response.TermsForService, []byte("null")) && response.Success != nil && *response.Success {
 		return termsPreview{}, nil
 	}
 	var service struct {
@@ -295,35 +295,33 @@ func decodeTermsResponse(watch domain.Watch, body []byte, raw bool) (termsPrevie
 		return termsPreview{}, fmt.Errorf("luxmed terms missing days: %w", ErrResponse)
 	}
 	apps, err := normalizeTerms(watch, days, payload(body, raw))
-	if err != nil {
-		return termsPreview{}, err
-	}
 	loaded := make(map[string]int)
 	for _, app := range apps {
 		loaded[app.DateTime.Format(dateFormat)]++
 	}
-	return termsPreview{apps: apps, days: service.Info, loadedDays: loaded}, nil
+	return termsPreview{apps: apps, days: service.Info, loadedDays: loaded}, err
 }
 
 func decodeOneDayTerms(watch domain.Watch, day time.Time, body []byte, raw bool) ([]domain.Appointment, error) {
 	var response struct {
 		ServiceID int       `json:"serviceVariantId"`
 		Day       *termsDay `json:"termsForDay"`
+		Info      *dayInfo  `json:"termsInfoForDay"`
 	}
 	if json.Unmarshal(body, &response) != nil || response.Day == nil || response.Day.Terms == nil ||
 		response.ServiceID != watch.ServiceID || response.Day.Day != day.Format(dateFormat) {
 		return nil, fmt.Errorf("luxmed one-day terms: %w", ErrResponse)
 	}
 	apps, err := normalizeTerms(watch, []termsDay{*response.Day}, payload(body, raw))
-	if err != nil {
-		return nil, err
-	}
 	for _, app := range apps {
 		if !startOfDay(app.DateTime).Equal(day) {
 			return nil, fmt.Errorf("luxmed one-day terms outside requested date: %w", ErrResponse)
 		}
 	}
-	return apps, nil
+	if response.Info != nil && (response.Info.IsLimitedDay || response.Info.Counter.Count > len(apps)) {
+		err = errors.Join(err, ErrPartialResults)
+	}
+	return apps, err
 }
 
 func payload(body []byte, raw bool) string {
@@ -335,6 +333,7 @@ func payload(body []byte, raw bool) string {
 
 func normalizeTerms(watch domain.Watch, days []termsDay, payload string) ([]domain.Appointment, error) {
 	var apps []domain.Appointment
+	var malformed int
 	for _, day := range days {
 		for _, term := range day.Terms {
 			when, err := time.Parse(time.RFC3339Nano, term.DateTimeFrom)
@@ -342,7 +341,8 @@ func normalizeTerms(watch domain.Watch, days []termsDay, payload string) ([]doma
 				when, err = time.ParseInLocation(wallTime, term.DateTimeFrom, warsaw)
 			}
 			if err != nil {
-				return nil, fmt.Errorf("luxmed terms invalid appointment time: %w", ErrResponse)
+				malformed++
+				continue
 			}
 			var externalID string
 			if json.Unmarshal(term.ID, &externalID) != nil {
@@ -367,7 +367,7 @@ func normalizeTerms(watch domain.Watch, days []termsDay, payload string) ([]doma
 				Address:      address,
 				CityID:       watch.CityID,
 				CityName:     watch.CityName,
-				BookingURL:   portalURL + "/PatientPortal/NewPortal/Reservations/Reservation",
+				BookingURL:   ReservationPageURL,
 				RawPayload:   payload,
 			}
 			app.Fingerprint = Fingerprint(app)
@@ -379,6 +379,9 @@ func normalizeTerms(watch domain.Watch, days []termsDay, payload string) ([]doma
 			}
 			apps = append(apps, app)
 		}
+	}
+	if malformed > 0 {
+		return apps, fmt.Errorf("luxmed terms: %d appointment times could not be parsed: %w", malformed, ErrResponse)
 	}
 	return apps, nil
 }
