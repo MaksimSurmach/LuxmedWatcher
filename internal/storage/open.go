@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	_ "time/tzdata"
 
 	"github.com/lib/pq"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -118,9 +119,56 @@ func (db *DB) Migrate(ctx context.Context) error {
 				}
 			}
 		}
+		if err := migrateSQLiteAppointmentTimes(ctx, tx); err != nil {
+			return fmt.Errorf("correct legacy SQLite appointment times: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit storage migration: %w", err)
 	}
 	return nil
+}
+
+func migrateSQLiteAppointmentTimes(ctx context.Context, tx *sql.Tx) error {
+	var version int
+	if err := tx.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&version); err != nil || version >= 1 {
+		return err
+	}
+	// Earlier releases parsed Warsaw wall times as UTC and used the driver's Go Time.String encoding.
+	rows, err := tx.QueryContext(ctx, `SELECT id, date_time FROM appointment_history WHERE date_time LIKE '% +0000 UTC'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type slot struct {
+		id   int64
+		when time.Time
+	}
+	var slots []slot
+	for rows.Next() {
+		var value slot
+		if err := rows.Scan(&value.id, &value.when); err != nil {
+			return err
+		}
+		slots = append(slots, value)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if len(slots) > 0 {
+		warsaw, err := time.LoadLocation("Europe/Warsaw")
+		if err != nil {
+			return err
+		}
+		for _, slot := range slots {
+			year, month, day := slot.when.Date()
+			hour, minute, second := slot.when.Clock()
+			when := time.Date(year, month, day, hour, minute, second, slot.when.Nanosecond(), warsaw)
+			if _, err := tx.ExecContext(ctx, `UPDATE appointment_history SET date_time=$1 WHERE id=$2`, when, slot.id); err != nil {
+				return err
+			}
+		}
+	}
+	_, err = tx.ExecContext(ctx, `PRAGMA user_version = 1`)
+	return err
 }

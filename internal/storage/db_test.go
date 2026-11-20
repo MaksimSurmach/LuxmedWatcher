@@ -494,3 +494,45 @@ func TestOpenPostgresRejectsInvalidURLWithoutCredentials(t *testing.T) {
 		}
 	}
 }
+
+func TestLegacySQLiteAppointmentTimeMigration(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "test.sqlite")
+	db, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 1})
+	must(err)
+	watchID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, Name: "fixture"})
+	must(err)
+	wall := time.Date(2026, time.July, 20, 10, 15, 0, 0, time.UTC)
+	old, _, err := db.UpsertAppointmentHistory(ctx, watchID, domain.Appointment{Fingerprint: "old", DateTime: wall})
+	must(err)
+	modern, _, err := db.UpsertAppointmentHistory(ctx, watchID, domain.Appointment{Fingerprint: "modern", DateTime: wall})
+	must(err)
+	// Reproduce the old driver's encoding and migration state without changing the new row.
+	_, err = db.sql.ExecContext(ctx, `UPDATE appointment_history SET date_time=$1 WHERE id=$2; PRAGMA user_version = 0`, wall.String(), old.ID)
+	must(err)
+	for range 2 {
+		must(db.Migrate(ctx))
+		migrated, err := db.AppointmentHistoryByID(ctx, old.ID)
+		must(err)
+		want := wall.Add(-2 * time.Hour)
+		if !migrated.DateTime.Equal(want) || migrated.Fingerprint != old.Fingerprint {
+			t.Fatalf("legacy appointment = %v (%q), want %v (%q)", migrated.DateTime, migrated.Fingerprint, want, old.Fingerprint)
+		}
+		unchanged, err := db.AppointmentHistoryByID(ctx, modern.ID)
+		must(err)
+		if !unchanged.DateTime.Equal(wall) {
+			t.Fatalf("current appointment = %v, want %v", unchanged.DateTime, wall)
+		}
+	}
+}
