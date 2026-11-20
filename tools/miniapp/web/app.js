@@ -17,8 +17,9 @@ const copy = {
   en: {
     title: 'Sign in to LuxMed', screen: 'LuxMed browser', close: 'Close', keyboard: 'Keyboard',
     keyboardLabel: 'Tap a field in LuxMed, then type here.', backspace: 'Backspace',
-    zoomIn: 'Zoom in', fit: 'Fit to screen', zoomed: 'Drag to pan. Tap a field to select it.',
-    starting: 'Connecting…', connected: 'Sign in and complete MFA in the LuxMed window.',
+    zoomIn: 'Zoom in', fit: 'Fit to screen', zoomed: 'Drag to pan. Use the arrows to scroll the page.',
+    scrollUp: 'Scroll page up', scrollDown: 'Scroll page down',
+    starting: 'Connecting…', connected: 'Swipe or use the arrows to scroll the page.',
     missing: 'Open a new sign-in link from your private bot chat.',
     failed: 'Connection failed. Ask the bot for a new link.',
     disconnected: 'The sign-in window is closed. Return to the bot.',
@@ -26,8 +27,9 @@ const copy = {
   ru: {
     title: 'Вход в LuxMed', screen: 'Окно LuxMed', close: 'Закрыть', keyboard: 'Клавиатура',
     keyboardLabel: 'Коснитесь поля в LuxMed, затем печатайте здесь.', backspace: 'Стереть',
-    zoomIn: 'Увеличить', fit: 'По размеру экрана', zoomed: 'Перетаскивайте экран. Коснитесь нужного поля.',
-    starting: 'Подключение…', connected: 'Войдите и завершите MFA в окне LuxMed.',
+    zoomIn: 'Увеличить', fit: 'По размеру экрана', zoomed: 'Перетаскивайте экран. Стрелки прокручивают страницу.',
+    scrollUp: 'Прокрутить страницу вверх', scrollDown: 'Прокрутить страницу вниз',
+    starting: 'Подключение…', connected: 'Прокручивайте страницу свайпом или стрелками.',
     missing: 'Откройте новую ссылку на вход из личного чата с ботом.',
     failed: 'Не удалось подключиться. Запросите у бота новую ссылку.',
     disconnected: 'Окно входа закрыто. Вернитесь к боту.',
@@ -35,8 +37,9 @@ const copy = {
   pl: {
     title: 'Zaloguj się do LUX MED', screen: 'Okno LUX MED', close: 'Zamknij', keyboard: 'Klawiatura',
     keyboardLabel: 'Dotknij pola w LUX MED, a następnie pisz tutaj.', backspace: 'Usuń',
-    zoomIn: 'Powiększ', fit: 'Dopasuj do ekranu', zoomed: 'Przeciągaj obraz. Dotknij pola, aby je wybrać.',
-    starting: 'Łączenie…', connected: 'Zaloguj się i dokończ MFA w oknie LUX MED.',
+    zoomIn: 'Powiększ', fit: 'Dopasuj do ekranu', zoomed: 'Przeciągaj obraz. Strzałki przewijają stronę.',
+    scrollUp: 'Przewiń stronę w górę', scrollDown: 'Przewiń stronę w dół',
+    starting: 'Łączenie…', connected: 'Przesuń palcem lub użyj strzałek, aby przewinąć stronę.',
     missing: 'Otwórz nowy link do logowania z prywatnej rozmowy z botem.',
     failed: 'Nie udało się połączyć. Poproś bota o nowy link.',
     disconnected: 'Okno logowania zamknięte. Wróć do bota.',
@@ -58,6 +61,8 @@ for (const id of ['title', 'close', 'keyboard', 'keyboardLabel', 'backspace']) {
   element(id).textContent = labels[id];
 }
 screen.setAttribute('aria-label', labels.screen);
+element('scroll-up').setAttribute('aria-label', labels.scrollUp);
+element('scroll-down').setAttribute('aria-label', labels.scrollDown);
 zoom.textContent = labels.zoomIn;
 status.textContent = labels.starting;
 telegram?.ready();
@@ -73,6 +78,7 @@ let startupTimer;
 let connected = false;
 let closed = false;
 let zoomed = false;
+let scrollDrag;
 
 function close(message) {
   if (closed) return;
@@ -172,6 +178,46 @@ element('remote-keys').addEventListener('click', (event) => {
   viewer.sendKey(keyCodes[key], key);
   keys.focus({ preventScroll: true });
 });
+
+function scrollPage(canvas, clientX, clientY, steps) {
+  for (let i = 0; i < Math.abs(steps); i++) {
+    canvas.dispatchEvent(new WheelEvent('wheel', {
+      clientX, clientY, deltaY: 3 * Math.sign(steps), deltaMode: WheelEvent.DOM_DELTA_LINE,
+      bubbles: true, cancelable: true,
+    }));
+  }
+}
+
+controls.addEventListener('click', (event) => {
+  const steps = Number(event.target.closest('[data-scroll]')?.dataset.scroll);
+  if (!connected || !steps) return;
+  const canvas = screen.querySelector('canvas');
+  if (!canvas) return;
+  const { left, top, width, height } = canvas.getBoundingClientRect();
+  scrollPage(canvas, left + width / 2, top + height / 2, steps);
+});
+
+// noVNC maps a one-finger drag to a held mouse button. In fit mode we use it
+// for page scrolling and leave taps and zoomed viewport panning to noVNC.
+function handlePageSwipe(event) {
+  if (!connected || zoomed || event.detail?.type !== 'drag') return;
+  event.stopPropagation();
+  const { clientX, clientY } = event.detail;
+  if (event.type === 'gesturestart') {
+    scrollDrag = { x: clientX, y: clientY, lastY: clientY };
+  } else if (event.type === 'gestureend') {
+    scrollDrag = undefined;
+  } else if (scrollDrag) {
+    const pixelsPerStep = 24;
+    const steps = Math.trunc((scrollDrag.lastY - clientY) / pixelsPerStep);
+    scrollDrag.lastY -= steps * pixelsPerStep;
+    scrollPage(event.target, scrollDrag.x, scrollDrag.y, steps);
+  }
+}
+for (const type of ['gesturestart', 'gesturemove', 'gestureend']) {
+  screen.addEventListener(type, handlePageSwipe, { capture: true });
+}
+
 zoom.addEventListener('click', () => {
   if (!connected) return;
   zoomed = !zoomed;

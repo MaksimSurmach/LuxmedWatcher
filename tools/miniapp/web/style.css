@@ -34,11 +34,13 @@ p { margin: .15rem 0 0; font-size: .875rem; }
   flex: 1;
   min-height: 0;
   overflow: hidden;
+  touch-action: none;
   border-radius: .55rem;
   background: var(--tg-theme-secondary-bg-color, ButtonFace);
 }
 
 #controls, #remote-keys { display: flex; flex-wrap: wrap; gap: .45rem; }
+#controls [data-scroll] { min-width: 44px; }
 #typing { display: grid; gap: .35rem; }
 #typing label { font-size: .875rem; }
 
