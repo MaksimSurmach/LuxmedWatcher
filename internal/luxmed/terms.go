@@ -1,0 +1,239 @@
+package luxmed
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+	_ "time/tzdata"
+
+	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+)
+
+const (
+	TermsURL   = "/PatientPortal/NewPortal/terms/index"
+	dateFormat = "2006-01-02"
+	wallTime   = "2006-01-02T15:04:05"
+)
+
+var warsaw = loadLocation()
+
+func loadLocation() *time.Location {
+	location, err := time.LoadLocation("Europe/Warsaw")
+	if err != nil {
+		panic(err)
+	}
+	return location
+}
+
+// Location is the time zone used by the LuxMed Polish patient portal.
+func Location() *time.Location { return warsaw }
+
+func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch) ([]domain.Appointment, error) {
+	if watch.CityID <= 0 || watch.ServiceID <= 0 {
+		return nil, errors.New("luxmed search requires a city and service")
+	}
+	if watch.DoctorMode == domain.DoctorModeExact && (watch.DoctorID == nil || *watch.DoctorID <= 0) {
+		return nil, errors.New("luxmed search requires a selected doctor")
+	}
+	facilities := make([]int, 0, len(watch.FacilityIDs))
+	for _, id := range watch.FacilityIDs {
+		if id > 0 {
+			facilities = append(facilities, id)
+		}
+	}
+	if watch.FacilityMode == domain.FacilityModeSelected && len(facilities) == 0 {
+		return nil, errors.New("luxmed search requires a selected facility")
+	}
+
+	from, to := searchRange(watch, time.Now())
+	var results []domain.Appointment
+	for !from.After(to) {
+		end := from.AddDate(0, 0, 13)
+		if end.After(to) {
+			end = to
+		}
+		query := url.Values{
+			"searchPlace.id":   {strconv.Itoa(watch.CityID)},
+			"searchPlace.type": {"0"},
+			"serviceVariantId": {strconv.Itoa(watch.ServiceID)},
+			"languageId":       {"10"},
+			"searchDateFrom":   {from.Format(dateFormat)},
+			"searchDateTo":     {end.Format(dateFormat)},
+			"searchDatePreset": {"14"},
+			"delocalized":      {"false"},
+		}
+		if watch.DoctorID != nil && *watch.DoctorID > 0 {
+			query.Set("doctorsIds", strconv.Itoa(*watch.DoctorID))
+		}
+		for _, id := range facilities {
+			query.Add("facilitiesIds", strconv.Itoa(id))
+		}
+		data, err := c.get(ctx, TermsURL+"?"+query.Encode())
+		if err != nil {
+			return nil, err
+		}
+		payload := ""
+		if c.rawPayloads {
+			payload = string(data)
+		}
+		apps, err := decodeTermsResponse(watch, data, payload)
+		if err != nil {
+			return nil, err
+		}
+		for _, app := range apps {
+			day := startOfDay(app.DateTime)
+			if day.Before(from) || day.After(end) {
+				continue
+			}
+			if watch.DoctorID != nil && *watch.DoctorID > 0 && app.DoctorID != *watch.DoctorID {
+				continue
+			}
+			if len(facilities) > 0 && !slices.Contains(facilities, app.FacilityID) {
+				continue
+			}
+			results = append(results, app)
+		}
+		from = end.AddDate(0, 0, 1)
+	}
+	return results, nil
+}
+
+func searchRange(watch domain.Watch, now time.Time) (time.Time, time.Time) {
+	today := startOfDay(now)
+	horizon := today.AddDate(0, 0, 90)
+	from := today
+	if watch.DateFrom != nil {
+		if date := startOfDay(*watch.DateFrom); date.After(from) {
+			from = date
+		}
+	}
+	days := watch.NextDays
+	if days <= 0 {
+		days = 14
+	}
+	to := from.AddDate(0, 0, min(days, 90)-1)
+	if watch.DateTo != nil {
+		to = startOfDay(*watch.DateTo)
+	}
+	if to.After(horizon) {
+		to = horizon
+	}
+	return from, to
+}
+
+func startOfDay(t time.Time) time.Time {
+	year, month, day := t.In(warsaw).Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, warsaw)
+}
+
+type termsResponse struct {
+	Success         *bool           `json:"success"`
+	TermsForService json.RawMessage `json:"termsForService"`
+}
+
+type termsDay struct {
+	Terms []struct {
+		ID           json.RawMessage `json:"id"`
+		DateTimeFrom string          `json:"dateTimeFrom"`
+		Doctor       struct {
+			ID        int    `json:"id"`
+			FirstName string `json:"firstName"`
+			LastName  string `json:"lastName"`
+		} `json:"doctor"`
+		Clinic      string `json:"clinic"`
+		ClinicID    int    `json:"clinicId"`
+		Address     string `json:"address"`
+		ClinicGroup string `json:"clinicGroup"`
+	} `json:"terms"`
+}
+
+func decodeTermsResponse(watch domain.Watch, body []byte, payload string) ([]domain.Appointment, error) {
+	var response termsResponse
+	if json.Unmarshal(body, &response) != nil {
+		return nil, fmt.Errorf("luxmed terms: %w", ErrResponse)
+	}
+	if response.Success != nil && !*response.Success {
+		return nil, fmt.Errorf("luxmed terms rejected: %w", ErrResponse)
+	}
+	if bytes.Equal(response.TermsForService, []byte("null")) {
+		return nil, nil
+	}
+	var service struct {
+		Days json.RawMessage `json:"termsForDays"`
+	}
+	var days []termsDay
+	if json.Unmarshal(response.TermsForService, &service) != nil || json.Unmarshal(service.Days, &days) != nil {
+		return nil, fmt.Errorf("luxmed terms missing days: %w", ErrResponse)
+	}
+
+	var apps []domain.Appointment
+	for _, day := range days {
+		for _, term := range day.Terms {
+			when, err := time.Parse(time.RFC3339Nano, term.DateTimeFrom)
+			if err != nil {
+				when, err = time.ParseInLocation(wallTime, term.DateTimeFrom, warsaw)
+			}
+			if err != nil {
+				return nil, fmt.Errorf("luxmed terms invalid appointment time: %w", ErrResponse)
+			}
+			var externalID string
+			if json.Unmarshal(term.ID, &externalID) != nil {
+				var numericID json.Number
+				if json.Unmarshal(term.ID, &numericID) == nil {
+					externalID = numericID.String()
+				}
+			}
+			address := strings.TrimSpace(term.Address)
+			if address == "" {
+				address = strings.TrimSpace(term.ClinicGroup)
+			}
+			app := domain.Appointment{
+				ExternalID:   externalID,
+				DateTime:     when.In(warsaw),
+				ServiceID:    watch.ServiceID,
+				ServiceName:  watch.ServiceName,
+				DoctorID:     term.Doctor.ID,
+				DoctorName:   strings.TrimSpace(term.Doctor.FirstName + " " + term.Doctor.LastName),
+				FacilityID:   term.ClinicID,
+				FacilityName: term.Clinic,
+				Address:      address,
+				CityID:       watch.CityID,
+				CityName:     watch.CityName,
+				BookingURL:   portalURL + "/PatientPortal/NewPortal/Reservations/Reservation",
+				RawPayload:   payload,
+			}
+			app.Fingerprint = Fingerprint(app)
+			if app.ExternalID == "" {
+				app.ExternalID = app.Fingerprint
+			}
+			if app.FacilityName == "" {
+				app.FacilityName = address
+			}
+			apps = append(apps, app)
+		}
+	}
+	return apps, nil
+}
+
+func Fingerprint(app domain.Appointment) string {
+	// Keep existing slot IDs from when wall-clock dates were parsed as UTC.
+	parts := []string{
+		app.DateTime.Format(wallTime) + "Z",
+		strconv.Itoa(app.ServiceID),
+		strconv.Itoa(app.DoctorID),
+		strconv.Itoa(app.FacilityID),
+		strings.ToLower(strings.TrimSpace(app.DoctorName)),
+		strings.ToLower(strings.TrimSpace(app.FacilityName)),
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
+	return hex.EncodeToString(sum[:])
+}
