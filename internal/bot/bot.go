@@ -6,9 +6,11 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log/slog"
+	randv2 "math/rand/v2"
+	"net/url"
+	"slices"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -24,6 +26,7 @@ type Config struct {
 	DefaultLocale    string
 	AdminTelegramIDs map[int64]bool
 	MinimumInterval  time.Duration
+	DefaultInterval  time.Duration
 	PollTimeout      int
 }
 
@@ -35,7 +38,7 @@ type Bot struct {
 	cfg       Config
 	runner    *scheduler.Runner
 	logger    *slog.Logger
-	flowMu    sync.Mutex
+	newClient func(bool) luxmed.Client
 	flowState map[int64]*flow
 }
 
@@ -64,7 +67,8 @@ type flow struct {
 }
 
 func New(api *tgbotapi.BotAPI, db *storage.DB, catalog *i18n.Catalog, cryptor *security.Cryptor, cfg Config, logger *slog.Logger) *Bot {
-	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow)}
+	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow),
+		newClient: func(raw bool) luxmed.Client { return luxmed.NewHTTPClient(raw) }}
 }
 
 func (b *Bot) SetRunner(runner *scheduler.Runner) {
@@ -72,29 +76,66 @@ func (b *Bot) SetRunner(runner *scheduler.Runner) {
 }
 
 func (b *Bot) Run(ctx context.Context) error {
-	updateConfig := tgbotapi.NewUpdate(0)
-	updateConfig.Timeout = b.cfg.PollTimeout
-	updates := b.api.GetUpdatesChan(updateConfig)
-	for {
-		select {
-		case <-ctx.Done():
-			b.api.StopReceivingUpdates()
-			return nil
-		case update := <-updates:
-			if update.UpdateID == 0 {
+	config := tgbotapi.NewUpdate(0)
+	config.Timeout = b.cfg.PollTimeout
+	config.AllowedUpdates = []string{"message", "callback_query"}
+	var delay time.Duration
+	for ctx.Err() == nil {
+		updates, err := b.api.GetUpdates(config)
+		if err != nil {
+			b.logger.Warn("Telegram polling failed", "retrying", true)
+			delay = min(30*time.Second, max(time.Second, 2*delay))
+			if apiErr, ok := err.(*tgbotapi.Error); ok && apiErr.RetryAfter > 0 {
+				delay = max(delay, time.Duration(apiErr.RetryAfter)*time.Second)
+			}
+			timer := time.NewTimer(delay + time.Duration(randv2.IntN(500))*time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return nil
+			case <-timer.C:
+			}
+			continue
+		}
+		delay = 0
+		for _, update := range updates {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if update.UpdateID < config.Offset {
 				continue
 			}
-			go b.handleUpdate(ctx, update)
+			b.handleUpdate(ctx, update)
+			config.Offset = update.UpdateID + 1
 		}
 	}
+	return nil
 }
 
 func (b *Bot) NotifyAppointment(ctx context.Context, user domain.User, watch domain.Watch, history domain.AppointmentHistory) (int, error) {
-	text := b.catalog.T(user.Locale, "notification.appointment_found.title") + "\n\n" +
-		b.catalog.T(user.Locale, "notification.appointment_found.body", watch.Name, history.DateTime.Format("2006-01-02 15:04"), history.DoctorName, history.FacilityName, history.ServiceName)
-	msg := tgbotapi.NewMessage(user.TelegramChatID, text)
+	return b.NotifyAppointments(ctx, user, watch, []domain.AppointmentHistory{history}, 1)
+}
+
+func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch domain.Watch, histories []domain.AppointmentHistory, total int) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+	if !user.IsActive() || user.ID != watch.UserID || user.TelegramChatID <= 0 || user.TelegramChatID != user.TelegramUserID {
+		return 0, fmt.Errorf("notification recipient has no private chat")
+	}
+	if len(histories) == 0 {
+		return 0, nil
+	}
+	var text strings.Builder
+	text.WriteString(b.catalog.T(user.Locale, "notification.batch", max(total, len(histories)), truncateMessage(watch.Name, 140)))
+	for _, item := range histories[:min(10, len(histories))] {
+		fmt.Fprintf(&text, "\n\n%s\n%s · %s", item.DateTime.In(luxmed.Location()).Format("2006-01-02 15:04"),
+			truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120))
+	}
+
+	msg := tgbotapi.NewMessage(user.TelegramChatID, text.String())
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), history.BookingURL)),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), portalURL(histories[0].BookingURL))),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.pause"), fmt.Sprintf("watch:pause:%d", watch.ID)),
 			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.show_watch"), fmt.Sprintf("watch:show:%d", watch.ID)),
@@ -102,7 +143,36 @@ func (b *Bot) NotifyAppointment(ctx context.Context, user domain.User, watch dom
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID))),
 	)
 	sent, err := b.api.Send(msg)
-	return sent.MessageID, err
+	if err != nil {
+		return 0, fmt.Errorf("Telegram notification delivery failed")
+	}
+	return sent.MessageID, nil
+}
+
+func portalURL(raw string) string {
+	const portal = "https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Reservation"
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host != "portalpacjenta.luxmed.pl" || u.User != nil || !strings.HasPrefix(u.Path, "/PatientPortal/NewPortal/") || u.RawQuery != "" || u.Fragment != "" {
+		return portal
+	}
+	return u.String()
+}
+
+func privateChat(chat *tgbotapi.Chat, from *tgbotapi.User) bool {
+	return chat != nil && from != nil && !from.IsBot && from.ID > 0 && chat.IsPrivate() && chat.ID == from.ID
+}
+
+func truncateMessage(text string, limit int) string {
+	for i, r := range text {
+		if r > 0xFFFF {
+			limit--
+		}
+		limit--
+		if limit < 0 {
+			return text[:i]
+		}
+	}
+	return text
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
@@ -110,12 +180,25 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		b.handleCallback(ctx, update.CallbackQuery)
 		return
 	}
-	if update.Message == nil || update.Message.From == nil {
+	if update.Message == nil || !privateChat(update.Message.Chat, update.Message.From) {
 		return
 	}
 	user, err := b.upsertUser(ctx, update.Message)
 	if err != nil {
 		b.logger.Warn("upsert user failed", "err", err)
+		return
+	}
+	if user.Status == domain.UserStatusBlocked {
+		b.clearFlow(user.ID)
+		b.send(user, b.catalog.T(user.Locale, "errors.blocked"), nil)
+		return
+	}
+	state := b.getFlow(user.ID)
+	if state != nil && state.Kind == flowAccountPass && user.IsActive() && update.Message.Command() != "cancel" {
+		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(update.Message.Chat.ID, update.Message.MessageID)); err != nil {
+			b.logger.Warn("could not delete Telegram credential message")
+		}
+		b.handleText(ctx, user, update.Message.Text)
 		return
 	}
 	if update.Message.IsCommand() {
@@ -146,7 +229,7 @@ func (b *Bot) upsertUser(ctx context.Context, msg *tgbotapi.Message) (domain.Use
 	if err != nil {
 		return domain.User{}, err
 	}
-	if b.cfg.AdminTelegramIDs[msg.From.ID] && (!user.IsActive() || !user.IsAdmin()) {
+	if b.cfg.AdminTelegramIDs[msg.From.ID] && user.Status != domain.UserStatusBlocked && (!user.IsActive() || !user.IsAdmin()) {
 		if err := b.db.SetUserActive(ctx, user.ID, domain.UserRoleAdmin); err != nil {
 			return domain.User{}, err
 		}
@@ -157,7 +240,12 @@ func (b *Bot) upsertUser(ctx context.Context, msg *tgbotapi.Message) (domain.Use
 }
 
 func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi.Message) {
-	switch msg.Command() {
+	command := msg.Command()
+	if !user.IsActive() && command != "start" && command != "language" && command != "cancel" {
+		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
+		return
+	}
+	switch command {
 	case "start":
 		arg := strings.TrimSpace(msg.CommandArguments())
 		if arg != "" && !user.IsActive() {
@@ -178,13 +266,22 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 		b.showWatches(ctx, user)
 	case "history":
 		b.showHistory(ctx, user)
-	case "settings", "language":
+	case "settings":
+		b.send(user, b.catalog.T(user.Locale, "settings.title"), settingsKeyboard(b.catalog, user.Locale))
+	case "language":
 		b.send(user, b.catalog.T(user.Locale, "flow.language.choose"), languageKeyboard())
 	case "help":
 		b.send(user, b.catalog.T(user.Locale, "help.text"), mainKeyboard(b.catalog, user.Locale))
 	case "cancel":
 		b.clearFlow(user.ID)
 		b.showMenu(user)
+	case "logout_luxmed":
+		b.clearFlow(user.ID)
+		if err := b.db.DeleteLuxMedAccount(ctx, user.ID); err != nil {
+			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
+			return
+		}
+		b.send(user, b.catalog.T(user.Locale, "flow.account.removed"), mainKeyboard(b.catalog, user.Locale))
 	case "invite":
 		b.createInvite(ctx, user, msg.CommandArguments())
 	default:
@@ -193,24 +290,34 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 }
 
 func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
+	if !user.IsActive() {
+		b.tryRedeemInvite(ctx, user, text)
+		return
+	}
 	state := b.getFlow(user.ID)
 	if state == nil || state.Kind == flowNone {
-		if !user.IsActive() {
-			b.tryRedeemInvite(ctx, user, text)
-			return
-		}
 		b.showMenu(user)
 		return
 	}
 	switch state.Kind {
-	case flowInvite:
-		b.tryRedeemInvite(ctx, user, text)
 	case flowAccountLogin:
+		if text == "" || len(text) > 254 {
+			b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
+			return
+		}
 		state.Login = text
 		state.Kind = flowAccountPass
 		b.setFlow(user.ID, state)
 		b.send(user, b.catalog.T(user.Locale, "flow.account.password"), nil)
 	case flowAccountPass:
+		if text == "" || len(text) > 1024 {
+			b.send(user, b.catalog.T(user.Locale, "flow.account.password"), cancelKeyboard(b.catalog, user.Locale))
+			return
+		}
+		if err := b.newClient(false).Authenticate(ctx, luxmed.Credentials{Login: state.Login, Password: text}); err != nil {
+			b.send(user, b.catalog.T(user.Locale, "errors.auth_failed"), cancelKeyboard(b.catalog, user.Locale))
+			return
+		}
 		encrypted, err := b.cryptor.Encrypt(text)
 		if err != nil {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
@@ -258,7 +365,7 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 }
 
 func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
-	if cb.Message == nil || cb.From == nil {
+	if cb.Message == nil || !privateChat(cb.Message.Chat, cb.From) {
 		return
 	}
 	user, err := b.db.UserByTelegramID(ctx, cb.From.ID)
@@ -267,10 +374,25 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	}
 	data := cb.Data
 	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+	if user.Status == domain.UserStatusBlocked {
+		b.clearFlow(user.ID)
+		b.send(user, b.catalog.T(user.Locale, "errors.blocked"), nil)
+		return
+	}
+	if !user.IsActive() && !strings.HasPrefix(data, "lang:") && data != "cancel" {
+		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
+		return
+	}
 	switch {
 	case strings.HasPrefix(data, "lang:"):
 		locale := strings.TrimPrefix(data, "lang:")
-		_ = b.db.SetUserLocale(ctx, user.ID, locale)
+		if !slices.Contains(i18n.SupportedLocales, locale) {
+			return
+		}
+		if err := b.db.SetUserLocale(ctx, user.ID, locale); err != nil {
+			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
+			return
+		}
 		user.Locale = locale
 		if !user.IsActive() {
 			b.setFlow(user.ID, &flow{Kind: flowInvite})
@@ -279,6 +401,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		}
 		b.send(user, b.catalog.T(user.Locale, "flow.language.saved"), mainKeyboard(b.catalog, user.Locale))
 	case data == "menu":
+		b.clearFlow(user.ID)
 		b.showMenu(user)
 	case data == "account":
 		b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
@@ -700,117 +823,10 @@ func (b *Bot) handleWatchCity(ctx context.Context, user domain.User, data string
 }
 
 func (b *Bot) showProcedureMenu(ctx context.Context, user domain.User, state *flow) {
-	if err := b.ensureProcedures(ctx, user, domain.City{ID: state.Watch.CityID, Name: state.Watch.CityName}); err != nil {
-		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
-		return
-	}
-
 	state.Kind = flowWatchService
 	state.ProcedureSearchQuery = ""
 	b.setFlow(user.ID, state)
-
-	b.refreshRecentProcedures(ctx, user, state)
-
-	recent, err := b.db.RecentProcedures(ctx, state.Watch.CityID, 3)
-	if err != nil {
-		b.logger.Warn(
-			"load recent procedures from db failed",
-			"user_id", user.ID,
-			"city_id", state.Watch.CityID,
-			"city_name", state.Watch.CityName,
-			"err", err,
-		)
-	}
-
-	b.logger.Info(
-		"show procedure menu",
-		"user_id", user.ID,
-		"city_id", state.Watch.CityID,
-		"city_name", state.Watch.CityName,
-		"recent_count", len(recent),
-	)
-
-	if len(recent) > 0 {
-		title := b.catalog.T(user.Locale, "flow.watch.service") + "\n\nПоследние процедуры:"
-		b.sendProcedureOptions(user, title, recent, procedureResultsKeyboard(recent, "", "", b.catalog, user.Locale))
-		return
-	}
-
-	b.send(
-		user,
-		b.catalog.T(user.Locale, "flow.watch.service")+"\n\nНапишите часть названия процедуры, откройте популярные процедуры или обзор A-Z.",
-		procedureMenuKeyboard(nil, b.catalog, user.Locale),
-	)
-}
-
-func (b *Bot) refreshRecentProcedures(ctx context.Context, user domain.User, state *flow) {
-	client, err := b.authenticatedLuxMedClient(ctx, user)
-	if err != nil {
-		b.logger.Warn(
-			"authenticate luxmed client for recent procedures failed",
-			"user_id", user.ID,
-			"city_id", state.Watch.CityID,
-			"city_name", state.Watch.CityName,
-			"err", err,
-		)
-		return
-	}
-
-	recent, err := client.GetRecentProcedures(ctx)
-	if err != nil {
-		b.logger.Warn(
-			"load recent procedures failed",
-			"user_id", user.ID,
-			"city_id", state.Watch.CityID,
-			"city_name", state.Watch.CityName,
-			"err", err,
-		)
-		return
-	}
-
-	b.logger.Info(
-		"recent procedures loaded from luxmed",
-		"user_id", user.ID,
-		"city_id", state.Watch.CityID,
-		"city_name", state.Watch.CityName,
-		"recent_count", len(recent),
-	)
-
-	if len(recent) == 0 {
-		return
-	}
-
-	if err := b.db.UpsertProcedures(ctx, domain.City{ID: state.Watch.CityID, Name: state.Watch.CityName}, recent); err != nil {
-		b.logger.Warn(
-			"upsert recent procedures failed",
-			"user_id", user.ID,
-			"city_id", state.Watch.CityID,
-			"city_name", state.Watch.CityName,
-			"recent_count", len(recent),
-			"err", err,
-		)
-		return
-	}
-
-	dbRecent, err := b.db.RecentProcedures(ctx, state.Watch.CityID, 3)
-	if err != nil {
-		b.logger.Warn(
-			"check recent procedures after upsert failed",
-			"user_id", user.ID,
-			"city_id", state.Watch.CityID,
-			"city_name", state.Watch.CityName,
-			"err", err,
-		)
-		return
-	}
-
-	b.logger.Info(
-		"recent procedures saved",
-		"user_id", user.ID,
-		"city_id", state.Watch.CityID,
-		"city_name", state.Watch.CityName,
-		"db_recent_count", len(dbRecent),
-	)
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.service"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
 }
 
 func (b *Bot) showPopularProcedures(ctx context.Context, user domain.User, state *flow) {
@@ -1342,26 +1358,6 @@ func (b *Bot) ensureProcedures(ctx context.Context, user domain.User, city domai
 		})
 	}
 
-	recent, err := client.GetRecentProcedures(ctx)
-	if err != nil {
-		b.logger.Warn(
-			"load recent procedures failed",
-			"user_id", user.ID,
-			"city_id", city.ID,
-			"city_name", city.Name,
-			"err", err,
-		)
-	} else {
-		b.logger.Info(
-			"recent procedures parsed",
-			"user_id", user.ID,
-			"city_id", city.ID,
-			"city_name", city.Name,
-			"recent_count", len(recent),
-		)
-		procedures = append(procedures, recent...)
-	}
-
 	if len(procedures) == 0 {
 		b.logger.Warn(
 			"no procedures parsed before upsert",
@@ -1656,7 +1652,7 @@ func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (
 	if err != nil {
 		return nil, err
 	}
-	client := luxmed.NewHTTPClient(false)
+	client := b.newClient(false)
 	if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
 		return nil, err
 	}
@@ -1695,34 +1691,49 @@ func (b *Bot) finishWatch(ctx context.Context, user domain.User, data string) {
 
 func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data string) {
 	parts := strings.Split(data, ":")
-	if len(parts) != 3 {
+	if !user.IsActive() || len(parts) != 3 {
 		return
 	}
 	id, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil {
+	if err != nil || id <= 0 {
 		return
 	}
+	watch, err := b.db.Watch(ctx, id)
+	if err != nil || watch.UserID != user.ID || watch.Status == domain.WatchStatusDeleted {
+		b.send(user, b.catalog.T(user.Locale, "errors.no_watches"), mainKeyboard(b.catalog, user.Locale))
+		return
+	}
+	var state domain.WatchStatus
 	switch parts[1] {
 	case "pause":
-		_ = b.db.SetWatchStatus(ctx, id, domain.WatchStatusPaused)
-		b.send(user, b.catalog.T(user.Locale, "watch.paused"), mainKeyboard(b.catalog, user.Locale))
+		state = domain.WatchStatusPaused
 	case "resume":
-		_ = b.db.SetWatchStatus(ctx, id, domain.WatchStatusActive)
-		b.send(user, b.catalog.T(user.Locale, "watch.resumed"), mainKeyboard(b.catalog, user.Locale))
-	case "delete":
-		_ = b.db.SetWatchStatus(ctx, id, domain.WatchStatusDeleted)
-		b.send(user, b.catalog.T(user.Locale, "watch.deleted"), mainKeyboard(b.catalog, user.Locale))
-	case "check":
-		if b.runner == nil {
+		if _, err := b.db.LuxMedAccount(ctx, user.ID); err != nil {
+			b.send(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
 			return
 		}
-		watch, err := b.db.Watch(ctx, id)
-		if err == nil {
-			go func() { _ = b.runner.CheckWatch(context.Background(), watch) }()
+		state = domain.WatchStatusActive
+	case "delete":
+		state = domain.WatchStatusDeleted
+	case "check":
+		if b.runner == nil || b.runner.CheckWatch(ctx, watch) != nil {
+			b.send(user, b.catalog.T(user.Locale, "errors.generic"), watchKeyboard(b.catalog, user.Locale, watch))
+			return
 		}
+		b.send(user, b.catalog.T(user.Locale, "watch.checked"), watchKeyboard(b.catalog, user.Locale, watch))
+		return
 	case "show":
 		b.showWatches(ctx, user)
+		return
+	default:
+		return
 	}
+	if err := b.db.SetWatchStatus(ctx, id, state); err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
+		return
+	}
+	key := map[domain.WatchStatus]string{domain.WatchStatusPaused: "watch.paused", domain.WatchStatusActive: "watch.resumed", domain.WatchStatusDeleted: "watch.deleted"}[state]
+	b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
 }
 
 func (b *Bot) showMenu(user domain.User) {
@@ -1764,19 +1775,25 @@ func (b *Bot) showHistory(ctx context.Context, user domain.User) {
 }
 
 func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string) {
-	ok, err := b.db.RedeemInvite(ctx, code)
-	if err != nil || !ok {
+	if user.Status != domain.UserStatusPendingInvite || code == "" {
+		return
+	}
+	ok, err := b.db.RedeemInviteForUser(ctx, code, user.ID)
+	if err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
+		return
+	}
+	if !ok {
 		b.send(user, b.catalog.T(user.Locale, "flow.invite.invalid"), nil)
 		return
 	}
-	_ = b.db.SetUserActive(ctx, user.ID, domain.UserRoleUser)
 	b.clearFlow(user.ID)
 	user.Status = domain.UserStatusActive
 	b.send(user, b.catalog.T(user.Locale, "flow.invite.accepted"), mainKeyboard(b.catalog, user.Locale))
 }
 
 func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
-	if !user.IsAdmin() {
+	if !user.IsAdmin() || !b.cfg.AdminTelegramIDs[user.TelegramUserID] {
 		b.showMenu(user)
 		return
 	}
@@ -1791,34 +1808,28 @@ func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
-	b.send(user, "Invite code: "+code, nil)
+	b.send(user, b.catalog.T(user.Locale, "flow.invite.code", code), nil)
 }
 
 func (b *Bot) send(user domain.User, text string, markup any) {
-	msg := tgbotapi.NewMessage(user.TelegramChatID, text)
+	msg := tgbotapi.NewMessage(user.TelegramChatID, truncateMessage(text, 4000))
 	if markup != nil {
 		msg.ReplyMarkup = markup
 	}
 	if _, err := b.api.Send(msg); err != nil {
-		b.logger.Warn("send telegram message failed", "err", err)
+		b.logger.Warn("send Telegram message failed")
 	}
 }
 
 func (b *Bot) setFlow(userID int64, state *flow) {
-	b.flowMu.Lock()
-	defer b.flowMu.Unlock()
 	b.flowState[userID] = state
 }
 
 func (b *Bot) getFlow(userID int64) *flow {
-	b.flowMu.Lock()
-	defer b.flowMu.Unlock()
 	return b.flowState[userID]
 }
 
 func (b *Bot) clearFlow(userID int64) {
-	b.flowMu.Lock()
-	defer b.flowMu.Unlock()
 	delete(b.flowState, userID)
 }
 
