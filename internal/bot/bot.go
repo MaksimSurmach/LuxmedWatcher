@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	randv2 "math/rand/v2"
@@ -118,10 +119,6 @@ func (b *Bot) Run(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func (b *Bot) NotifyAppointment(ctx context.Context, user domain.User, watch domain.Watch, history domain.AppointmentHistory) (int, error) {
-	return b.NotifyAppointments(ctx, user, watch, []domain.AppointmentHistory{history}, 1)
 }
 
 func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch domain.Watch, histories []domain.AppointmentHistory, total int) (int, error) {
@@ -1502,11 +1499,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "delete":
 		state = domain.WatchStatusDeleted
 	case "check":
-		if b.runner == nil || b.runner.CheckWatch(ctx, watch) != nil {
-			b.send(user, b.catalog.T(user.Locale, "errors.generic"), watchKeyboard(b.catalog, user.Locale, watch))
-			return
-		}
-		b.send(user, b.catalog.T(user.Locale, "watch.checked"), watchKeyboard(b.catalog, user.Locale, watch))
+		b.checkWatchNow(ctx, user, watch)
 		return
 	case "edit":
 		b.editWatch(ctx, user, watch)
@@ -1527,6 +1520,35 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	}
 	key := map[domain.WatchStatus]string{domain.WatchStatusPaused: "watch.paused", domain.WatchStatusActive: "watch.resumed", domain.WatchStatusDeleted: "watch.deleted"}[state]
 	b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+}
+
+func (b *Bot) checkWatchNow(ctx context.Context, user domain.User, watch domain.Watch) {
+	key, count := "errors.generic", 0
+	if b.runner != nil {
+		var err error
+		count, err = b.runner.ManualCheck(ctx, watch)
+		switch {
+		case err == nil:
+			key = "watch.checked"
+		case errors.Is(err, scheduler.ErrRateLimited):
+			key = "watch.check_rate_limited"
+		case errors.Is(err, scheduler.ErrInactive):
+			key = "watch.check_inactive"
+		case errors.Is(err, scheduler.ErrNoAccount):
+			key = "errors.no_account"
+		case errors.Is(err, luxmed.ErrAuthentication):
+			key = "errors.auth_failed"
+		case errors.Is(err, luxmed.ErrPartialResults):
+			key = "watch.check_partial"
+		case errors.Is(err, luxmed.ErrUnavailable):
+			key = "errors.luxmed_unavailable"
+		}
+	}
+	if key == "watch.checked" || key == "watch.check_partial" {
+		b.send(user, b.catalog.T(user.Locale, key, count), watchKeyboard(b.catalog, user.Locale, watch))
+		return
+	}
+	b.send(user, b.catalog.T(user.Locale, key), watchKeyboard(b.catalog, user.Locale, watch))
 }
 
 func (b *Bot) showMenu(user domain.User) {

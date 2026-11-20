@@ -55,8 +55,9 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	api, err := tgbotapi.NewBotAPIWithClient(a.cfg.TelegramToken, tgbotapi.APIEndpoint, &http.Client{
-		Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second,
+	httpClient := &http.Client{Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second}
+	api, err := tgbotapi.NewBotAPIWithClient(a.cfg.TelegramToken, tgbotapi.APIEndpoint, telegramHTTP{
+		ctx: ctx, client: httpClient,
 	})
 	if err != nil {
 		return errors.New("connect to Telegram Bot API: check the token and network")
@@ -89,4 +90,13 @@ func (a *App) Run(ctx context.Context) error {
 	stop()
 	workers.Wait()
 	return err
+}
+
+type telegramHTTP struct {
+	ctx    context.Context
+	client *http.Client
+}
+
+func (c telegramHTTP) Do(req *http.Request) (*http.Response, error) {
+	return c.client.Do(req.WithContext(c.ctx))
 }
