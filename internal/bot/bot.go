@@ -321,7 +321,11 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			return
 		}
 		if err := b.newClient(false).Authenticate(ctx, luxmed.Credentials{Login: state.Login, Password: text}); err != nil {
-			b.send(user, b.catalog.T(user.Locale, "errors.auth_failed"), cancelKeyboard(b.catalog, user.Locale))
+			key := "errors.auth_failed"
+			if errors.Is(err, luxmed.ErrUnavailable) {
+				key = "errors.luxmed_unavailable"
+			}
+			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
 		encrypted, err := b.cryptor.Encrypt(text)
@@ -344,7 +348,7 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 		}
 		b.send(user, b.catalog.T(user.Locale, "flow.account.saved"), mainKeyboard(b.catalog, user.Locale))
 	case flowWatchCity:
-		b.showCityPicker(ctx, user, false, 0)
+		b.showCityPicker(ctx, user, state.CitySettings, 0)
 	case flowCitySearch:
 		b.showCitySearchResults(ctx, user, state, text)
 	case flowWatchService:
@@ -437,7 +441,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	case data == "city:search" || data == "prefcity:search":
 		state := b.getFlow(user.ID)
 		state.Kind = flowCitySearch
-		b.send(user, b.catalog.T(user.Locale, "flow.city_search"), citySearchKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.city_search"), citySearchKeyboard(b.catalog, user.Locale))
 
 	case strings.HasPrefix(data, "city:page:"):
 		page, _ := strconv.Atoi(strings.TrimPrefix(data, "city:page:"))
@@ -451,12 +455,9 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		b.handleWatchCity(ctx, user, data)
 	case data == "proc:search":
 		state := b.getFlow(user.ID)
-		if state == nil {
-			return
-		}
 		state.Kind = flowWatchSearch
 		b.setFlow(user.ID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
 	case data == "proc:popular":
 		state := b.getFlow(user.ID)
 		if state != nil {
@@ -555,6 +556,10 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		b.handleDoctorChoice(ctx, user, b.getFlow(user.ID), strings.TrimPrefix(data, "doctor:"))
 	case strings.HasPrefix(data, "history:"):
 		b.handleHistoryPage(ctx, user, data)
+	case strings.HasPrefix(data, "hide:"):
+		b.hideHistory(ctx, user, data)
+	case strings.HasPrefix(data, "back:"):
+		b.backWatch(ctx, user, strings.TrimPrefix(data, "back:"))
 
 	case strings.HasPrefix(data, "watch:"):
 		b.handleWatchAction(ctx, user, data)
@@ -583,12 +588,12 @@ func (b *Bot) showCityPicker(ctx context.Context, user domain.User, settings boo
 	const pageSize = 12
 	page = min(max(page, 0), 10000)
 	if _, err := b.ensureCities(ctx, user); err != nil {
-		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
 	cities, err := b.db.CitiesPage(ctx, pageSize+1, page*pageSize)
 	if err != nil {
-		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
 	hasNext := len(cities) > pageSize
@@ -599,14 +604,14 @@ func (b *Bot) showCityPicker(ctx context.Context, user domain.User, settings boo
 	if settings {
 		prefix = "prefcity:"
 	}
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.city"), cityKeyboard(cities, prefix, page, page > 0, hasNext, b.catalog, user.Locale))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.city"), cityKeyboard(cities, prefix, page, page > 0, hasNext, b.catalog, user.Locale))
 }
 
 func (b *Bot) showTimeStep(user domain.User, state *flow) {
 	state.Kind = flowWatchTime
 	b.setFlow(user.ID, state)
 
-	b.send(
+	b.sendWatchStep(
 		user,
 		b.catalog.T(user.Locale, "flow.watch.hours"),
 		timeWindowKeyboard(b.catalog, user.Locale),
@@ -628,7 +633,7 @@ func (b *Bot) handleTimeCallback(user domain.User, state *flow, data string) {
 	case "workday":
 		state.Watch.TimeWindows = []domain.TimeWindow{{From: "09:00", To: "18:00"}}
 	default:
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.hours"), timeWindowKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.hours"), timeWindowKeyboard(b.catalog, user.Locale))
 		return
 	}
 
@@ -646,7 +651,7 @@ func (b *Bot) handleTimeText(user domain.User, state *flow, text string) {
 
 	window, ok := parseTimeWindow(text)
 	if !ok {
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.hours"), timeWindowKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.hours"), timeWindowKeyboard(b.catalog, user.Locale))
 		return
 	}
 
@@ -700,19 +705,19 @@ func normalizeTime(value string) string {
 
 func (b *Bot) showCitySearchResults(ctx context.Context, user domain.User, state *flow, query string) {
 	if _, err := b.ensureCities(ctx, user); err != nil {
-		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
 	cities, err := b.db.SearchCities(ctx, query, 12)
 	if err != nil || len(cities) == 0 {
-		b.send(user, b.catalog.T(user.Locale, "flow.city_not_found"), citySearchKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.city_not_found"), citySearchKeyboard(b.catalog, user.Locale))
 		return
 	}
 	prefix := "city:"
 	if state.CitySettings {
 		prefix = "prefcity:"
 	}
-	b.send(user, b.catalog.T(user.Locale, "flow.city_results"), cityKeyboard(cities, prefix, 0, false, false, b.catalog, user.Locale))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.city_results"), cityKeyboard(cities, prefix, 0, false, false, b.catalog, user.Locale))
 }
 
 func (b *Bot) handlePreferredCity(ctx context.Context, user domain.User, data string) {
@@ -744,6 +749,9 @@ func (b *Bot) handleWatchCity(ctx context.Context, user domain.User, data string
 	if err != nil {
 		return
 	}
+	if state.Watch.CityID != city.ID {
+		state.CatalogLoaded = false
+	}
 	state.Watch.CityID = city.ID
 	state.Watch.CityName = city.Name
 	state.Kind = flowWatchService
@@ -755,7 +763,7 @@ func (b *Bot) showProcedureMenu(user domain.User, state *flow) {
 	state.Kind = flowWatchService
 	state.ProcedureSearchQuery = ""
 	b.setFlow(user.ID, state)
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.service"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.service"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
 }
 
 func (b *Bot) showPopularProcedures(ctx context.Context, user domain.User, state *flow) {
@@ -828,7 +836,7 @@ func (b *Bot) showPopularProcedures(ctx context.Context, user domain.User, state
 func (b *Bot) showProcedureSearchResults(ctx context.Context, user domain.User, state *flow, query string) {
 	query = strings.TrimSpace(query)
 	if query == "" {
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
 		return
 	}
 
@@ -837,10 +845,6 @@ func (b *Bot) showProcedureSearchResults(ctx context.Context, user domain.User, 
 	b.setFlow(user.ID, state)
 
 	b.showProcedureSearchResultsPage(ctx, user, state, query, 0)
-}
-
-func (b *Bot) showAllProcedures(ctx context.Context, user domain.User, state *flow) {
-	b.showProcedureLetters(ctx, user, state)
 }
 
 func (b *Bot) handleProcedure(ctx context.Context, user domain.User, data string) {
@@ -872,7 +876,7 @@ func (b *Bot) handleProcedure(ctx context.Context, user domain.User, data string
 func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flow) {
 	city := domain.City{ID: state.Watch.CityID, Name: state.Watch.CityName}
 	if err := b.ensureFacilities(ctx, user, city, state.Watch.ServiceID); err != nil {
-		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
 
@@ -901,20 +905,11 @@ func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flo
 		return
 	}
 
-	b.send(
+	b.sendWatchStep(
 		user,
 		b.catalog.T(user.Locale, "flow.watch.facility"),
 		facilityMenuKeyboard(nil, b.catalog, user.Locale),
 	)
-}
-
-func (b *Bot) showFavoriteFacilities(ctx context.Context, user domain.User, state *flow, limit int) {
-	_ = limit
-	b.showFacilityPage(ctx, user, state, "favs", 0)
-}
-
-func (b *Bot) showAllFacilities(ctx context.Context, user domain.User, state *flow) {
-	b.showFacilityPage(ctx, user, state, "all", 0)
 }
 
 func (b *Bot) handleFacility(ctx context.Context, user domain.User, data string) {
@@ -1131,7 +1126,7 @@ func (b *Bot) findFacilityByID(ctx context.Context, state *flow, id int) (domain
 	return domain.Facility{}, fmt.Errorf("facility %d not found", id)
 }
 
-func (b *Bot) sendFacilityOptions(user domain.User, title string, facilities []domain.Facility, markup any) {
+func (b *Bot) sendFacilityOptions(user domain.User, title string, facilities []domain.Facility, markup tgbotapi.InlineKeyboardMarkup) {
 	state := b.getFlow(user.ID)
 
 	var selectedIDs []int
@@ -1156,7 +1151,7 @@ func (b *Bot) sendFacilityOptions(user domain.User, title string, facilities []d
 		lines = append(lines, fmt.Sprintf("%s %d. %s\n   ID: %d", prefix, i+1, label, facility.ID))
 	}
 
-	b.send(user, strings.Join(lines, "\n\n"), markup)
+	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)
 }
 
 func facilityIDSelected(ids []int, id int) bool {
@@ -1276,12 +1271,12 @@ func (b *Bot) selectProcedure(user domain.User, state *flow, proc domain.Procedu
 	state.Watch.FacilityMode, state.Watch.FacilityIDs, state.Watch.FacilityNames = domain.FacilityModeAll, nil, nil
 	state.Doctors = nil
 	state.Kind = flowWatchDoctor
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.doctor"), doctorModeKeyboard(b.catalog, user.Locale))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.doctor"), doctorModeKeyboard(b.catalog, user.Locale))
 }
 
 func (b *Bot) showProcedureLetters(ctx context.Context, user domain.User, state *flow) {
 	if err := b.ensureProcedures(ctx, user, state); err != nil {
-		b.send(user, b.catalog.T(user.Locale, "errors.generic"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.generic"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
 		return
 	}
 	letters, err := b.db.ProcedureLetters(ctx, state.Watch.CityID)
@@ -1293,7 +1288,7 @@ func (b *Bot) showProcedureLetters(ctx context.Context, user domain.User, state 
 			"city_name", state.Watch.CityName,
 			"err", err,
 		)
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.service_not_found"), procedureSearchKeyboard(b.catalog, user.Locale))
 		return
 	}
 
@@ -1301,7 +1296,7 @@ func (b *Bot) showProcedureLetters(ctx context.Context, user domain.User, state 
 	state.ProcedureSearchQuery = ""
 	b.setFlow(user.ID, state)
 
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.service_letter"), procedureLettersKeyboard(letters, b.catalog, user.Locale))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.service_letter"), procedureLettersKeyboard(letters, b.catalog, user.Locale))
 }
 
 func (b *Bot) handleProcedureLetterPage(ctx context.Context, user domain.User, state *flow, data string) {
@@ -1372,7 +1367,7 @@ func (b *Bot) handleProcedureSearchPage(ctx context.Context, user domain.User, s
 
 	query := strings.TrimSpace(state.ProcedureSearchQuery)
 	if query == "" {
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
 		return
 	}
 
@@ -1426,7 +1421,7 @@ func (b *Bot) showProcedureSearchResultsPage(ctx context.Context, user domain.Us
 	b.sendProcedureOptions(user, title, procedures, procedureResultsKeyboard(procedures, previousCallback, nextCallback, b.catalog, user.Locale))
 }
 
-func (b *Bot) sendProcedureOptions(user domain.User, title string, procedures []domain.Procedure, markup any) {
+func (b *Bot) sendProcedureOptions(user domain.User, title string, procedures []domain.Procedure, markup tgbotapi.InlineKeyboardMarkup) {
 	var lines []string
 	lines = append(lines, strings.TrimSpace(title))
 
@@ -1434,7 +1429,7 @@ func (b *Bot) sendProcedureOptions(user domain.User, title string, procedures []
 		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, proc.Name, proc.ID))
 	}
 
-	b.send(user, strings.Join(lines, "\n\n"), markup)
+	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)
 }
 
 func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domain.City, procedureID int) error {

@@ -60,7 +60,7 @@ func (b *Bot) handleDoctorChoice(ctx context.Context, user domain.User, state *f
 				state.Doctors = directory.Doctors
 			}
 			if err != nil {
-				b.send(user, b.catalog.T(user.Locale, "errors.generic"), doctorModeKeyboard(b.catalog, user.Locale))
+				b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.generic"), doctorModeKeyboard(b.catalog, user.Locale))
 				return
 			}
 		}
@@ -102,7 +102,7 @@ func (b *Bot) showDoctorResults(user domain.User, state *flow, query string) {
 		tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.any_doctor"), "doctor:any"),
 		tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.cancel"), "cancel"),
 	))
-	b.send(user, b.catalog.T(user.Locale, key), tgbotapi.NewInlineKeyboardMarkup(rows...))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, key), tgbotapi.NewInlineKeyboardMarkup(rows...))
 }
 
 func (b *Bot) showDateStep(user domain.User, state *flow) {
@@ -112,7 +112,7 @@ func (b *Bot) showDateStep(user domain.User, state *flow) {
 	for _, days := range []int{7, 14, 30} {
 		choices = append(choices, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.next_days", days), fmt.Sprintf("date:%d", days)))
 	}
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.date"), tgbotapi.NewInlineKeyboardMarkup(
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.date"), tgbotapi.NewInlineKeyboardMarkup(
 		choices, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.cancel"), "cancel")),
 	))
 }
@@ -147,7 +147,7 @@ func parseWatchDates(input string, now time.Time) (time.Time, time.Time, bool) {
 
 func (b *Bot) showDaysStep(user domain.User, state *flow) {
 	state.Kind = flowWatchDays
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.days"), tgbotapi.NewInlineKeyboardMarkup(
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.days"), tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.any_day"), "days:any"),
 			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.weekdays"), "days:weekdays"),
@@ -161,6 +161,11 @@ func (b *Bot) selectWatchDays(user domain.User, state *flow, input string) {
 	input = strings.TrimSpace(input)
 	switch input {
 	case "any":
+		if len(state.Watch.TimeWindows) > 0 {
+			window := state.Watch.TimeWindows[0]
+			window.Weekday = 0
+			state.Watch.TimeWindows = []domain.TimeWindow{window}
+		}
 		b.showIntervalStep(user, state)
 		return
 	case "weekdays":
@@ -203,7 +208,7 @@ func (b *Bot) showIntervalStep(user domain.User, state *flow) {
 		rows = append(rows, choices)
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.cancel"), "cancel")))
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval", b.cfg.MinimumInterval.String()), tgbotapi.NewInlineKeyboardMarkup(rows...))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.interval", b.cfg.MinimumInterval.String()), tgbotapi.NewInlineKeyboardMarkup(rows...))
 }
 
 func (b *Bot) previewWatch(user domain.User, state *flow, interval time.Duration) {
@@ -214,7 +219,7 @@ func (b *Bot) previewWatch(user domain.User, state *flow, interval time.Duration
 	state.Watch.CheckIntervalSeconds = int(max(time.Minute, interval).Seconds())
 	state.Watch.Name = state.Watch.ServiceName + " · " + state.Watch.CityName
 	state.Kind, state.Confirmation = flowWatchConfirm, randomCode()
-	b.send(user, b.watchSummary(user, state.Watch), tgbotapi.NewInlineKeyboardMarkup(
+	b.sendWatchStep(user, b.watchSummary(user, state.Watch), tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.confirm_watch"), "confirm:"+state.Confirmation),
 			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.cancel"), "cancel"),
@@ -267,7 +272,7 @@ func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {
 		return
 	}
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); err != nil {
-		b.send(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
 	key := "flow.watch.created"
@@ -283,11 +288,74 @@ func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {
 		return
 	}
 	b.clearFlow(user.ID)
-	b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
 }
 
 func (b *Bot) editWatch(ctx context.Context, user domain.User, watch domain.Watch) {
 	state := &flow{Kind: flowWatchCity, Watch: watch}
 	b.setFlow(user.ID, state)
 	b.showCityPicker(ctx, user, false, 0)
+}
+
+func (b *Bot) sendWatchStep(user domain.User, text string, markup tgbotapi.InlineKeyboardMarkup) {
+	state := b.getFlow(user.ID)
+	if state != nil {
+		var step int
+		switch state.Kind {
+		case flowWatchCity, flowCitySearch:
+			step = 1
+		case flowWatchService, flowWatchSearch:
+			step = 2
+		case flowWatchDoctor, flowDoctorSearch:
+			step = 3
+		case flowWatchFacility:
+			step = 4
+		case flowWatchDate:
+			step = 5
+		case flowWatchTime:
+			step = 6
+		case flowWatchDays:
+			step = 7
+		case flowWatchInterval:
+			step = 8
+		case flowWatchConfirm:
+			step = 9
+		}
+		if step > 1 || state.Kind == flowCitySearch {
+			markup.InlineKeyboard = append(markup.InlineKeyboard, tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.back"), "back:"+string(state.Kind)),
+			))
+		}
+		if step > 0 && !state.CitySettings {
+			text = b.catalog.T(user.Locale, "flow.watch.step", step) + "\n\n" + text
+		}
+	}
+	b.send(user, text, markup)
+}
+
+func (b *Bot) backWatch(ctx context.Context, user domain.User, from string) {
+	state := b.getFlow(user.ID)
+	if state == nil || string(state.Kind) != from {
+		return
+	}
+	switch state.Kind {
+	case flowCitySearch, flowWatchService:
+		state.Kind = flowWatchCity
+		b.showCityPicker(ctx, user, state.CitySettings, 0)
+	case flowWatchSearch, flowWatchDoctor:
+		b.showProcedureMenu(user, state)
+	case flowDoctorSearch, flowWatchFacility:
+		state.Kind = flowWatchDoctor
+		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.doctor"), doctorModeKeyboard(b.catalog, user.Locale))
+	case flowWatchDate:
+		b.showFacilityMenu(ctx, user, state)
+	case flowWatchTime:
+		b.showDateStep(user, state)
+	case flowWatchDays:
+		b.showTimeStep(user, state)
+	case flowWatchInterval:
+		b.showDaysStep(user, state)
+	case flowWatchConfirm:
+		b.showIntervalStep(user, state)
+	}
 }

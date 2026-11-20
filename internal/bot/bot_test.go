@@ -176,6 +176,12 @@ func TestCreateWatchThroughTelegramCallbacks(t *testing.T) {
 	end := start.AddDate(0, 0, 5)
 	message(start.Format(time.DateOnly) + " " + end.Format(time.DateOnly))
 	message("09:00-13:00")
+	callback("days:weekend")
+	callback("back:watch_days") // Stale back button must not skip a step.
+	if b.getFlow(pending.ID).Kind != flowWatchInterval {
+		t.Fatal("stale back button changed the current step")
+	}
+	callback("back:watch_interval")
 	message("1,2,3,4,5,6,7")
 	callback("interval:default")
 	state := b.getFlow(pending.ID)
@@ -202,5 +208,31 @@ func TestCreateWatchThroughTelegramCallbacks(t *testing.T) {
 		watch.DateTo.In(luxmed.Location()).Format(time.DateOnly) != end.Format(time.DateOnly) ||
 		len(watch.TimeWindows) != 7 || watch.TimeWindows[6] != (domain.TimeWindow{Weekday: 7, From: "09:00", To: "13:00"}) {
 		t.Fatalf("saved filters differ from the selected filters: %+v", watch)
+	}
+}
+
+func TestOnlyOwnerCanHideHistory(t *testing.T) {
+	ctx := context.Background()
+	b := testBot(t)
+	owner := createUser(t, b, 10, domain.UserStatusActive)
+	other := createUser(t, b, 20, domain.UserStatusActive)
+	watchID, err := b.db.CreateWatch(ctx, domain.Watch{UserID: owner.ID, Name: "Example", CityID: 1, ServiceID: 12, CheckIntervalSeconds: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	item, _, err := b.db.UpsertAppointmentHistory(ctx, watchID, domain.Appointment{Fingerprint: "example", DateTime: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf("hide:%d:%d:0", item.ID, watchID)
+	b.hideHistory(ctx, other, data)
+	items, err := b.db.WatchHistory(ctx, owner.ID, watchID, 10, 0)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("unauthorized hide changed history: count=%d, err=%v", len(items), err)
+	}
+	b.hideHistory(ctx, owner, data)
+	items, err = b.db.WatchHistory(ctx, owner.ID, watchID, 10, 0)
+	if err != nil || len(items) != 0 {
+		t.Fatalf("owner hide did not change history: count=%d, err=%v", len(items), err)
 	}
 }
