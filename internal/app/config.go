@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
 type Config struct {
@@ -29,9 +30,11 @@ type Config struct {
 	EnableRawLuxMedPayload bool
 	HealthAddr             string
 	BrowserAPIURL          string
+	BrowserRoutes          map[int64]luxmed.BrowserRoute
 	BrowserViewerURL       string
 	MiniAppURL             string
 	MiniAppAgentURL        string
+	MiniAppTicketKey       string
 }
 
 func LoadConfig() (Config, error) {
@@ -51,6 +54,7 @@ func LoadConfig() (Config, error) {
 		BrowserViewerURL:     strings.TrimSpace(os.Getenv("LUXMED_VIEWER_URL")),
 		MiniAppURL:           strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_URL")),
 		MiniAppAgentURL:      strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_AGENT_URL")),
+		MiniAppTicketKey:     strings.TrimSpace(os.Getenv("LUXMED_INTERNAL_KEY")),
 	}
 	cfg.EnableRawLuxMedPayload = envBool("ENABLE_RAW_LUXMED_PAYLOAD", false)
 
@@ -60,11 +64,25 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.MasterKey = key
 
-	if cfg.BrowserAPIURL != "" && len(cfg.AdminTelegramIDs) != 1 {
+	cfg.BrowserRoutes, err = luxmed.ParseBrowserRoutes(os.Getenv("LUXMED_BROWSER_ROUTES"))
+	if err != nil {
+		return Config{}, err
+	}
+	if cfg.BrowserRoutes == nil && cfg.BrowserAPIURL != "" && len(cfg.AdminTelegramIDs) != 1 {
 		return Config{}, fmt.Errorf("browser mode requires exactly one admin Telegram ID")
 	}
-	if (cfg.MiniAppURL == "") != (cfg.MiniAppAgentURL == "") || (cfg.MiniAppURL != "" && cfg.BrowserAPIURL == "") {
+	if (cfg.MiniAppURL == "") != (cfg.MiniAppAgentURL == "") || (cfg.MiniAppURL != "" && cfg.BrowserAPIURL == "" && cfg.BrowserRoutes == nil) {
 		return Config{}, fmt.Errorf("Mini App requires browser mode and both Mini App URLs")
+	}
+	if cfg.BrowserRoutes != nil {
+		adminAssigned := false
+		for id := range cfg.AdminTelegramIDs {
+			_, assigned := cfg.BrowserRoutes[id]
+			adminAssigned = adminAssigned || assigned
+		}
+		if cfg.MiniAppURL == "" || !adminAssigned || !luxmed.ValidTicketKey(cfg.MiniAppTicketKey) {
+			return Config{}, fmt.Errorf("browser routes require the Mini App, a browser assigned to an admin and a 32-byte hex LUXMED_INTERNAL_KEY")
+		}
 	}
 	if cfg.TelegramToken == "" {
 		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")

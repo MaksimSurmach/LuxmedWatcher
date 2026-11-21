@@ -4,7 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,4 +187,81 @@ func testRunner(t *testing.T, notifier Notifier) (*Runner, *storage.DB, domain.W
 		t.Fatal(err)
 	}
 	return NewRunner(db, cryptor, notifier, 0, time.Hour, false), db, watch
+}
+
+func TestBrowserChecksUseIndependentWorkers(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	runner, db, watchA := testRunner(t, nil)
+	addWatch := func(telegramID int64, watchID int64) domain.Watch {
+		t.Helper()
+		user, err := db.UpsertTelegramUser(ctx, domain.User{
+			TelegramUserID: telegramID, TelegramChatID: telegramID, Status: domain.UserStatusActive, Role: domain.UserRoleUser,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		watch := domain.Watch{ID: watchID, UserID: user.ID, CityID: 1, ServiceID: int(telegramID), NextDays: 1}
+		if watchID == 0 {
+			watch.ID, err = db.CreateWatch(ctx, watch)
+		} else {
+			err = db.UpdateWatch(ctx, watch)
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		return watch
+	}
+	watchA = addWatch(42, watchA.ID)
+	watchB := addWatch(84, 0)
+	entered := make(chan int, 2)
+	release := make(chan struct{})
+	makeWorker := func(watch domain.Watch) *luxmed.Browser {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != luxmed.TermsURL || r.URL.Query().Get("serviceVariantId") != strconv.Itoa(watch.ServiceID) {
+				t.Errorf("crossed worker requests: %s", r.URL.RequestURI())
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			entered <- watch.ServiceID
+			select {
+			case <-release:
+				fmt.Fprint(w, `{"termsForService":{"termsForDays":[],"termsInfoForDays":[]}}`)
+			case <-r.Context().Done():
+			}
+		}))
+		t.Cleanup(server.Close)
+		browser, err := luxmed.NewBrowser(server.URL, "http://localhost:18769")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return browser
+	}
+	runner.UseBrowsers(map[int64]*luxmed.Browser{42: makeWorker(watchA), 84: makeWorker(watchB)})
+	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var checks sync.WaitGroup
+	scheduler.tick(ctx, &checks, make(chan struct{}, cap(runner.capacity)))
+	seen := make(map[int]bool)
+	for range 2 {
+		select {
+		case service := <-entered:
+			seen[service] = true
+		case <-ctx.Done():
+			t.Fatal("workers did not run concurrently")
+		}
+	}
+	if !seen[42] || !seen[84] {
+		t.Fatalf("workers reached: %v", seen)
+	}
+	if err := runner.CheckWatch(ctx, watchA); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("the same user ran two checks: %v", err)
+	}
+	close(release)
+	checks.Wait()
+	for _, id := range []int64{watchA.ID, watchB.ID} {
+		watch, err := db.Watch(ctx, id)
+		if err != nil || watch.LastSuccessAt == nil {
+			t.Fatalf("scheduled watch %d did not finish: %+v, %v", id, watch, err)
+		}
+	}
 }

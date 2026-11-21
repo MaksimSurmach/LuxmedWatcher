@@ -20,6 +20,7 @@ let shortDate;
 let clock;
 let weekdays;
 let state;
+let apiToken;
 let cities;
 let tab = 'watches';
 let account = 'unchecked';
@@ -50,10 +51,13 @@ function flash(message) {
 
 async function api(action, data = {}) {
   let response;
+  const headers = { 'Content-Type': 'application/json' };
+  if (action === 'auth' || action === 'connect') headers['X-Telegram-Init-Data'] = telegram.initData;
+  if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
   try {
     response = await fetch(`/api/dashboard/${action}`, {
       method: 'POST', redirect: 'error', cache: 'no-store',
-      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': telegram.initData },
+      headers,
       body: JSON.stringify(data), signal: AbortSignal.timeout(19_000),
     });
     if (response.status === 204) return;
@@ -61,7 +65,9 @@ async function api(action, data = {}) {
   } catch {
     throw new Error(t('error.unavailable'));
   }
-  if (response.status === 401 || response.status === 403) throw new Error(t('error.reopen'));
+  if (response.status === 401) throw new Error(t('error.reopen'));
+  if (response.status === 403) throw new Error(t('error.access_denied'));
+  if (response.status === 429) throw new Error(t('error.browser_busy'));
   if (response.status === 409) throw new Error(t('error.connect_first'));
   if (response.status === 400) throw new Error(t('error.invalid_fields'));
   if (response.status === 404) throw new Error(t('error.stale'));
@@ -482,9 +488,10 @@ async function start() {
   show(titleFor('watches'), `<p>${text('dashboard.loading')}</p>`, false);
   const initial = new URLSearchParams(location.search).get('tab');
   try {
+    ({ token: apiToken } = await api('auth'));
     await update(tabs.includes(initial) ? initial : 'watches');
   } catch (error) {
-    screenError('Luxmed Watcher', error, start);
+    screenError('Luxmed Watcher', error, error.message === t('error.access_denied') ? undefined : start);
   }
 }
 

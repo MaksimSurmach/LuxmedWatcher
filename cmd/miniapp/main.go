@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/miniapp"
 )
 
@@ -19,12 +20,21 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	botID, _ := strconv.ParseInt(os.Getenv("LUXMED_BOT_ID"), 10, 64)
-	ownerID, _ := strconv.ParseInt(os.Getenv("ADMIN_TELEGRAM_IDS"), 10, 64)
+	workers, err := luxmed.ParseBrowserRoutes(os.Getenv("LUXMED_BROWSER_ROUTES"))
+	if err != nil {
+		log.Fatal(err)
+	}
+	if workers == nil {
+		ownerID, _ := strconv.ParseInt(strings.TrimSpace(os.Getenv("ADMIN_TELEGRAM_IDS")), 10, 64)
+		workers = map[int64]luxmed.BrowserRoute{
+			ownerID: {API: os.Getenv("LUXMED_BROWSER_API_URL"), Viewer: os.Getenv("LUXMED_BROWSER_VIEWER_URL")},
+		}
+	}
 	public, private, err := miniapp.New(miniapp.Config{
-		Origin:    strings.TrimRight(os.Getenv("LUXMED_MINIAPP_URL"), "/"),
-		WorkerAPI: os.Getenv("LUXMED_BROWSER_API_URL"), WorkerViewer: os.Getenv("LUXMED_BROWSER_VIEWER_URL"),
-		ViewerOrigin: os.Getenv("LUXMED_VIEWER_URL"), BotID: botID, OwnerID: ownerID,
+		Origin:       strings.TrimRight(os.Getenv("LUXMED_MINIAPP_URL"), "/"),
+		ViewerOrigin: os.Getenv("LUXMED_VIEWER_URL"), BotID: botID, Workers: workers,
 		DashboardAPI: os.Getenv("LUXMED_DASHBOARD_API_URL"),
+		TicketKey:    strings.TrimSpace(os.Getenv("LUXMED_INTERNAL_KEY")),
 	}, os.DirFS("/app/web"), os.DirFS("/app/vendor"))
 	if err != nil {
 		log.Fatal(err)

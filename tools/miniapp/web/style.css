@@ -39,6 +39,9 @@ p { margin: .15rem 0 0; font-size: .875rem; }
   background: var(--tg-theme-secondary-bg-color, ButtonFace);
 }
 
+#notice { display: grid; gap: .75rem; padding: .9rem; border-radius: .8rem; background: var(--tg-theme-secondary-bg-color, ButtonFace); }
+#start-viewer { justify-self: start; font-weight: 650; }
+
 #controls, #remote-keys { display: flex; flex-wrap: wrap; gap: .45rem; }
 #controls [data-scroll] { min-width: 44px; }
 #typing { display: grid; gap: .35rem; }

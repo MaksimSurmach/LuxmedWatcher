@@ -22,27 +22,30 @@ const dashboardPrefix = "/api/dashboard/"
 
 type DashboardConfig struct {
 	Origin          string
-	BotID, OwnerID  int64
+	BotID           int64
 	MinimumInterval time.Duration
 	DefaultInterval time.Duration
 }
 
 type dashboard struct {
-	cfg     DashboardConfig
-	key     ed25519.PublicKey
-	db      *storage.DB
-	client  luxmed.Client
-	check   func(context.Context) error
-	connect func(context.Context) (string, error)
+	cfg      DashboardConfig
+	key      ed25519.PublicKey
+	sessions sessions
+	db       *storage.DB
+	browsers map[int64]*luxmed.Browser
+	connect  func(context.Context, int64) (string, error)
 }
 
-func Dashboard(cfg DashboardConfig, db *storage.DB, browser *luxmed.Browser, app *luxmed.MiniApp) http.Handler {
-	d := &dashboard{cfg: cfg, key: productionKey(), db: db, client: browser.Client(), check: browser.Check, connect: app.Link}
+func Dashboard(cfg DashboardConfig, db *storage.DB, browsers map[int64]*luxmed.Browser, app *luxmed.MiniApp) http.Handler {
+	d := &dashboard{cfg: cfg, key: productionKey(), sessions: newSessions(), db: db, browsers: browsers, connect: app.Link}
 	return d.handler()
 }
 
 func (d *dashboard) handler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+dashboardPrefix+"auth", d.authorizeTelegram(func(w http.ResponseWriter, _ *http.Request, user domain.User) {
+		reply(w, http.StatusOK, map[string]string{"token": d.sessions.issue(user.TelegramUserID, time.Now())})
+	}))
 	mux.HandleFunc("POST "+dashboardPrefix+"load", d.authorize(d.load))
 	mux.HandleFunc("POST "+dashboardPrefix+"history", d.authorize(d.history))
 	mux.HandleFunc("POST "+dashboardPrefix+"cities", d.authorize(d.cities))
@@ -53,20 +56,42 @@ func (d *dashboard) handler() http.Handler {
 	mux.HandleFunc("POST "+dashboardPrefix+"status", d.authorize(d.status))
 	mux.HandleFunc("POST "+dashboardPrefix+"account", d.authorize(d.account))
 	mux.HandleFunc("POST "+dashboardPrefix+"connect", d.authorize(d.openBrowser))
+	mux.HandleFunc("POST "+dashboardPrefix+"viewer-access", d.authorizeTelegram(func(w http.ResponseWriter, _ *http.Request, _ domain.User) {
+		reply(w, http.StatusNoContent, nil)
+	}))
 	return mux
 }
 
 type dashboardAction func(http.ResponseWriter, *http.Request, domain.User)
 
 func (d *dashboard) authorize(action dashboardAction) http.HandlerFunc {
+	return d.withUser(action, func(r *http.Request) (int64, bool) {
+		return d.sessions.verify(r.Header.Get("Authorization"), time.Now())
+	})
+}
+
+func (d *dashboard) authorizeTelegram(action dashboardAction) http.HandlerFunc {
+	return d.withUser(action, func(r *http.Request) (int64, bool) {
+		return verifiedTelegramID(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, time.Now(), 5*time.Minute, d.key)
+	})
+}
+
+func (d *dashboard) withUser(action dashboardAction, identity func(*http.Request) (int64, bool)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Origin") != d.cfg.Origin || !authorizedUserWithMaxAge(
-			r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, d.cfg.OwnerID, time.Now(), time.Hour, d.key,
-		) {
+		if r.Header.Get("Origin") != d.cfg.Origin {
 			reply(w, http.StatusUnauthorized, nil)
 			return
 		}
-		user, err := d.db.UserByTelegramID(r.Context(), d.cfg.OwnerID)
+		id, ok := identity(r)
+		if !ok {
+			reply(w, http.StatusUnauthorized, nil)
+			return
+		}
+		if d.browsers[id] == nil {
+			reply(w, http.StatusForbidden, nil)
+			return
+		}
+		user, err := d.db.UserByTelegramID(r.Context(), id)
 		if errors.Is(err, sql.ErrNoRows) || err == nil && !user.IsActive() {
 			reply(w, http.StatusForbidden, nil)
 			return
@@ -137,11 +162,11 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 	}{slots, len(items) > pageSize})
 }
 
-func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, _ domain.User) {
+func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, user domain.User) {
 	ctx := r.Context()
 	items, err := d.db.Cities(ctx, 300)
 	if err == nil && len(items) == 0 {
-		items, err = d.client.GetCities(ctx)
+		items, err = d.browsers[user.TelegramUserID].Client().GetCities(ctx)
 		if err == nil {
 			err = d.db.UpsertCities(ctx, items)
 		}
@@ -171,7 +196,7 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 		var cached []domain.Procedure
 		cached, err = d.db.SearchProceduresPage(ctx, city.ID, "", 1, 0)
 		if err == nil && len(cached) == 0 {
-			err = d.cacheProcedures(ctx, city)
+			err = d.cacheProcedures(ctx, city, d.browsers[user.TelegramUserID].Client())
 		}
 	}
 	if err != nil {
@@ -189,8 +214,8 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 	}{items[:min(pageSize, len(items))], len(items) > pageSize}, err)
 }
 
-func (d *dashboard) cacheProcedures(ctx context.Context, city domain.City) error {
-	items, err := d.client.GetServices(ctx)
+func (d *dashboard) cacheProcedures(ctx context.Context, city domain.City, client luxmed.Client) error {
+	items, err := client.GetServices(ctx)
 	if err != nil {
 		return err
 	}
@@ -201,7 +226,7 @@ func (d *dashboard) cacheProcedures(ctx context.Context, city domain.City) error
 	return d.db.UpsertProcedures(ctx, city, procedures)
 }
 
-func (d *dashboard) providers(w http.ResponseWriter, r *http.Request, _ domain.User) {
+func (d *dashboard) providers(w http.ResponseWriter, r *http.Request, user domain.User) {
 	var input catalogInput
 	if !decodeDashboard(w, r, &input) {
 		return
@@ -210,7 +235,7 @@ func (d *dashboard) providers(w http.ResponseWriter, r *http.Request, _ domain.U
 		dashboardResult(w, nil, err)
 		return
 	}
-	items, err := d.client.GetDoctorsAndFacilities(r.Context(), input.CityID, input.ServiceID)
+	items, err := d.browsers[user.TelegramUserID].Client().GetDoctorsAndFacilities(r.Context(), input.CityID, input.ServiceID)
 	dashboardResult(w, items, err)
 }
 
@@ -253,24 +278,26 @@ func (d *dashboard) status(w http.ResponseWriter, r *http.Request, user domain.U
 	}
 }
 
-func (d *dashboard) account(w http.ResponseWriter, r *http.Request, _ domain.User) {
-	err := d.check(r.Context())
+func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {
+	err := d.browsers[user.TelegramUserID].Check(r.Context())
 	switch {
 	case err == nil:
 		reply(w, http.StatusOK, map[string]string{"state": "connected"})
 	case errors.Is(err, luxmed.ErrAuthentication):
 		reply(w, http.StatusOK, map[string]string{"state": "needs_login"})
+	case errors.Is(err, luxmed.ErrBrowserBusy):
+		reply(w, http.StatusTooManyRequests, nil)
 	default:
 		reply(w, http.StatusServiceUnavailable, nil)
 	}
 }
 
 func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User) {
-	if !authorizedUser(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, d.cfg.OwnerID, time.Now(), d.key) {
+	if !authorizedUser(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, user.TelegramUserID, time.Now(), d.key) {
 		reply(w, http.StatusUnauthorized, nil)
 		return
 	}
-	link, err := d.connect(r.Context())
+	link, err := d.connect(r.Context(), user.TelegramUserID)
 	if err == nil {
 		link += "&lang=" + i18n.Normalize(user.Locale, "pl")
 	}
@@ -291,6 +318,8 @@ func dashboardResult(w http.ResponseWriter, value any, err error) {
 		reply(w, http.StatusNotFound, nil)
 	case errors.Is(err, luxmed.ErrAuthentication):
 		reply(w, http.StatusConflict, map[string]string{"error": "needs_login"})
+	case errors.Is(err, luxmed.ErrBrowserBusy):
+		reply(w, http.StatusTooManyRequests, nil)
 	case err != nil:
 		reply(w, http.StatusServiceUnavailable, nil)
 	default:
@@ -360,7 +389,7 @@ func (d *dashboard) saveWatch(w http.ResponseWriter, r *http.Request, user domai
 			watch.DoctorID, watch.DoctorName, watch.DoctorMode = previous.DoctorID, previous.DoctorName, previous.DoctorMode
 			watch.FacilityIDs, watch.FacilityNames, watch.FacilityMode = previous.FacilityIDs, previous.FacilityNames, previous.FacilityMode
 		} else {
-			data, err := d.client.GetDoctorsAndFacilities(ctx, city.ID, service.ID)
+			data, err := d.browsers[user.TelegramUserID].Client().GetDoctorsAndFacilities(ctx, city.ID, service.ID)
 			if err != nil {
 				dashboardResult(w, nil, err)
 				return

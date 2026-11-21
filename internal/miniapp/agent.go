@@ -2,24 +2,32 @@ package miniapp
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"io/fs"
+	"mime"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
 type Config struct {
-	Origin, WorkerAPI, WorkerViewer, ViewerOrigin, DashboardAPI string
-	BotID, OwnerID                                              int64
+	Origin, ViewerOrigin, DashboardAPI string
+	TicketKey                          string
+	BotID                              int64
+	Workers                            map[int64]luxmed.BrowserRoute
 }
 
 type ticket struct {
@@ -28,7 +36,8 @@ type ticket struct {
 }
 
 func (t ticket) valid(token string) bool {
-	return t.token != "" && t.token == token && time.Now().Before(t.expires)
+	return t.token != "" && time.Now().Before(t.expires) &&
+		subtle.ConstantTimeCompare([]byte(t.token), []byte(token)) == 1
 }
 
 func newTicket(ttl time.Duration) ticket {
@@ -37,14 +46,21 @@ func newTicket(ttl time.Duration) ticket {
 	return ticket{token: hex.EncodeToString(nonce[:]), expires: time.Now().Add(ttl)}
 }
 
-type app struct {
-	config Config
-	client *http.Client
+type worker struct {
+	api    string
 	proxy  *httputil.ReverseProxy
-	mu     sync.Mutex
 	launch ticket
 	view   ticket
 	active bool
+}
+
+type app struct {
+	config  Config
+	key     ed25519.PublicKey
+	client  *http.Client
+	workers map[int64]*worker
+	mu      sync.Mutex
+	views   map[string]*worker
 }
 
 func New(cfg Config, web, vendor fs.FS) (public, private http.Handler, err error) {
@@ -53,31 +69,38 @@ func New(cfg Config, web, vendor fs.FS) (public, private http.Handler, err error
 		return nil, nil, err
 	}
 	local := http.NewServeMux()
-	local.HandleFunc("POST /ticket", a.issue)
+	local.HandleFunc("POST /ticket/{telegramID}", a.issue)
 	return a.public(web, vendor), local, nil
 }
 
 func newApp(cfg Config) (*app, error) {
-	if !validURL(cfg.Origin, "https", "") || !validURL(cfg.WorkerAPI, "http", "") ||
-		!validURL(cfg.WorkerViewer, "http", "/vnc") || !validURL(cfg.ViewerOrigin, "http", "") ||
-		cfg.BotID <= 0 || cfg.OwnerID <= 0 || (cfg.DashboardAPI != "" && !validURL(cfg.DashboardAPI, "http", "")) {
+	if !validURL(cfg.Origin, "https", "") || !validURL(cfg.ViewerOrigin, "http", "") ||
+		!validURL(cfg.DashboardAPI, "http", "") || cfg.BotID <= 0 || len(cfg.Workers) == 0 ||
+		((len(cfg.Workers) > 1 || cfg.TicketKey != "") && !luxmed.ValidTicketKey(cfg.TicketKey)) {
 		return nil, errors.New("invalid Mini App settings")
 	}
-	upstream, err := url.Parse(cfg.WorkerViewer)
-	if err != nil {
-		return nil, err
+	a := &app{
+		config: cfg, key: productionKey(), workers: make(map[int64]*worker, len(cfg.Workers)), views: make(map[string]*worker),
+		client: &http.Client{Timeout: 18 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}},
 	}
-	upstreamOrigin := &url.URL{Scheme: upstream.Scheme, Host: upstream.Host}
-	a := &app{config: cfg, client: &http.Client{Timeout: 18 * time.Second}}
-	a.proxy = &httputil.ReverseProxy{
-		Rewrite: func(request *httputil.ProxyRequest) {
-			request.SetURL(upstreamOrigin)
-			request.Out.URL.Path = upstream.Path
-			request.Out.Header.Set("Origin", cfg.ViewerOrigin)
-		},
-		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
-			reply(w, http.StatusBadGateway, nil)
-		},
+	for id, route := range cfg.Workers {
+		if id <= 0 || !validURL(route.API, "http", "") || !validURL(route.Viewer, "http", "/vnc") {
+			return nil, errors.New("invalid Mini App browser worker")
+		}
+		upstream, _ := url.Parse(route.Viewer)
+		origin := &url.URL{Scheme: upstream.Scheme, Host: upstream.Host}
+		a.workers[id] = &worker{api: route.API, proxy: &httputil.ReverseProxy{
+			Rewrite: func(request *httputil.ProxyRequest) {
+				request.SetURL(origin)
+				request.Out.URL.Path = upstream.Path
+				request.Out.Header.Set("Origin", cfg.ViewerOrigin)
+			},
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+				reply(w, http.StatusBadGateway, nil)
+			},
+		}}
 	}
 	return a, nil
 }
@@ -88,20 +111,37 @@ func validURL(raw, scheme, path string) bool {
 		u.Fragment == "" && u.RawQuery == "" && !u.ForceQuery
 }
 
-func (a *app) issue(w http.ResponseWriter, _ *http.Request) {
+func (a *app) issue(w http.ResponseWriter, r *http.Request) {
+	if a.config.TicketKey != "" {
+		key, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if subtle.ConstantTimeCompare([]byte(a.config.TicketKey), []byte(key)) != 1 {
+			reply(w, http.StatusUnauthorized, nil)
+			return
+		}
+	}
+	id, err := strconv.ParseInt(r.PathValue("telegramID"), 10, 64)
+	browser := a.workers[id]
+	if err != nil || browser == nil {
+		reply(w, http.StatusNotFound, nil)
+		return
+	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.active {
+	if browser.active {
+		a.mu.Unlock()
 		reply(w, http.StatusConflict, nil)
 		return
 	}
-	a.view = ticket{}
-	a.launch = newTicket(5 * time.Minute)
-	reply(w, http.StatusOK, map[string]string{"ticket": a.launch.token})
+	delete(a.views, browser.view.token)
+	browser.view = ticket{}
+	browser.launch = newTicket(5 * time.Minute)
+	token := browser.launch.token
+	a.mu.Unlock()
+	reply(w, http.StatusOK, map[string]string{"ticket": token})
 }
 
 func (a *app) session(w http.ResponseWriter, r *http.Request) {
-	if r.Header.Get("Origin") != a.config.Origin || !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if r.Header.Get("Origin") != a.config.Origin || mediaType != "application/json" {
 		reply(w, http.StatusForbidden, nil)
 		return
 	}
@@ -113,16 +153,61 @@ func (a *app) session(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.active || !a.launch.valid(input.Ticket) ||
-		!authorizedUser(input.InitData, a.config.BotID, a.config.OwnerID, time.Now(), productionKey()) {
+	id, ok := verifiedTelegramID(input.InitData, a.config.BotID, time.Now(), 5*time.Minute, a.key)
+	if !ok {
 		reply(w, http.StatusUnauthorized, nil)
 		return
 	}
-	a.launch = ticket{}
-	a.view = newTicket(45 * time.Second)
-	reply(w, http.StatusOK, map[string]string{"viewerToken": a.view.token})
+	a.exchange(w, r, id, input.Ticket, input.InitData)
+}
+
+func (a *app) exchange(w http.ResponseWriter, r *http.Request, id int64, launch, initData string) {
+	browser := a.workers[id]
+	a.mu.Lock()
+	valid := browser != nil && !browser.active && browser.launch.valid(launch)
+	a.mu.Unlock()
+	if !valid {
+		reply(w, http.StatusUnauthorized, nil)
+		return
+	}
+	if status := a.access(r.Context(), initData); status != http.StatusNoContent {
+		reply(w, status, nil)
+		return
+	}
+
+	a.mu.Lock()
+	if browser.active || !browser.launch.valid(launch) {
+		a.mu.Unlock()
+		reply(w, http.StatusUnauthorized, nil)
+		return
+	}
+	browser.launch = ticket{}
+	delete(a.views, browser.view.token)
+	browser.view = newTicket(45 * time.Second)
+	token := browser.view.token
+	a.views[token] = browser
+	a.mu.Unlock()
+	reply(w, http.StatusOK, map[string]string{"viewerToken": token})
+}
+
+func (a *app) access(ctx context.Context, initData string) int {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.config.DashboardAPI+dashboardPrefix+"viewer-access", nil)
+	if err != nil {
+		return http.StatusServiceUnavailable
+	}
+	req.Header.Set("Origin", a.config.Origin)
+	req.Header.Set("X-Telegram-Init-Data", initData)
+	res, err := a.client.Do(req)
+	if err != nil {
+		return http.StatusServiceUnavailable
+	}
+	defer res.Body.Close()
+	switch res.StatusCode {
+	case http.StatusUnauthorized, http.StatusForbidden, http.StatusNoContent:
+		return res.StatusCode
+	default:
+		return http.StatusServiceUnavailable
+	}
 }
 
 func (a *app) viewer(w http.ResponseWriter, r *http.Request) {
@@ -132,39 +217,50 @@ func (a *app) viewer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	protocols := strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",")
-	for i := range protocols {
-		protocols[i] = strings.TrimSpace(protocols[i])
+	var token string
+	for i, protocol := range protocols {
+		protocols[i] = strings.TrimSpace(protocol)
+		if credential, ok := strings.CutPrefix(protocols[i], "viewer-"); ok {
+			if token != "" || len(credential) != 64 {
+				reply(w, http.StatusForbidden, nil)
+				return
+			}
+			token = credential
+		}
 	}
+
 	a.mu.Lock()
-	if a.active || !a.view.valid(a.view.token) || !slices.Contains(protocols, "binary") ||
-		!slices.Contains(protocols, "viewer-"+a.view.token) {
+	browser := a.views[token]
+	if browser == nil || browser.active || !browser.view.valid(token) || !slices.Contains(protocols, "binary") {
 		a.mu.Unlock()
 		reply(w, http.StatusForbidden, nil)
 		return
 	}
-	a.view = ticket{}
-	a.active = true
+	delete(a.views, token)
+	browser.view = ticket{}
+	browser.active = true
 	a.mu.Unlock()
 	defer func() {
 		a.mu.Lock()
-		a.active = false
+		browser.active = false
 		a.mu.Unlock()
 	}()
 
-	workerTicket, err := a.workerTicket(r.Context())
+	workerToken, err := a.workerTicket(r.Context(), browser.api)
 	if err != nil {
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
 	r = r.Clone(r.Context())
-	r.Header.Set("Sec-WebSocket-Protocol", "binary, ticket-"+workerTicket)
+	r.Header.Set("Sec-WebSocket-Protocol", "binary, ticket-"+workerToken)
 	r.Header.Del("Cookie")
 	r.Header.Del("Authorization")
-	a.proxy.ServeHTTP(w, r)
+	r.Header.Del("X-Telegram-Init-Data")
+	browser.proxy.ServeHTTP(w, r)
 }
 
-func (a *app) workerTicket(ctx context.Context) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.config.WorkerAPI+"/viewer", nil)
+func (a *app) workerTicket(ctx context.Context, api string) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, api+"/viewer", nil)
 	if err != nil {
 		return "", err
 	}

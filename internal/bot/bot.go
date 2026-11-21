@@ -32,7 +32,7 @@ type Config struct {
 	MinimumInterval  time.Duration
 	DefaultInterval  time.Duration
 	PollTimeout      int
-	Browser          *luxmed.Browser
+	Browsers         map[int64]*luxmed.Browser
 	MiniApp          *luxmed.MiniApp
 }
 
@@ -150,7 +150,7 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		},
 		{{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID))}},
 	}
-	if b.cfg.MiniApp != nil && b.cfg.AdminTelegramIDs[user.TelegramUserID] {
+	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
 		button := newMiniAppButton(b.catalog.T(user.Locale, "button.open_app"), b.cfg.MiniApp.DashboardURL()+"?tab=history")
 		keyboard = append(keyboard, []miniAppButton{button})
 	}
@@ -221,7 +221,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		return
 	}
 	if update.Message == nil || !privateChat(update.Message.Chat, update.Message.From) ||
-		(b.cfg.Browser != nil && !b.cfg.AdminTelegramIDs[update.Message.From.ID]) {
+		(b.cfg.Browsers != nil && b.cfg.Browsers[update.Message.From.ID] == nil) {
 		return
 	}
 	user, err := b.upsertUser(ctx, update.Message)
@@ -332,7 +332,7 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 			return
 		}
 		key := "flow.account.removed"
-		if b.cfg.Browser != nil {
+		if b.cfg.Browsers != nil {
 			key = "flow.browser.logout"
 		}
 		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
@@ -427,7 +427,7 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 
 func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	if cb.Message == nil || !privateChat(cb.Message.Chat, cb.From) ||
-		(b.cfg.Browser != nil && !b.cfg.AdminTelegramIDs[cb.From.ID]) {
+		(b.cfg.Browsers != nil && b.cfg.Browsers[cb.From.ID] == nil) {
 		return
 	}
 	user, err := b.db.UserByTelegramID(ctx, cb.From.ID)
@@ -1500,11 +1500,15 @@ func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domai
 }
 
 func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (luxmed.Client, error) {
-	if b.cfg.Browser != nil {
-		if err := b.checkAccount(ctx, user); err != nil {
+	if b.cfg.Browsers != nil {
+		browser := b.cfg.Browsers[user.TelegramUserID]
+		if browser == nil {
+			return nil, luxmed.ErrAuthentication
+		}
+		if err := browser.Check(ctx); err != nil {
 			return nil, err
 		}
-		return b.cfg.Browser.Client(), nil
+		return browser.Client(), nil
 	}
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil {
@@ -1571,7 +1575,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	default:
 		return
 	}
-	if err := b.db.SetWatchStatus(ctx, id, state); err != nil {
+	if err := b.db.SetUserWatchStatus(ctx, user.ID, id, state); err != nil {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
@@ -1597,6 +1601,8 @@ func (b *Bot) checkWatchNow(ctx context.Context, user domain.User, watch domain.
 			key = "errors.auth_failed"
 		case errors.Is(err, luxmed.ErrPartialResults):
 			key = "watch.check_partial"
+		case errors.Is(err, luxmed.ErrBrowserBusy):
+			key = "watch.browser_busy"
 		case errors.Is(err, luxmed.ErrUnavailable):
 			key = "errors.luxmed_unavailable"
 		}

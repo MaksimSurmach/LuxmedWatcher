@@ -1,6 +1,6 @@
 # Telegram Mini App over HTTPS
 
-The bot sends an inline `web_app` button in the owner's private Telegram chat. The home Mini App verifies Telegram's signature for this bot and owner, consumes the link ticket, and grants one 45-second WebSocket ticket. The browser worker opens its own one-time VNC connection. The server's Chromium profile and the SQLite database remain in their Docker volumes on Ubuntu. The public route uses the existing Cloudflare HTTPS edge and Traefik over the existing server-to-server WireGuard link. The phone does not need a VPN.
+The bot sends an inline `web_app` button in an active user's private Telegram chat. The Go API verifies fresh Telegram launch data and issues a one-hour session kept in the Mini App's memory. Every request also checks the user's current status and browser assignment. Sign-in links and 45-second WebSocket tickets are single use and bound to the user's browser. The browser worker opens its own one-time VNC connection. The server's Chromium profile and the SQLite database remain in their Docker volumes on Ubuntu. The public route uses the existing Cloudflare HTTPS edge and Traefik over the existing server-to-server WireGuard link. The phone does not need a VPN.
 
 ## Ubuntu
 
@@ -17,7 +17,27 @@ docker compose --env-file .env --env-file .miniapp.env \
   -p luxmed-watcher-mvp -f compose.browser.yml -f compose.miniapp.yml up -d --build
 ```
 
-The public app listens on port 19090 on the WireGuard address. Traefik reaches it over the private existing link. The bot's ticket API is accessible only inside Compose. The owner is the single ID already in `ADMIN_TELEGRAM_IDS`. The public origin must match the HTTPS address sent by Telegram.
+The public app listens on port 19090 on the WireGuard address. Traefik reaches it over the private existing link. The bot's ticket API is accessible only inside Compose. With the default Compose files the browser is assigned to the single ID in `ADMIN_TELEGRAM_IDS`. The public origin must match the HTTPS address sent by Telegram. `LUXMED_DASHBOARD_API_URL` points to the private Go API, which must be online to authorize new browser streams.
+
+## Additional users
+
+Assign one dedicated browser worker, private Docker network and profile volume to each Telegram user ID. The users share the Go service and city and procedure dictionaries, with separate search settings, slot history and LuxMed sessions. The provider evaluates appointment availability through each user's worker. Keep only administrators in `ADMIN_TELEGRAM_IDS`. An admin assigned to a browser can issue `/invite` codes. After the assignment is deployed, the invited user opens the private chat and sends `/start CODE`. A worker assignment alone does not activate an account.
+
+To add a second user, set `LUXMED_INTERNAL_KEY` in `.miniapp.env` to a 32-byte hex secret generated locally with `openssl rand -hex 32`. The watcher and gateway use this shared secret for ticket issuance. The browser workers do not receive it. Put the following route example in the same file. Replace the example IDs with the existing owner's Telegram ID and the new user's Telegram ID. Keep the first worker named `browser` to preserve the owner's current profile. Explicit routes replace the default single-owner mapping.
+
+```dotenv
+LUXMED_BROWSER_ROUTES='{"10001":{"api":"http://browser:8091","viewer":"http://browser:8092/vnc"},"10002":{"api":"http://browser-two:8091","viewer":"http://browser-two:8092/vnc"}}'
+```
+
+Apply the additional Compose file after the two base files.
+
+```sh
+docker compose --env-file .env --env-file .miniapp.env \
+  -p luxmed-watcher-mvp -f compose.browser.yml -f compose.miniapp.yml \
+  -f compose.browser.second.yml up -d --build
+```
+
+Only the Go watcher and the Mini App gateway join both networks. The secondary worker publishes no host ports. For more users add another unique service, private network and profile volume, then add the corresponding route. Keep the service and volume unique even if both people use the same clinic. Do not route more than one user to the same worker. The Go scheduler runs up to three checks in parallel across accounts and serializes checks within an account.
 
 ## Public ingress
 
@@ -32,7 +52,7 @@ curl -fsS -o /dev/null -w '%{http_code}\n' https://luxmed.ranus.site/healthz
 
 ## App and settings
 
-Send `/app` in the owner's private bot chat. The three screens share the bot's searches, slot history and user preferences. New searches start active. The app can edit or pause them, and notices can open the history screen. Preferences set the default city and language for the app, the bot and notifications. Polish, English, Russian, Belarusian and Ukrainian are available. The procedure catalogue keeps the original Polish names. Add display translations to `internal/procedures/names.json`; when a translation is missing, the app and bot show the Polish source. The app verifies signed Telegram launch data on each dashboard API request. Only the configured owner can access this deployment.
+Send `/app` in the private bot chat. The three screens share the bot's searches, slot history and user preferences. New searches start active. The app can edit or pause them, and notices can open the history screen. Preferences set the default city and language for the app, the bot and notifications. Polish, English, Russian, Belarusian and Ukrainian are available. The procedure catalogue keeps the original Polish names. Add display translations to `internal/procedures/names.json`; when a translation is missing, the app and bot show the Polish source. The app exchanges a Telegram launch proof for a short-lived API session. Connecting a browser also requires a fresh Telegram launch. Reopen the Mini App when it asks for a fresh launch.
 
 Use **Settings → Sign in to LuxMed** or send `/connect` to open the server's Chromium. Opening the dashboard alone does not check or refresh the LuxMed session.
 
