@@ -5,12 +5,15 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"slices"
 	"strings"
+
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 )
 
 func (a *app) public(web, vendor fs.FS) http.Handler {
 	mux := http.NewServeMux()
-	for _, file := range []string{"index.html", "app.js", "style.css", "dashboard.html", "dashboard.js", "dashboard.css"} {
+	for _, file := range []string{"index.html", "app.js", "style.css", "dashboard.html", "dashboard.js", "dashboard.css", "language.js"} {
 		path := "/" + file
 		switch file {
 		case "index.html":
@@ -22,6 +25,20 @@ func (a *app) public(web, vendor fs.FS) http.Handler {
 			http.ServeFileFS(w, r, web, file)
 		})
 	}
+	mux.HandleFunc("GET /i18n/{locale}", func(w http.ResponseWriter, r *http.Request) {
+		locale := r.PathValue("locale")
+		if !slices.Contains(i18n.SupportedLocales, locale) {
+			http.NotFound(w, r)
+			return
+		}
+		data, err := i18n.Web(locale)
+		if err != nil {
+			reply(w, http.StatusServiceUnavailable, nil)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.Write(data)
+	})
 	for _, folder := range []string{"core", "vendor"} {
 		mux.Handle("GET /vendor/"+folder+"/", http.StripPrefix("/vendor/", http.FileServerFS(vendor)))
 	}

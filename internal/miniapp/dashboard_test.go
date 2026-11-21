@@ -40,7 +40,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err := db.UpsertCities(ctx, []domain.City{city}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertProcedures(ctx, city, []domain.Procedure{{ID: 2, Name: "Dermatolog"}}); err != nil {
+	if err := db.UpsertProcedures(ctx, city, []domain.Procedure{{ID: 2, Name: "Konsultacja dermatologiczna"}}); err != nil {
 		t.Fatal(err)
 	}
 	otherWatch, err := db.CreateWatch(ctx, domain.Watch{UserID: other.ID, CityID: 1, ServiceID: 2, Name: "Other"})
@@ -90,7 +90,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes(), &view); err != nil {
 		t.Fatal(err)
 	}
-	if view.Locale != "pl" || view.CityID != 1 || len(view.Watches) != 1 || view.Watches[0].Name != "Dermatolog · Warszawa" {
+	if view.Locale != "pl" || view.CityID != 1 || len(view.Watches) != 1 || view.Watches[0].Name != "Konsultacja dermatologiczna · Warszawa" {
 		t.Fatalf("unexpected profile or watches: %+v", view)
 	}
 	id := view.Watches[0].ID
@@ -101,12 +101,29 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err != nil || watch.Status != domain.WatchStatusPaused || watch.NextDays != 7 {
 		t.Fatalf("editing a paused watch: %+v, %v", watch, err)
 	}
-	item := domain.Appointment{Fingerprint: "slot", DateTime: time.Now().AddDate(0, 0, 1), ServiceName: "Dermatolog", RawPayload: "private record"}
+	item := domain.Appointment{Fingerprint: "slot", DateTime: time.Now().AddDate(0, 0, 1), ServiceName: "Konsultacja okulistyczna  - bez badania dna oka", RawPayload: "private record"}
 	if _, _, err := db.UpsertAppointmentHistory(ctx, id, item); err != nil {
 		t.Fatal(err)
 	}
 	history := request("history", "{}", origin, signed, http.StatusOK).Body.String()
-	if !strings.Contains(history, "Dermatolog") || strings.Contains(history, "private record") {
+	if !strings.Contains(history, "Konsultacja okulistyczna") || strings.Contains(history, "private record") {
 		t.Fatalf("unexpected history response: %s", history)
+	}
+	request("settings", `{"Locale":"uk","CityID":1}`, origin, signed, http.StatusNoContent)
+	res = request("procedures", `{"CityID":1,"Query":"дерматолога"}`, origin, signed, http.StatusOK)
+	if !strings.Contains(res.Body.String(), "Консультація дерматолога") {
+		t.Fatalf("unexpected translated procedure response: %s", res.Body)
+	}
+	res = request("load", "{}", origin, signed, http.StatusOK)
+	if !strings.Contains(res.Body.String(), "Консультація дерматолога") {
+		t.Fatalf("stored watch label was not localized: %s", res.Body)
+	}
+	history = request("history", "{}", origin, signed, http.StatusOK).Body.String()
+	if !strings.Contains(history, "Консультація офтальмолога без огляду очного дна") {
+		t.Fatalf("stored history label was not localized: %s", history)
+	}
+	watch, err = db.Watch(ctx, id)
+	if err != nil || watch.ServiceName != "Konsultacja dermatologiczna" {
+		t.Fatalf("stored Polish label changed: %q, %v", watch.ServiceName, err)
 	}
 }

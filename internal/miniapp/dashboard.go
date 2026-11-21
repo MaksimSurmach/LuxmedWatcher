@@ -7,11 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"slices"
 	"time"
 	"unicode/utf8"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
@@ -93,6 +96,9 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
+	for i := range watches {
+		watches[i].ServiceName = procedures.Name(user.Locale, watches[i].ServiceName)
+	}
 	reply(w, http.StatusOK, struct {
 		Watches        []domain.Watch
 		Locale         string
@@ -122,7 +128,7 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 	}
 	slots := make([]dashboardHistory, 0, min(pageSize, len(items)))
 	for _, item := range items[:min(pageSize, len(items))] {
-		slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, item.ServiceName,
+		slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, procedures.Name(user.Locale, item.ServiceName),
 			item.DoctorName, item.FacilityName, item.Address, item.Status})
 	}
 	reply(w, http.StatusOK, struct {
@@ -150,7 +156,7 @@ type catalogInput struct {
 	Offset    int
 }
 
-func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, _ domain.User) {
+func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user domain.User) {
 	var input catalogInput
 	if !decodeDashboard(w, r, &input) {
 		return
@@ -173,7 +179,10 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, _ domain.
 		return
 	}
 	const pageSize = 24
-	items, err := d.db.SearchProceduresPage(ctx, city.ID, input.Query, pageSize+1, input.Offset)
+	items, err := procedures.Search(ctx, d.db, city.ID, user.Locale, input.Query, pageSize+1, input.Offset)
+	for i := range items {
+		items[i].Name = procedures.Name(user.Locale, items[i].Name)
+	}
 	dashboardResult(w, struct {
 		Items []domain.Procedure
 		More  bool
@@ -213,9 +222,7 @@ func (d *dashboard) settings(w http.ResponseWriter, r *http.Request, user domain
 	if !decodeDashboard(w, r, &input) {
 		return
 	}
-	switch input.Locale {
-	case "ru", "en", "pl":
-	default:
+	if !slices.Contains(i18n.SupportedLocales, input.Locale) {
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
@@ -258,12 +265,15 @@ func (d *dashboard) account(w http.ResponseWriter, r *http.Request, _ domain.Use
 	}
 }
 
-func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, _ domain.User) {
+func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User) {
 	if !authorizedUser(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, d.cfg.OwnerID, time.Now(), d.key) {
 		reply(w, http.StatusUnauthorized, nil)
 		return
 	}
 	link, err := d.connect(r.Context())
+	if err == nil {
+		link += "&lang=" + i18n.Normalize(user.Locale, "pl")
+	}
 	dashboardResult(w, map[string]string{"url": link}, err)
 }
 

@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 )
 
 type Config struct {
@@ -66,8 +69,8 @@ func LoadConfig() (Config, error) {
 	if cfg.TelegramToken == "" {
 		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
 	}
-	if cfg.DefaultLocale != "en" && cfg.DefaultLocale != "ru" && cfg.DefaultLocale != "pl" {
-		return Config{}, fmt.Errorf("DEFAULT_LOCALE must be one of en, ru, pl")
+	if !slices.Contains(i18n.SupportedLocales, cfg.DefaultLocale) {
+		return Config{}, fmt.Errorf("DEFAULT_LOCALE must be one of %s", strings.Join(i18n.SupportedLocales, ", "))
 	}
 	if cfg.MinimumInterval < time.Second || cfg.PollTimeout < 1 || cfg.PollTimeout > 60 || cfg.NotificationCooldown < 0 {
 		return Config{}, fmt.Errorf("invalid check interval, polling timeout or notification cooldown")

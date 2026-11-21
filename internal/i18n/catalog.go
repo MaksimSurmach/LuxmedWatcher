@@ -7,15 +7,20 @@ import (
 	"strings"
 )
 
-//go:embed locales/*.json
+//go:embed locales/*.json web/*.json
 var localeFS embed.FS
+
+// Web returns the UI dictionary for a supported locale.
+func Web(locale string) ([]byte, error) {
+	return localeFS.ReadFile("web/" + Normalize(locale, "pl") + ".json")
+}
 
 type Catalog struct {
 	defaultLocale string
 	messages      map[string]map[string]string
 }
 
-var SupportedLocales = []string{"en", "ru", "pl"}
+var SupportedLocales = []string{"pl", "en", "ru", "be", "uk"}
 
 func Load(defaultLocale string) (*Catalog, error) {
 	c := &Catalog{defaultLocale: Normalize(defaultLocale, "ru"), messages: make(map[string]map[string]string)}
@@ -38,8 +43,10 @@ func Load(defaultLocale string) (*Catalog, error) {
 
 func Normalize(locale string, fallback string) string {
 	locale = strings.ToLower(strings.TrimSpace(locale))
-	if len(locale) > 2 {
-		locale = locale[:2]
+	if base, _, found := strings.Cut(locale, "-"); found {
+		locale = base
+	} else if base, _, found := strings.Cut(locale, "_"); found {
+		locale = base
 	}
 	for _, supported := range SupportedLocales {
 		if locale == supported {

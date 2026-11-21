@@ -1,6 +1,7 @@
 import RFB from '/vendor/core/rfb.js';
 import keysyms from '/vendor/core/input/keysymdef.js';
 import { initLogging } from '/vendor/core/util/logging.js';
+import { initialLanguage, loadLanguage, t } from '/language.js';
 
 initLogging('none');
 
@@ -14,42 +15,6 @@ if (locationURL.searchParams.has('ticket')) {
   history.replaceState(history.state, '', locationURL);
 }
 
-const copy = {
-  en: {
-    title: 'Sign in to LuxMed', screen: 'LuxMed browser', close: 'Close', keyboard: 'Keyboard',
-    keyboardLabel: 'Tap a field in LuxMed, then type here.', backspace: 'Backspace',
-    zoomIn: 'Zoom in', fit: 'Fit to screen', zoomed: 'Drag to pan. Use the arrows to scroll the page.',
-    scrollUp: 'Scroll page up', scrollDown: 'Scroll page down',
-    starting: 'Connecting…', connected: 'Swipe or use the arrows to scroll the page.',
-    missing: 'Open a new sign-in link from your private bot chat.',
-    failed: 'Connection failed. Ask the bot for a new link.',
-    disconnected: 'The sign-in window is closed. Return to the bot.',
-  },
-  ru: {
-    title: 'Вход в LuxMed', screen: 'Окно LuxMed', close: 'Закрыть', keyboard: 'Клавиатура',
-    keyboardLabel: 'Коснитесь поля в LuxMed, затем печатайте здесь.', backspace: 'Стереть',
-    zoomIn: 'Увеличить', fit: 'По размеру экрана', zoomed: 'Перетаскивайте экран. Стрелки прокручивают страницу.',
-    scrollUp: 'Прокрутить страницу вверх', scrollDown: 'Прокрутить страницу вниз',
-    starting: 'Подключение…', connected: 'Прокручивайте страницу свайпом или стрелками.',
-    missing: 'Откройте новую ссылку на вход из личного чата с ботом.',
-    failed: 'Не удалось подключиться. Запросите у бота новую ссылку.',
-    disconnected: 'Окно входа закрыто. Вернитесь к боту.',
-  },
-  pl: {
-    title: 'Zaloguj się do LUX MED', screen: 'Okno LUX MED', close: 'Zamknij', keyboard: 'Klawiatura',
-    keyboardLabel: 'Dotknij pola w LUX MED, a następnie pisz tutaj.', backspace: 'Usuń',
-    zoomIn: 'Powiększ', fit: 'Dopasuj do ekranu', zoomed: 'Przeciągaj obraz. Strzałki przewijają stronę.',
-    scrollUp: 'Przewiń stronę w górę', scrollDown: 'Przewiń stronę w dół',
-    starting: 'Łączenie…', connected: 'Przesuń palcem lub użyj strzałek, aby przewinąć stronę.',
-    missing: 'Otwórz nowy link do logowania z prywatnej rozmowy z botem.',
-    failed: 'Nie udało się połączyć. Poproś bota o nowy link.',
-    disconnected: 'Okno logowania zamknięte. Wróć do bota.',
-  },
-};
-const language = (telegram?.initDataUnsafe?.user?.language_code ?? navigator.language).slice(0, 2);
-const labels = Object.hasOwn(copy, language) ? copy[language] : copy.en;
-document.documentElement.lang = Object.hasOwn(copy, language) ? language : 'en';
-document.title = labels.title;
 const element = (id) => document.getElementById(id);
 const status = element('status');
 const screen = element('screen');
@@ -58,14 +23,22 @@ const keyboard = element('keyboard');
 const typing = element('typing');
 const keys = element('keys');
 const zoom = element('zoom');
-for (const id of ['title', 'close', 'keyboard', 'keyboardLabel', 'backspace']) {
-  element(id).textContent = labels[id];
+const label = (name) => t(`viewer.${name}`);
+
+function renderLanguage() {
+  const labels = {
+    title: 'title', close: 'close', keyboard: 'keyboard', keyboardLabel: 'keyboard_hint',
+    backspace: 'backspace', 'tab-key': 'tab_key', 'enter-key': 'enter_key',
+  };
+  for (const [id, key] of Object.entries(labels)) element(id).textContent = label(key);
+  document.title = label('title');
+  screen.setAttribute('aria-label', label('screen'));
+  element('scroll-up').setAttribute('aria-label', label('scroll_up'));
+  element('scroll-down').setAttribute('aria-label', label('scroll_down'));
+  zoom.textContent = label('zoom_in');
+  status.textContent = label('starting');
 }
-screen.setAttribute('aria-label', labels.screen);
-element('scroll-up').setAttribute('aria-label', labels.scrollUp);
-element('scroll-down').setAttribute('aria-label', labels.scrollDown);
-zoom.textContent = labels.zoomIn;
-status.textContent = labels.starting;
+
 telegram?.ready();
 telegram?.expand();
 window.visualViewport?.addEventListener('resize', () => {
@@ -91,19 +64,30 @@ function close(message) {
   keys.value = '';
   typing.hidden = true;
   controls.hidden = true;
-  status.textContent = message;
+  status.textContent = label(message) || 'Nie udało się wczytać okna logowania.';
 }
 
 async function start() {
+  try {
+    await loadLanguage(initialLanguage(telegram, locationURL.searchParams.get('lang')));
+    renderLanguage();
+  } catch {
+    close('failed');
+    return;
+  }
+  if (closed) {
+    status.textContent = label('disconnected');
+    return;
+  }
   if (!initData || !ticket) {
-    status.textContent = labels.missing;
+    status.textContent = label('missing');
     return;
   }
   if (!window.isSecureContext) {
-    close(labels.failed);
+    close('failed');
     return;
   }
-  startupTimer = setTimeout(() => close(labels.failed), 30_000);
+  startupTimer = setTimeout(() => close('failed'), 30_000);
   try {
     const response = await fetch('/api/session', {
       method: 'POST',
@@ -128,14 +112,14 @@ async function start() {
       if (closed) return;
       clearTimeout(startupTimer);
       connected = true;
-      status.textContent = labels.connected;
+      status.textContent = label('connected');
       controls.hidden = false;
-        if (telegram?.isVersionAtLeast?.('7.7')) telegram.disableVerticalSwipes();
+      if (telegram?.isVersionAtLeast?.('7.7')) telegram.disableVerticalSwipes();
       if (matchMedia('(pointer: fine)').matches) viewer.focus({ preventScroll: true });
     });
-    viewer.addEventListener('disconnect', () => close(connected ? labels.disconnected : labels.failed));
+    viewer.addEventListener('disconnect', () => close(connected ? 'disconnected' : 'failed'));
   } catch {
-    close(labels.failed);
+    close('failed');
   }
 }
 
@@ -150,14 +134,14 @@ function sendText() {
 }
 
 element('close').addEventListener('click', () => {
-  close(labels.disconnected);
+  close('disconnected');
   if (returnToApp) {
     location.replace('/app?tab=settings' + location.hash);
   } else {
     telegram?.close();
   }
 });
-window.addEventListener('pagehide', () => close(labels.disconnected));
+window.addEventListener('pagehide', () => close('disconnected'));
 keyboard.addEventListener('click', () => {
   typing.hidden = !typing.hidden;
   keyboard.setAttribute('aria-expanded', String(!typing.hidden));
@@ -229,9 +213,9 @@ zoom.addEventListener('click', () => {
   viewer.scaleViewport = !zoomed;
   viewer.clipViewport = zoomed;
   viewer.dragViewport = zoomed;
-  zoom.textContent = zoomed ? labels.fit : labels.zoomIn;
+  zoom.textContent = label(zoomed ? 'fit' : 'zoom_in');
   zoom.setAttribute('aria-pressed', String(zoomed));
-  status.textContent = zoomed ? labels.zoomed : labels.connected;
+  status.textContent = label(zoomed ? 'zoomed' : 'connected');
 });
 
 void start();

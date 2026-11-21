@@ -20,6 +20,7 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
@@ -165,7 +166,7 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 	var text strings.Builder
 	count := max(total, len(histories))
 	title := b.catalog.T(locale, "notification.title", count)
-	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(watch.Name, 140)))
+	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(locale, watch), 240)))
 	preview := histories[:min(10, len(histories))]
 	for _, item := range preview {
 		fmt.Fprintf(&text, "\n\n<b>%s</b>", item.DateTime.In(luxmed.Location()).Format("02.01.2006 · 15:04"))
@@ -1427,7 +1428,7 @@ func (b *Bot) showProcedureSearchResultsPage(ctx context.Context, user domain.Us
 	page = min(max(page, 0), 10000)
 
 	offset := page * pageSize
-	procedures, err := b.db.SearchProceduresPage(ctx, state.Watch.CityID, query, pageSize+1, offset)
+	procedures, err := procedures.Search(ctx, b.db, state.Watch.CityID, user.Locale, query, pageSize+1, offset)
 
 	b.logger.Info(
 		"search procedures page",
@@ -1468,12 +1469,12 @@ func (b *Bot) showProcedureSearchResultsPage(ctx context.Context, user domain.Us
 	b.sendProcedureOptions(user, title, procedures, procedureResultsKeyboard(procedures, previousCallback, nextCallback, b.catalog, user.Locale))
 }
 
-func (b *Bot) sendProcedureOptions(user domain.User, title string, procedures []domain.Procedure, markup tgbotapi.InlineKeyboardMarkup) {
+func (b *Bot) sendProcedureOptions(user domain.User, title string, items []domain.Procedure, markup tgbotapi.InlineKeyboardMarkup) {
 	var lines []string
 	lines = append(lines, strings.TrimSpace(title))
 
-	for i, proc := range procedures {
-		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, proc.Name, proc.ID))
+	for i, proc := range items {
+		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, procedures.Name(user.Locale, proc.Name), proc.ID))
 	}
 
 	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)

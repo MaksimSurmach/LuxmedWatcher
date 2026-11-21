@@ -1,3 +1,5 @@
+import { initialLanguage, language, languages, loadLanguage, t } from '/language.js';
+
 const telegram = window.Telegram?.WebApp;
 const main = document.querySelector('#main');
 const navigation = document.querySelector('#navigation');
@@ -9,12 +11,14 @@ const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 })[char]);
 const localDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Warsaw' });
-const shortDate = new Intl.DateTimeFormat('ru', { timeZone: 'Europe/Warsaw', day: 'numeric', month: 'short' });
-const clock = new Intl.DateTimeFormat('ru', { timeZone: 'Europe/Warsaw', hour: '2-digit', minute: '2-digit' });
 const dateOnly = (date) => date ? localDate.format(new Date(date)) : '';
 const dateText = (date) => shortDate.format(new Date(date));
-const weekdays = ['Каждый день', 'Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
-const titles = { watches: 'Поиски', history: 'Найденное', settings: 'Настройки' };
+const text = (key, values) => escape(t(key, values));
+const tabs = ['watches', 'history', 'settings'];
+const titleFor = (tab) => t(`tabs.${tab}`);
+let shortDate;
+let clock;
+let weekdays;
 let state;
 let cities;
 let tab = 'watches';
@@ -24,6 +28,20 @@ let renderID = 0;
 
 for (const target of document.querySelectorAll('[data-icon]')) target.innerHTML = icon(target.dataset.icon);
 
+function renderLanguage() {
+  const timeZone = 'Europe/Warsaw';
+  shortDate = new Intl.DateTimeFormat(language, { timeZone, day: 'numeric', month: 'short' });
+  clock = new Intl.DateTimeFormat(language, { timeZone, hour: '2-digit', minute: '2-digit' });
+  const weekday = new Intl.DateTimeFormat(language, { timeZone, weekday: 'short' });
+  // 1 January 2024 was a Monday, matching the schedule’s weekday order.
+  weekdays = [t('editor.every_day'), ...Array.from({ length: 7 }, (_, index) =>
+    weekday.format(Date.UTC(2024, 0, index + 1)))];
+  navigation.setAttribute('aria-label', t('dashboard.navigation'));
+  for (const button of navigation.querySelectorAll('button')) {
+    button.lastElementChild.textContent = titleFor(button.dataset.tab);
+  }
+}
+
 function flash(message) {
   clearTimeout(flashTimer);
   announcement.textContent = message;
@@ -31,18 +49,23 @@ function flash(message) {
 }
 
 async function api(action, data = {}) {
-  const response = await fetch(`/api/dashboard/${action}`, {
-    method: 'POST', redirect: 'error', cache: 'no-store',
-    headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': telegram.initData },
-    body: JSON.stringify(data), signal: AbortSignal.timeout(19_000),
-  });
-  if (response.status === 204) return;
-  if (response.ok) return response.json();
-  if (response.status === 401 || response.status === 403) throw new Error('Откройте приложение заново из личного чата с ботом.');
-  if (response.status === 409) throw new Error('Войдите в LuxMed через настройки, затем повторите.');
-  if (response.status === 400) throw new Error('Проверьте заполненные поля.');
-  if (response.status === 404) throw new Error('Данные изменились. Откройте экран заново.');
-  throw new Error('Сервис временно недоступен. Попробуйте ещё раз.');
+  let response;
+  try {
+    response = await fetch(`/api/dashboard/${action}`, {
+      method: 'POST', redirect: 'error', cache: 'no-store',
+      headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': telegram.initData },
+      body: JSON.stringify(data), signal: AbortSignal.timeout(19_000),
+    });
+    if (response.status === 204) return;
+    if (response.ok) return await response.json();
+  } catch {
+    throw new Error(t('error.unavailable'));
+  }
+  if (response.status === 401 || response.status === 403) throw new Error(t('error.reopen'));
+  if (response.status === 409) throw new Error(t('error.connect_first'));
+  if (response.status === 400) throw new Error(t('error.invalid_fields'));
+  if (response.status === 404) throw new Error(t('error.stale'));
+  throw new Error(t('error.unavailable'));
 }
 
 async function run(button, action, errorTarget) {
@@ -67,32 +90,31 @@ function show(title, html, focus = true) {
 }
 
 function accountNotice() {
-  const labels = { unchecked: 'Аккаунт LuxMed', connected: 'LuxMed подключён', needs_login: 'Войдите в LuxMed' };
-  return `<div class="notice ${account}">${icon(account === 'connected' ? 'check' : 'time')}${labels[account]}</div>`;
+  return `<div class="notice ${account}">${icon(account === 'connected' ? 'check' : 'time')}${text(`account.${account}`)}</div>`;
 }
 
 function watchCard(watch) {
   const active = watch.Status === 'active';
   const dates = watch.DateFrom && watch.DateTo
     ? `${dateText(watch.DateFrom)} — ${dateText(watch.DateTo)}`
-    : `Период поиска: ${watch.NextDays} дн.`;
+    : text('watches.period_days', { days: watch.NextDays });
   const lastRun = watch.LastCheckedAt ? `${dateText(watch.LastCheckedAt)}, ${clock.format(new Date(watch.LastCheckedAt))}` : '';
   return `<article class="card">
     <div class="card-head"><h2><button type="button" class="watch-open" data-edit="${watch.ID}">${escape(watch.ServiceName || watch.Name)}</button></h2>
-      <span class="badge ${active ? 'active' : ''}">${active ? 'Активен' : 'На паузе'}</span></div>
+      <span class="badge ${active ? 'active' : ''}">${text(active ? 'watches.active' : 'watches.paused')}</span></div>
     <p class="meta">${icon('pin')}${escape(watch.CityName)}</p>
     <p class="meta">${icon('calendar')}${dates}</p>
     ${watch.DoctorName ? `<p class="meta">${escape(watch.DoctorName)}</p>` : ''}
-    ${lastRun ? `<p class="meta">${watch.LastError ? 'Ошибка проверки' : 'Проверено'} · ${lastRun}</p>` : ''}
-    <div class="actions"><button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}">${active ? 'Приостановить' : 'Возобновить'}</button></div>
+    ${lastRun ? `<p class="meta">${text(watch.LastError ? 'watches.check_error' : 'watches.checked')} · ${lastRun}</p>` : ''}
+    <div class="actions"><button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}">${text(active ? 'watches.pause' : 'watches.resume')}</button></div>
   </article>`;
 }
 
 function watches() {
   const items = state.Watches ?? [];
-  show(titles.watches, `<div class="stack">${accountNotice()}
-    <button type="button" class="primary" id="new-watch">${icon('plus')}Новый поиск</button>
-    ${items.length ? items.map(watchCard).join('') : '<div class="card empty"><h2>Поисков пока нет</h2><p>Выберите услугу и даты. Бот пришлёт сообщение, когда найдёт слоты.</p></div>'}
+  show(titleFor('watches'), `<div class="stack">${accountNotice()}
+    <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
+    ${items.length ? items.map(watchCard).join('') : `<div class="card empty"><h2>${text('watches.empty')}</h2><p>${text('watches.empty_hint')}</p></div>`}
   </div>`);
   main.querySelector('#new-watch').onclick = () => void editor();
   for (const button of main.querySelectorAll('[data-edit]')) {
@@ -112,19 +134,19 @@ function slotCard(slot) {
   const parts = shortDate.formatToParts(date);
   const part = (name) => parts.find((item) => item.type === name)?.value;
   return `<article class="card slot">
-    <div class="date-tile"><strong>${part('day')}</strong>${escape(part('month'))}</div>
+    <div class="date-tile"><strong>${escape(part('day'))}</strong>${escape(part('month'))}</div>
     <div>
       <h2>${clock.format(date)}</h2>
-      <h3>${escape(slot.Service || 'Приём')}</h3>
+      <h3>${escape(slot.Service || t('history.appointment'))}</h3>
       ${[slot.Doctor, slot.Facility, slot.Address].filter(Boolean).map((line) => `<p class="meta">${escape(line)}</p>`).join('')}
-      ${expired ? '<p class="muted">Слот уже недоступен</p>' : ''}
+      ${expired ? `<p class="muted">${text('history.expired')}</p>` : ''}
     </div>
-    ${expired ? '' : `<a class="flat" href="${portal}" target="_blank" rel="noopener">Открыть LuxMed ${icon('link')}</a>`}
+    ${expired ? '' : `<a class="flat" href="${portal}" target="_blank" rel="noopener">${text('history.open_portal')} ${icon('link')}</a>`}
   </article>`;
 }
 
 async function historyScreen(id) {
-  show(titles.history, '<div class="stack" id="slots"><p class="muted">Загружаем историю…</p></div>');
+  show(titleFor('history'), `<div class="stack" id="slots"><p class="muted">${text('history.loading')}</p></div>`);
   const results = main.querySelector('#slots');
   async function append(offset) {
     const { Slots, More } = await api('history', { Offset: offset });
@@ -132,9 +154,9 @@ async function historyScreen(id) {
     results.querySelector('button')?.remove();
     const cards = Slots.map(slotCard).join('');
     if (!offset) results.replaceChildren();
-    results.insertAdjacentHTML('beforeend', cards || '<div class="card empty"><h2>Найденных слотов пока нет</h2><p>Здесь появятся результаты ваших поисков.</p></div>');
+    results.insertAdjacentHTML('beforeend', cards || `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`);
     if (More) {
-      results.insertAdjacentHTML('beforeend', '<button class="secondary" type="button">Показать ещё</button>');
+      results.insertAdjacentHTML('beforeend', `<button class="secondary" type="button">${text('common.more')}</button>`);
       const next = results.lastElementChild;
       next.onclick = () => void run(next, () => append(offset + Slots.length));
     }
@@ -154,31 +176,31 @@ function cityOptions(items, selected, placeholder) {
 }
 
 async function settingsScreen(id) {
-  show(titles.settings, `<div class="stack">
+  show(titleFor('settings'), `<div class="stack">
     <section class="card stack">
-      <h2>Аккаунт LuxMed</h2>
+      <h2>${text('account.unchecked')}</h2>
       ${accountNotice()}
-      <button type="button" class="primary" id="connect">Войти в LuxMed ${icon('link')}</button>
-      <button type="button" class="secondary" id="account-check">Проверить подключение</button>
+      <button type="button" class="primary" id="connect">${text('account.needs_login')} ${icon('link')}</button>
+      <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
     </section>
     <form class="stack">
       <section class="card stack">
-        <h2>Предпочтения</h2>
-        <label class="field">Город по умолчанию<select name="city"></select></label>
-        <button type="button" class="secondary" id="load-cities" hidden>Загрузить города</button>
-        <label class="field">Язык бота и уведомлений<select name="locale">
-          <option value="ru">Русский</option><option value="pl">Polski</option><option value="en">English</option>
+        <h2>${text('settings.preferences')}</h2>
+        <label class="field">${text('settings.default_city')}<select name="city"></select></label>
+        <button type="button" class="secondary" id="load-cities" hidden>${text('settings.load_cities')}</button>
+        <label class="field">${text('settings.language')}<select name="locale">
+          ${Object.entries(languages).map(([code, name]) => `<option value="${code}" lang="${code}">${escape(name)}</option>`).join('')}
         </select></label>
       </section>
       <p class="muted error" data-error role="status"></p>
-      <button type="submit" class="primary">Сохранить</button>
+      <button type="submit" class="primary">${text('common.save')}</button>
     </form></div>`);
   const form = main.querySelector('form');
   const error = form.querySelector('[data-error]');
   const loadCities = main.querySelector('#load-cities');
   const selected = { ID: state.CityID, Name: state.CityName };
   function fillCities(items) {
-    form.elements.city.innerHTML = cityOptions(items, selected, 'Не выбран');
+    form.elements.city.innerHTML = cityOptions(items, selected, t('settings.no_city'));
     form.elements.city.value = selected.ID ?? 0;
   }
   fillCities(cities ?? []);
@@ -190,20 +212,20 @@ async function settingsScreen(id) {
       loadCities.hidden = true;
     }
   }, error);
-  form.elements.locale.value = state.Locale;
+  form.elements.locale.value = Object.hasOwn(languages, state.Locale) ? state.Locale : language;
   form.onsubmit = (event) => {
     event.preventDefault();
     void run(form.querySelector('[type="submit"]'), async () => {
       await api('settings', { Locale: form.elements.locale.value, CityID: Number(form.elements.city.value) });
       await update('settings');
-      flash('Настройки сохранены');
+      flash(t('settings.saved'));
     }, error);
   };
   const connect = main.querySelector('#connect');
   connect.onclick = () => void run(connect, async () => {
     const { url } = await api('connect');
     const target = new URL(url);
-    if (target.origin !== location.origin || target.pathname !== '/') throw new Error('Ссылка на вход недоступна.');
+    if (target.origin !== location.origin || target.pathname !== '/') throw new Error(t('error.link'));
     target.searchParams.set('return', 'app');
     target.hash = location.hash;
     location.assign(target.href);
@@ -220,8 +242,8 @@ async function settingsScreen(id) {
 
 async function editor(watch) {
   const id = ++renderID;
-  const title = watch ? 'Настроить поиск' : 'Новый поиск';
-  show(title, '<p class="muted">Загружаем города…</p>');
+  const title = t(watch ? 'editor.edit' : 'watches.new');
+  show(title, `<p class="muted">${text('editor.loading_cities')}</p>`);
   let options;
   try {
     options = await getCities();
@@ -236,39 +258,39 @@ async function editor(watch) {
   let facilities = new Set(watch?.FacilityIDs);
   const existingHours = new Map((watch?.TimeWindows ?? []).map((window) => [window.weekday, window]));
   show(title, `<form class="stack">
-    <fieldset class="card stack"><legend>Что искать</legend>
-      <label class="field">Город<select name="city" required>${cityOptions(options, city, 'Выберите город')}</select></label>
-      <label class="field">Услуга<input type="search" name="query" placeholder="Например, Dermatolog" maxlength="80" autocomplete="off"></label>
-      <button type="button" class="secondary" id="search-services">Найти услугу</button>
+    <fieldset class="card stack"><legend>${text('editor.what')}</legend>
+      <label class="field">${text('editor.city')}<select name="city" required>${cityOptions(options, city, t('editor.choose_city'))}</select></label>
+      <label class="field">${text('editor.service')}<input type="search" name="query" placeholder="${text('editor.service_placeholder')}" maxlength="80" autocomplete="off"></label>
+      <button type="button" class="secondary" id="search-services">${text('editor.find_service')}</button>
       <div class="options" id="services"></div>
       <p class="meta" id="selected-service"></p>
-      <button type="button" class="secondary" id="providers">Выбрать врача и клиники</button>
+      <button type="button" class="secondary" id="providers">${text('editor.choose_providers')}</button>
       <div class="stack" id="provider-options"></div>
     </fieldset>
-    <fieldset class="card stack"><legend>Когда искать</legend>
-      <label class="field">Период<select name="dateMode"><option value="days">Ближайшие дни</option><option value="range">Конкретные даты</option></select></label>
-      <label class="field" id="days">Дней вперёд<input name="days" type="number" min="1" max="90" value="${watch?.NextDays || 14}"></label>
+    <fieldset class="card stack"><legend>${text('editor.when')}</legend>
+      <label class="field">${text('editor.period')}<select name="dateMode"><option value="days">${text('editor.upcoming')}</option><option value="range">${text('editor.date_range')}</option></select></label>
+      <label class="field" id="days">${text('editor.days_ahead')}<input name="days" type="number" min="1" max="90" value="${watch?.NextDays || 14}"></label>
       <div class="columns" id="range" hidden>
-        <label class="field">С<input name="from" type="date" value="${dateOnly(watch?.DateFrom)}"></label>
-        <label class="field">По<input name="to" type="date" value="${dateOnly(watch?.DateTo)}"></label>
+        <label class="field">${text('editor.from')}<input name="from" type="date" value="${dateOnly(watch?.DateFrom)}"></label>
+        <label class="field">${text('editor.to')}<input name="to" type="date" value="${dateOnly(watch?.DateTo)}"></label>
       </div>
-      <details><summary>Дни недели и часы</summary>
-        <p class="muted">Выберите «Каждый день» или отдельные дни. Без выбора поиск идёт в любое время.</p>
+      <details><summary>${text('editor.days_and_hours')}</summary>
+        <p class="muted">${text('editor.hours_hint')}</p>
         ${weekdays.map((day, index) => {
           const window = existingHours.get(index);
           return `<div class="time-row" data-day="${index}">
-            <label class="option"><input type="checkbox" ${window ? 'checked' : ''}>${day}</label>
-            <input type="time" aria-label="${day}, с" value="${escape(window?.from || '00:00')}">
-            <input type="time" aria-label="${day}, по" value="${escape(window?.to || '23:59')}">
+            <label class="option"><input type="checkbox" ${window ? 'checked' : ''}>${escape(day)}</label>
+            <input type="time" aria-label="${text('editor.time_from', { day })}" value="${escape(window?.from || '00:00')}">
+            <input type="time" aria-label="${text('editor.time_to', { day })}" value="${escape(window?.to || '23:59')}">
           </div>`;
         }).join('')}
       </details>
-      <label class="field">Проверять каждые, мин<input name="minutes" type="number" required min="${state.MinimumMinutes}" max="1440" value="${watch ? Math.ceil(watch.CheckIntervalSeconds / 60) : state.DefaultMinutes}"></label>
+      <label class="field">${text('editor.interval')}<input name="minutes" type="number" required min="${state.MinimumMinutes}" max="1440" value="${watch ? Math.ceil(watch.CheckIntervalSeconds / 60) : state.DefaultMinutes}"></label>
     </fieldset>
     <p class="muted error" data-error role="status"></p>
-    <button type="submit" class="primary">Сохранить поиск</button>
-    <button type="button" class="secondary" id="cancel">Отмена</button>
-    ${watch ? '<button type="button" class="flat danger" id="delete">Удалить поиск</button>' : ''}
+    <button type="submit" class="primary">${text('editor.save')}</button>
+    <button type="button" class="secondary" id="cancel">${text('common.cancel')}</button>
+    ${watch ? `<button type="button" class="flat danger" id="delete">${text('editor.delete')}</button>` : ''}
   </form>`);
   const form = main.querySelector('form');
   const fields = form.elements;
@@ -281,7 +303,7 @@ async function editor(watch) {
   let serviceSearchOffset = 0;
 
   function markSelection() {
-    picked.textContent = service ? `Выбрано: ${service.Name}` : 'Выберите услугу из списка.';
+    picked.textContent = service ? t('editor.selected_service', { service: service.Name }) : t('editor.choose_service');
     providers.disabled = !service;
     if (service && (doctor || facilities.size)) {
       providerOptions.textContent = [watch?.DoctorName, ...(watch?.FacilityNames ?? [])].filter(Boolean).join(' · ');
@@ -315,7 +337,7 @@ async function editor(watch) {
   const search = form.querySelector('#search-services');
   async function findServices(append = false) {
     const cityID = Number(fields.city.value);
-    if (!cityID) throw new Error('Сначала выберите город.');
+    if (!cityID) throw new Error(t('error.city_first'));
     if (!append) serviceSearchOffset = 0;
     const seq = ++serviceSearch;
     const { Items, More } = await api('procedures', { CityID: cityID, Query: fields.query.value.trim(), Offset: serviceSearchOffset });
@@ -325,18 +347,18 @@ async function editor(watch) {
     serviceSearchOffset += items.length;
     const html = items.map(({ ID, Name }) => `<button type="button" class="secondary" data-service="${ID}">${escape(Name)}</button>`).join('');
     if (!append) results.replaceChildren();
-    results.insertAdjacentHTML('beforeend', html || '<p class="muted">Услуг с таким названием нет.</p>');
+    results.insertAdjacentHTML('beforeend', html || `<p class="muted">${text('editor.no_services')}</p>`);
     for (const item of items) {
       results.querySelector(`[data-service="${item.ID}"]`).onclick = () => {
         if (service?.ID !== item.ID) resetProviders();
         service = item;
-        if (providerOptions.querySelector('select')) picked.textContent = `Выбрано: ${service.Name}`;
+        if (providerOptions.querySelector('select')) picked.textContent = t('editor.selected_service', { service: service.Name });
         else markSelection();
         results.replaceChildren();
       };
     }
     if (More) {
-      results.insertAdjacentHTML('beforeend', '<button type="button" class="flat" data-more>Показать ещё</button>');
+      results.insertAdjacentHTML('beforeend', `<button type="button" class="flat" data-more>${text('common.more')}</button>`);
       const next = results.lastElementChild;
       next.onclick = () => void run(next, () => findServices(true), error);
     }
@@ -360,10 +382,10 @@ async function editor(watch) {
       const selectedService = service.ID;
       const { Doctors, Facilities } = await api('providers', { CityID: Number(selectedCity), ServiceID: selectedService });
       if (selectedCity !== fields.city.value || selectedService !== service?.ID) return;
-      providerOptions.innerHTML = `<label class="field">Врач<select name="doctor">
-        ${option(0, 'Любой')}${(Doctors ?? []).map((person) => option(person.ID, [person.AcademicTitle, person.FirstName, person.LastName].filter(Boolean).join(' '))).join('')}
+      providerOptions.innerHTML = `<label class="field">${text('editor.doctor')}<select name="doctor">
+        ${option(0, t('editor.any_doctor'))}${(Doctors ?? []).map((person) => option(person.ID, [person.AcademicTitle, person.FirstName, person.LastName].filter(Boolean).join(' '))).join('')}
         </select></label>
-        <div><p class="muted">Клиники. Без выбора поиск идёт во всех.</p>
+        <div><p class="muted">${text('editor.facilities_hint')}</p>
         <div class="options">${(Facilities ?? []).map(({ ID, Name, Address }) => `<label class="option">
           <input type="checkbox" data-facility="${ID}" ${facilities.has(ID) ? 'checked' : ''}><span>${escape(Name)}${Address ? `<br><span class="muted">${escape(Address)}</span>` : ''}</span></label>`).join('')}</div></div>`;
       fields.doctor.value = doctor;
@@ -391,7 +413,7 @@ async function editor(watch) {
   form.onsubmit = (event) => {
     event.preventDefault();
     void run(form.querySelector('[type="submit"]'), async () => {
-      if (!service) throw new Error('Выберите услугу из списка.');
+      if (!service) throw new Error(t('editor.choose_service'));
       const windows = [...form.querySelectorAll('[data-day]')].filter((row) => row.querySelector('[type="checkbox"]').checked).map((row) => {
         const [from, to] = row.querySelectorAll('input[type="time"]');
         return { weekday: Number(row.dataset.day), from: from.value, to: to.value };
@@ -401,23 +423,23 @@ async function editor(watch) {
         FacilityIDs: [...facilities], DateFrom: range ? fields.from.value : '', DateTo: range ? fields.to.value : '',
         NextDays: range ? 0 : Number(fields.days.value), TimeWindows: windows, CheckMinutes: Number(fields.minutes.value) });
       await update('watches');
-      flash('Поиск сохранён');
+      flash(t('watches.saved'));
     }, error);
   };
   form.querySelector('#cancel').onclick = () => void switchTab('watches');
   const remove = form.querySelector('#delete');
   if (remove) remove.onclick = () => {
-    if (!window.confirm('Удалить этот поиск?')) return;
+    if (!window.confirm(t('editor.confirm_delete'))) return;
     void run(remove, async () => {
       await api('status', { ID: watch.ID, Status: 'deleted' });
       await update('watches');
-      flash('Поиск удалён');
+      flash(t('watches.deleted'));
     }, error);
   };
 }
 
 function screenError(title, error, retry) {
-  show(title, `<div class="card stack"><p class="error">${escape(error.message)}</p>${retry ? '<button type="button" class="secondary">Повторить</button>' : ''}</div>`);
+  show(title, `<div class="card stack"><p class="error">${escape(error.message)}</p>${retry ? `<button type="button" class="secondary">${text('common.retry') || 'Spróbuj ponownie'}</button>` : ''}</div>`);
   if (retry) main.querySelector('button').onclick = retry;
 }
 
@@ -433,28 +455,42 @@ async function switchTab(next) {
     if (tab === 'history') await historyScreen(id);
     if (tab === 'settings') await settingsScreen(id);
   } catch (error) {
-    if (id === renderID) screenError(titles[next], error, () => switchTab(next));
+    if (id === renderID) screenError(titleFor(next), error, () => switchTab(next));
   }
 }
 
 async function update(next) {
   state = await api('load');
+  await loadLanguage(state.Locale);
+  renderLanguage();
   navigation.hidden = false;
   await switchTab(next);
 }
 
-function start() {
-  if (!telegram?.initData) {
-    screenError('Luxmed Watcher', new Error('Откройте приложение командой /app в личном чате с ботом.'));
+async function start() {
+  try {
+    await loadLanguage(initialLanguage(telegram));
+  } catch {
+    screenError('Luxmed Watcher', new Error('Nie udało się wczytać aplikacji.'), start);
     return;
   }
-  telegram.ready();
-  telegram.expand();
-  telegram.enableVerticalSwipes?.();
+  renderLanguage();
+  if (!telegram?.initData) {
+    screenError('Luxmed Watcher', new Error(t('error.open_from_bot')));
+    return;
+  }
+  show(titleFor('watches'), `<p>${text('dashboard.loading')}</p>`, false);
   const initial = new URLSearchParams(location.search).get('tab');
-  update(Object.hasOwn(titles, initial) ? initial : 'watches')
-    .catch((error) => screenError('Luxmed Watcher', error, start));
+  try {
+    await update(tabs.includes(initial) ? initial : 'watches');
+  } catch (error) {
+    screenError('Luxmed Watcher', error, start);
+  }
 }
+
+telegram?.ready();
+telegram?.expand();
+telegram?.enableVerticalSwipes?.();
 
 main.addEventListener('click', (event) => {
   const link = event.target.closest('a');
@@ -467,4 +503,4 @@ navigation.onclick = (event) => {
   const button = event.target.closest('[data-tab]');
   if (button) void switchTab(button.dataset.tab);
 };
-start();
+void start();

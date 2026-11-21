@@ -1,0 +1,14 @@
+{
+  "Konsultacja dermatologiczna": {
+    "en": "Dermatology consultation",
+    "ru": "Консультация дерматолога",
+    "be": "Кансультацыя дэрматолага",
+    "uk": "Консультація дерматолога"
+  },
+  "Konsultacja okulistyczna - bez badania dna oka": {
+    "en": "Ophthalmology consultation without a fundus examination",
+    "ru": "Консультация офтальмолога без осмотра глазного дна",
+    "be": "Кансультацыя афтальмолага без агляду вочнага дна",
+    "uk": "Консультація офтальмолога без огляду очного дна"
+  }
+}

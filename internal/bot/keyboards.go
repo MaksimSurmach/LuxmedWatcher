@@ -6,6 +6,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
+	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
 )
 
 func mainKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
@@ -29,9 +30,13 @@ func settingsKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMar
 func languageKeyboard() tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Polski", "lang:pl"),
 			tgbotapi.NewInlineKeyboardButtonData("English", "lang:en"),
 			tgbotapi.NewInlineKeyboardButtonData("Русский", "lang:ru"),
-			tgbotapi.NewInlineKeyboardButtonData("Polski", "lang:pl"),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Беларуская", "lang:be"),
+			tgbotapi.NewInlineKeyboardButtonData("Українська", "lang:uk"),
 		),
 	)
 }
@@ -182,10 +187,10 @@ func procedureSearchKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyb
 	)
 }
 
-func procedureListKeyboard(procedures []domain.Procedure, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
+func procedureListKeyboard(items []domain.Procedure, c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
 	var rows [][]tgbotapi.InlineKeyboardButton
-	for _, proc := range procedures {
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(proc.Name, fmt.Sprintf("proc:%d", proc.ID))))
+	for _, proc := range items {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(procedures.Name(locale, proc.Name), fmt.Sprintf("proc:%d", proc.ID))))
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.search"), "proc:search")))
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")))

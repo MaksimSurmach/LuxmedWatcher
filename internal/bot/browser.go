@@ -8,6 +8,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
@@ -61,7 +62,7 @@ func (b *Bot) showMiniApp(ctx context.Context, user domain.User) {
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
 		return
 	}
-	b.sendMiniApp(user, "flow.browser.miniapp", "button.open_luxmed", link)
+	b.sendMiniApp(user, "flow.browser.miniapp", "button.open_luxmed", link+"&lang="+i18n.Normalize(user.Locale, "pl"))
 }
 
 // The pinned Bot API client predates the web_app field.
