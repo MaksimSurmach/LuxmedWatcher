@@ -4,16 +4,9 @@ import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
+import { allowedPortalResources, fetchCatalog } from './portal-api.mjs';
 import { checkPortal, observeSession, portalOrigin } from './session.mjs';
 
-const allowed = new Set([
-  'Dictionary/cities',
-  'Dictionary/serviceVariantsGroups',
-  'Dictionary/facilitiesAndDoctors',
-  'PopularServicesParameters/popularServicesParameters',
-  'terms/index',
-  'terms/oneDayTerms',
-].map(path => `/PatientPortal/NewPortal/${path}`));
 const viewerOrigin = new URL(process.env.LUXMED_VIEWER_URL).origin;
 const context = await chromium.launchPersistentContext('/profile', {
   chromiumSandbox: true,
@@ -45,34 +38,6 @@ async function portalReady(force = false) {
   return status;
 }
 
-async function fetchCatalog(path) {
-  return page.evaluate(async (target) => {
-    const response = await fetch(target, {
-      credentials: 'same-origin', redirect: 'manual',
-      headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
-      signal: AbortSignal.timeout(8_000),
-    });
-    if ([0, 401].includes(response.status)) return { status: 401 };
-    if (!response.ok) return { status: response.status };
-    if (!response.headers.get('Content-Type')?.toLowerCase().includes('json')) return { status: 502 };
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let bytes = 0;
-    let text = '';
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      bytes += value.length;
-      if (bytes > 8 * 1024 * 1024) {
-        await reader.cancel();
-        return { status: 502 };
-      }
-      text += decoder.decode(value, { stream: true });
-    }
-    return { status: 200, body: text + decoder.decode() };
-  }, path);
-}
-
 const api = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, 'http://worker');
@@ -90,7 +55,7 @@ const api = createServer(async (req, res) => {
         busy = false;
       }
     }
-    if (req.method !== 'GET' || (url.pathname !== '/session' && !allowed.has(url.pathname)) || url.search.length > 4096) {
+    if (req.method !== 'GET' || (url.pathname !== '/session' && !allowedPortalResources.has(url.pathname)) || url.search.length > 4096) {
       return reply(res, 404);
     }
     busy = true;
@@ -99,7 +64,7 @@ const api = createServer(async (req, res) => {
       if (status === 'needs_login') return reply(res, 401);
       if (status !== 'ready') return reply(res, 503);
       if (url.pathname === '/session') return reply(res, 200);
-      const result = await fetchCatalog(url.pathname + url.search);
+      const result = await fetchCatalog(page, url.pathname + url.search);
       if (result.status === 401) readyUntil = 0;
       return reply(res, result.status, result.body);
     } finally {

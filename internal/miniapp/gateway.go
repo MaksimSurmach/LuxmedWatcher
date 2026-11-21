@@ -13,7 +13,7 @@ import (
 
 func (a *app) public(web, vendor fs.FS) http.Handler {
 	mux := http.NewServeMux()
-	for _, file := range []string{"index.html", "app.js", "style.css", "dashboard.html", "dashboard.js", "dashboard.css", "language.js"} {
+	for _, file := range []string{"index.html", "app.js", "style.css", "dashboard.html", "dashboard.js", "dashboard.css", "language.js", "screencast.js"} {
 		path := "/" + file
 		switch file {
 		case "index.html":

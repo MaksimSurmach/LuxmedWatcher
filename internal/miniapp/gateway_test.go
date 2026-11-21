@@ -190,3 +190,66 @@ func TestGatewayRoutesIndependentViewerStreams(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedViewerAnnouncesCDPAndUsesPrivateWorkerScope(t *testing.T) {
+	const origin = "https://app.example"
+	const workerOrigin = "http://localhost:18769"
+	key := strings.Repeat("d", 64)
+	workerToken := strings.Repeat("a", 64)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer "+key {
+			t.Error("worker authorization was omitted")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		switch r.URL.Path {
+		case "/accounts/12/viewer":
+			fmt.Fprintf(w, `{"ticket":%q}`, workerToken)
+		case "/accounts/12/vnc":
+			if r.Header.Get("X-Telegram-Init-Data") != "" || r.Header.Get("Sec-WebSocket-Protocol") != "binary, ticket-"+workerToken {
+				t.Error("unexpected viewer proxy headers")
+			}
+			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{OriginPatterns: []string{"localhost:18769"}, Subprotocols: []string{"binary"}})
+			if err == nil {
+				defer conn.CloseNow()
+				_ = conn.Write(r.Context(), websocket.MessageBinary, []byte("frame"))
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer upstream.Close()
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer core.Close()
+	a, err := newApp(Config{
+		Origin: origin, ViewerOrigin: workerOrigin, BotID: 42, DashboardAPI: core.URL, WorkerKey: key,
+		Workers: map[int64]luxmed.BrowserRoute{12: {
+			API: upstream.URL + "/accounts/12", Viewer: upstream.URL + "/accounts/12/vnc", Shared: true,
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a.workers[12].launch = newTicket(time.Minute)
+	res := httptest.NewRecorder()
+	a.exchange(res, httptest.NewRequest(http.MethodPost, "/api/session", nil), 12, a.workers[12].launch.token, "")
+	var body struct{ ViewerToken, Transport string }
+	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil || body.Transport != "cdp" {
+		t.Fatalf("expected CDP session response: %s", res.Body)
+	}
+	server := httptest.NewServer(a.public(fstest.MapFS{}, fstest.MapFS{}))
+	defer server.Close()
+	conn, _, err := websocket.Dial(t.Context(), "ws"+strings.TrimPrefix(server.URL, "http")+"/vnc", &websocket.DialOptions{
+		HTTPHeader:   http.Header{"Origin": {origin}, "Authorization": {"arbitrary"}, "X-Telegram-Init-Data": {"private"}},
+		Subprotocols: []string{"binary", "viewer-" + body.ViewerToken},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	if _, frame, err := conn.Read(t.Context()); err != nil || string(frame) != "frame" {
+		t.Fatalf("scoped websocket did not receive its frame: %q, %v", frame, err)
+	}
+}

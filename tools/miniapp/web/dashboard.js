@@ -5,6 +5,7 @@ const main = document.querySelector('#main');
 const navigation = document.querySelector('#navigation');
 const announcement = document.querySelector('#announcement');
 const portal = 'https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Reservation';
+const patientPortal = 'https://portalpacjenta.luxmed.pl/';
 const icons = { calendar: '▦', history: '▤', settings: '⚙', plus: '+', pin: '⌖', time: '◷', check: '✓', link: '↗' };
 const icon = (name) => `<span class="icon" aria-hidden="true">${icons[name]}</span>`;
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -269,9 +270,11 @@ async function editor(watch) {
       <label class="field">${text('editor.service')}<input type="search" name="query" placeholder="${text('editor.service_placeholder')}" maxlength="80" autocomplete="off"></label>
       <button type="button" class="secondary" id="search-services">${text('editor.find_service')}</button>
       <div class="options" id="services"></div>
-      <p class="meta" id="selected-service"></p>
+      ${watch ? '' : '<div class="quick-services stack" hidden></div>'}
+      <p class="meta" id="selected-service" tabindex="-1"></p>
       <button type="button" class="secondary" id="providers">${text('editor.choose_providers')}</button>
       <div class="stack" id="provider-options"></div>
+      <a class="flat referrals" href="${patientPortal}" target="_blank" rel="noopener">${text('editor.referrals')} ${icon('link')}</a>
     </fieldset>
     <fieldset class="card stack"><legend>${text('editor.when')}</legend>
       <label class="field">${text('editor.period')}<select name="dateMode"><option value="days">${text('editor.upcoming')}</option><option value="range">${text('editor.date_range')}</option></select></label>
@@ -301,24 +304,66 @@ async function editor(watch) {
   const form = main.querySelector('form');
   const fields = form.elements;
   const results = form.querySelector('#services');
+  const quickPicks = form.querySelector('.quick-services');
   const picked = form.querySelector('#selected-service');
   const providers = form.querySelector('#providers');
   const providerOptions = form.querySelector('#provider-options');
   const error = form.querySelector('[data-error]');
   let serviceSearch = 0;
   let serviceSearchOffset = 0;
+  let picksRequest = 0;
 
   function markSelection() {
     picked.textContent = service ? t('editor.selected_service', { service: service.Name }) : t('editor.choose_service');
     providers.disabled = !service;
-    if (service && (doctor || facilities.size)) {
+    if (service && (doctor || facilities.size) && !providerOptions.querySelector('select')) {
       providerOptions.textContent = [watch?.DoctorName, ...(watch?.FacilityNames ?? [])].filter(Boolean).join(' · ');
+    }
+    for (const button of quickPicks?.querySelectorAll('[data-service]') ?? []) {
+      button.setAttribute('aria-pressed', String(Number(button.dataset.service) === service?.ID));
     }
   }
   function resetProviders() {
     doctor = 0;
     facilities = new Set();
     providerOptions.replaceChildren();
+  }
+  function selectService(item) {
+    if (service?.ID !== item.ID) resetProviders();
+    service = item;
+    serviceSearch++;
+    results.replaceChildren();
+    markSelection();
+    picked.focus();
+  }
+  async function loadQuickPicks() {
+    if (!quickPicks) return;
+    const request = ++picksRequest;
+    const cityID = Number(fields.city.value);
+    quickPicks.hidden = true;
+    quickPicks.replaceChildren();
+    if (!cityID) return;
+    try {
+      const { Referred, Recent, Saved, Popular } = await api('procedure-picks', { CityID: cityID });
+      if (id !== renderID || request !== picksRequest) return;
+      const groups = [
+        ['editor.referred_services', Referred],
+        ['editor.recent_services', Recent],
+        ['editor.saved_services', Saved],
+        ['editor.popular_services', Popular],
+      ];
+      for (const [label, items] of groups) {
+        if (!items?.length) continue;
+        quickPicks.insertAdjacentHTML('beforeend', `<section><h2>${text(label)}</h2><div class="actions">${items.map(({ ID, Name }) =>
+          `<button type="button" class="secondary" data-service="${ID}" aria-pressed="false">${escape(Name)}</button>`).join('')}</div></section>`);
+        const group = quickPicks.lastElementChild;
+        for (const item of items) group.querySelector(`[data-service="${item.ID}"]`).onclick = () => selectService(item);
+      }
+      quickPicks.hidden = !quickPicks.childElementCount;
+      markSelection();
+    } catch {
+      // Manual catalog search remains available if quick picks fail.
+    }
   }
   fields.city.value = city.ID || 0;
   fields.city.onchange = () => {
@@ -327,6 +372,7 @@ async function editor(watch) {
     resetProviders();
     results.replaceChildren();
     markSelection();
+    void loadQuickPicks();
   };
   function updateDates() {
     const range = fields.dateMode.value === 'range';
@@ -340,6 +386,7 @@ async function editor(watch) {
   fields.dateMode.onchange = updateDates;
   updateDates();
   markSelection();
+  void loadQuickPicks();
   const search = form.querySelector('#search-services');
   async function findServices(append = false) {
     const cityID = Number(fields.city.value);
@@ -355,13 +402,7 @@ async function editor(watch) {
     if (!append) results.replaceChildren();
     results.insertAdjacentHTML('beforeend', html || `<p class="muted">${text('editor.no_services')}</p>`);
     for (const item of items) {
-      results.querySelector(`[data-service="${item.ID}"]`).onclick = () => {
-        if (service?.ID !== item.ID) resetProviders();
-        service = item;
-        if (providerOptions.querySelector('select')) picked.textContent = t('editor.selected_service', { service: service.Name });
-        else markSelection();
-        results.replaceChildren();
-      };
+      results.querySelector(`[data-service="${item.ID}"]`).onclick = () => selectService(item);
     }
     if (More) {
       results.insertAdjacentHTML('beforeend', `<button type="button" class="flat" data-more>${text('common.more')}</button>`);
@@ -501,9 +542,9 @@ telegram?.enableVerticalSwipes?.();
 
 main.addEventListener('click', (event) => {
   const link = event.target.closest('a');
-  if (link?.href !== portal || !telegram?.openLink) return;
+  if (![portal, patientPortal].includes(link?.href) || !telegram?.openLink) return;
   event.preventDefault();
-  telegram.openLink(portal);
+  telegram.openLink(link.href);
 });
 
 navigation.onclick = (event) => {

@@ -1,0 +1,52 @@
+x-browser-routes: &browser-routes
+  LUXMED_BROWSER_SHARED: "1"
+  LUXMED_BROWSER_ACCOUNT_IDS: ${LUXMED_BROWSER_ACCOUNT_IDS:-}
+  LUXMED_WORKER_KEY: ${LUXMED_WORKER_KEY:?Shared browser worker key required}
+  LUXMED_BROWSER_API_URL: http://browser:8091
+  LUXMED_BROWSER_VIEWER_URL: http://browser:8092/vnc
+
+services:
+  luxmed-watcher:
+    build: .
+    init: true
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      <<: *browser-routes
+      LUXMED_VIEWER_URL: ${LUXMED_VIEWER_URL:-http://localhost:18769}
+    volumes:
+      - watcher-data:/app/data
+    depends_on:
+      - browser
+
+  miniapp-agent:
+    environment: *browser-routes
+
+  browser:
+    build:
+      context: ./tools/browser-session
+      dockerfile: Dockerfile.shared
+      args:
+        LUXMED_BROWSER_BACKEND: ${LUXMED_BROWSER_BACKEND:-chromium}
+    init: true
+    restart: unless-stopped
+    environment:
+      LUXMED_VIEWER_URL: ${LUXMED_VIEWER_URL:-http://localhost:18769}
+      LUXMED_WORKER_KEY: ${LUXMED_WORKER_KEY:?Shared browser worker key required}
+      LUXMED_BROWSER_BACKEND: ${LUXMED_BROWSER_BACKEND:-chromium}
+      STEEL_BASE_URL: ${STEEL_BASE_URL:-}
+      STEEL_CDP_URL: ${STEEL_CDP_URL:-}
+    volumes:
+      - browser-profiles:/profiles
+      - chromium-cache:/browser-cache
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./deploy/homelab/chromium-seccomp.json
+    cap_drop: [ALL]
+    cap_add: [SYS_CHROOT]
+    shm_size: 512mb
+
+volumes:
+  watcher-data:
+  browser-profiles:
+  chromium-cache:

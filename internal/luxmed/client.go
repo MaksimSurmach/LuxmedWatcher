@@ -16,6 +16,7 @@ const (
 	DoctorsAndFacilitiesURL  = "/PatientPortal/NewPortal/Dictionary/facilitiesAndDoctors"
 	RecentSearchesURL        = "/PatientPortal/NewPortal/RecentSearchTermsParameters/recentSearchData?includeRecentSearchParameters=true"
 	PopularServicesURL       = "/PatientPortal/NewPortal/PopularServicesParameters/popularServicesParameters"
+	ReferralServicesURL      = "/PatientPortal/NewPortal/Reservation/GetReferralsForReservation"
 )
 
 type Credentials struct {
@@ -54,12 +55,22 @@ func (c *HTTPClient) GetServices(ctx context.Context) ([]domain.Service, error) 
 }
 
 func (c *HTTPClient) GetRecentProcedures(ctx context.Context) ([]domain.Procedure, error) {
-	var payload any
+	var payload struct {
+		SearchParameters []struct {
+			ServiceVariantID int    `json:"serviceVariantId"`
+			SearchName       string `json:"searchName"`
+		} `json:"searchParameters"`
+	}
 	if err := c.getJSON(ctx, RecentSearchesURL, &payload); err != nil {
 		return nil, err
 	}
-
-	return proceduresFromLuxMedPayload(payload, true), nil
+	items := make([]domain.Procedure, 0, len(payload.SearchParameters))
+	for _, search := range payload.SearchParameters {
+		if search.ServiceVariantID > 0 {
+			items = append(items, domain.Procedure{ID: search.ServiceVariantID, Name: search.SearchName, IsRecent: true})
+		}
+	}
+	return items, nil
 }
 
 func (c *HTTPClient) GetPopularProcedures(ctx context.Context) ([]domain.Procedure, error) {
@@ -68,10 +79,29 @@ func (c *HTTPClient) GetPopularProcedures(ctx context.Context) ([]domain.Procedu
 		return nil, err
 	}
 
-	return proceduresFromLuxMedPayload(payload, false), nil
+	return popularProceduresFromPayload(payload), nil
 }
 
-func proceduresFromLuxMedPayload(payload any, isRecent bool) []domain.Procedure {
+func (c *HTTPClient) GetReferredProcedures(ctx context.Context) ([]domain.Procedure, error) {
+	var payload struct {
+		Referrals []struct {
+			ServiceVariantID int    `json:"serviceVariantId"`
+			ServiceName      string `json:"serviceName"`
+		} `json:"referrals"`
+	}
+	if err := c.getJSON(ctx, ReferralServicesURL, &payload); err != nil {
+		return nil, err
+	}
+	items := make([]domain.Procedure, 0, len(payload.Referrals))
+	for _, referral := range payload.Referrals {
+		if referral.ServiceVariantID > 0 {
+			items = append(items, domain.Procedure{ID: referral.ServiceVariantID, Name: referral.ServiceName})
+		}
+	}
+	return items, nil
+}
+
+func popularProceduresFromPayload(payload any) []domain.Procedure {
 	seen := make(map[int]bool)
 	var procedures []domain.Procedure
 
@@ -92,11 +122,7 @@ func proceduresFromLuxMedPayload(payload any, isRecent bool) []domain.Procedure 
 		}
 
 		seen[id] = true
-		procedures = append(procedures, domain.Procedure{
-			ID:       id,
-			Name:     name,
-			IsRecent: isRecent,
-		})
+		procedures = append(procedures, domain.Procedure{ID: id, Name: name})
 	})
 
 	return procedures

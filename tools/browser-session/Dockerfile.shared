@@ -1,0 +1,11 @@
+FROM node:24-bookworm-slim
+ARG LUXMED_BROWSER_BACKEND=chromium
+WORKDIR /worker
+ENV PLAYWRIGHT_BROWSERS_PATH=/browser-cache
+COPY package*.json ./
+RUN npm ci --omit=dev --ignore-scripts \
+    && if [ "$LUXMED_BROWSER_BACKEND" = chromium ]; then node node_modules/playwright/cli.js install-deps chromium; fi \
+    && install -d -m 700 -o node -g node /profiles /browser-cache
+COPY shared-server.mjs screencast-server.mjs session.mjs portal-api.mjs profile-store.mjs chromium-provider.mjs steel-provider.mjs ./
+USER node
+CMD ["node", "shared-server.mjs"]
