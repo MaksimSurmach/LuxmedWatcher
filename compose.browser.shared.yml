@@ -30,6 +30,7 @@ services:
         LUXMED_BROWSER_BACKEND: ${LUXMED_BROWSER_BACKEND:-chromium}
     init: true
     restart: unless-stopped
+    stop_grace_period: 35s
     environment:
       LUXMED_VIEWER_URL: ${LUXMED_VIEWER_URL:-http://localhost:18769}
       LUXMED_WORKER_KEY: ${LUXMED_WORKER_KEY:?Shared browser worker key required}

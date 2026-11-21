@@ -38,6 +38,13 @@ export async function createChromiumProvider({ profileDir = '/profiles', executa
     return launching;
   }
 
+  async function closeIdleBrowser() {
+    if (accounts.size !== 0 || !browser) return;
+    const idle = browser;
+    browser = undefined;
+    await idle.close().catch(() => {});
+  }
+
   async function openAccount(id, entry) {
     const storageState = await readProfile(profileDir, id);
     const current = await getBrowser();
@@ -67,7 +74,10 @@ export async function createChromiumProvider({ profileDir = '/profiles', executa
         return saved;
       },
       close() {
-        entry.closing ??= saving.then(() => context.close()).finally(() => accounts.delete(id));
+        entry.closing ??= saving.then(() => context.close()).finally(async () => {
+          accounts.delete(id);
+          await closeIdleBrowser();
+        });
         return entry.closing;
       },
     };
@@ -83,8 +93,9 @@ export async function createChromiumProvider({ profileDir = '/profiles', executa
       return openSession(id);
     }
     const entry = {};
-    entry.pending = openAccount(id, entry).catch(error => {
+    entry.pending = openAccount(id, entry).catch(async error => {
       accounts.delete(id);
+      await closeIdleBrowser();
       throw error;
     });
     accounts.set(id, entry);

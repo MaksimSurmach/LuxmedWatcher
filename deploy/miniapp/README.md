@@ -31,6 +31,8 @@ docker compose --env-file .env --env-file .miniapp.env \
   -p luxmed-watcher-mvp -f compose.browser.shared.yml -f compose.miniapp.yml up -d --build
 ```
 
+The shared worker uses direct HTTP for searches, account checks and token renewal. Chromium or Steel opens only for interactive sign-in and MFA. Closing the viewer saves the profile and releases its browser context. The worker serializes HTTP requests and browser access to each account so they share one cookie store.
+
 Shared mode uses the existing watcher database and a new `browser-profiles` volume. Sign in to LuxMed again for each shared profile. To return to the existing noVNC setup, deploy with `compose.browser.yml` and the Mini App overlay. Keep both profile volumes if you plan to switch back.
 
 ## Quick procedure selection
@@ -106,15 +108,15 @@ Use an existing administrator SSH identity. The MCP process inherits the key ins
 
 1. From a phone on cellular data send `/connect` to the bot and open the latest **Open LuxMed** button.
 2. Complete MFA on the LuxMed page in the server's Chromium. Wait for the dashboard, then press **Close** in the Mini App.
-3. Confirm a fresh browser check returns `ready`. Run a read-only search and confirm at least one subsequent scheduled search succeeds after the viewer has closed.
-4. Leave an ordinary scheduled watch enabled while measuring session retention. Record the first successful search, subsequent successful searches and eventual expiration, if observed. Review the worker logs for `luxmed_session_refresh_response`. Keep the existing schedule so the experiment measures normal use.
+3. Confirm **Check connection** reports connected. Check that a subsequent scheduled search reaches the appointment API after the viewer has closed.
+4. Leave an ordinary scheduled watch enabled. In shared mode, compare successive `luxmed_http_refresh` entries with status 200 and a later `expires_at`, and verify subsequent `luxmed_http_search` responses. Keep the existing search schedule so the experiment measures normal use.
 
 ```sh
-docker logs --since 3h luxmed-watcher-mvp-browser-1 | grep -E 'luxmed_session_(check|refresh_response)'
+docker logs --since 3h luxmed-watcher-mvp-browser-1 | grep -E 'luxmed_http_(refresh|search)|luxmed_session_check'
 docker logs --since 3h luxmed-watcher-mvp-luxmed-watcher-1 2>&1 | grep -E 'scheduled slot search completed|watch check'
 ```
 
-Session checks and refresh responses are observations. Continued successful searches prove retention. A successful explicit refresh response provides separate evidence of renewal. A run with no observed refresh calls cannot establish how the portal retained its session. LuxMed controls whether and when a new sign-in is required.
+The shared worker logs a successful refresh after the expiry advances and the new cookies have been saved. `luxmed_http_search` records HTTP 200 from the appointment API. The watcher can still report incomplete coverage for a day. LuxMed controls when a new sign-in is required.
 
 ## Rollback
 
