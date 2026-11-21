@@ -2,6 +2,7 @@ import RFB from '/vendor/core/rfb.js';
 import keysyms from '/vendor/core/input/keysymdef.js';
 import { initLogging } from '/vendor/core/util/logging.js';
 import { initialLanguage, loadLanguage, t } from '/language.js';
+import { Screencast } from '/screencast.js';
 
 initLogging('none');
 
@@ -112,7 +113,7 @@ async function start() {
       return;
     }
     if (!response.ok) throw new Error('Request failed');
-    const { viewerToken } = await response.json();
+    const { viewerToken, transport } = await response.json();
     if (closed) return;
     if (typeof viewerToken !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(viewerToken)) {
       throw new Error('Invalid session');
@@ -120,9 +121,18 @@ async function start() {
 
     const address = new URL('/vnc', location.href);
     address.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const protocols = ['binary', `viewer-${viewerToken}`];
     screen.hidden = false;
-    viewer = new RFB(screen, address.href, { wsProtocols: ['binary', `viewer-${viewerToken}`] });
-    viewer.scaleViewport = true;
+    if (transport === 'cdp') {
+      clearTimeout(startupTimer);
+      startupTimer = setTimeout(() => close('failed'), 90_000);
+      viewer = new Screencast(screen, address.href, protocols);
+    } else if (transport === undefined || transport === 'vnc') {
+      viewer = new RFB(screen, address.href, { wsProtocols: protocols });
+      viewer.scaleViewport = true;
+    } else {
+      throw new Error('Unknown viewer transport');
+    }
     viewer.addEventListener('connect', () => {
       if (closed) return;
       clearTimeout(startupTimer);
@@ -142,10 +152,19 @@ function sendText() {
   const text = keys.value;
   keys.value = '';
   if (!connected) return;
+  if (viewer instanceof Screencast) {
+    viewer.sendText(text);
+    return;
+  }
   for (const character of text) {
     const code = character.codePointAt(0);
     if (code >= 0x20 && code !== 0x7f) viewer.sendKey(keysyms.lookup(code), null);
   }
+}
+
+function sendKey(key, code) {
+  if (viewer instanceof Screencast) viewer.sendKey(key, code || key);
+  else viewer.sendKey(keyCodes[key], code || null);
 }
 
 element('close').addEventListener('click', () => {
@@ -174,12 +193,12 @@ keys.addEventListener('compositionend', sendText);
 keys.addEventListener('keydown', (event) => {
   if (event.isComposing || !connected || !Object.hasOwn(keyCodes, event.key)) return;
   event.preventDefault();
-  viewer.sendKey(keyCodes[event.key], event.code || null);
+  sendKey(event.key, event.code);
 });
 element('remote-keys').addEventListener('click', (event) => {
   const key = event.target.closest('button')?.dataset.key;
   if (!connected || !key) return;
-  viewer.sendKey(keyCodes[key], key);
+  sendKey(key, key);
   keys.focus({ preventScroll: true });
 });
 
@@ -225,9 +244,13 @@ for (const type of ['gesturestart', 'gesturemove', 'gestureend']) {
 zoom.addEventListener('click', () => {
   if (!connected) return;
   zoomed = !zoomed;
-  viewer.scaleViewport = !zoomed;
-  viewer.clipViewport = zoomed;
-  viewer.dragViewport = zoomed;
+  if (viewer instanceof Screencast) {
+    viewer.setZoom(zoomed);
+  } else {
+    viewer.scaleViewport = !zoomed;
+    viewer.clipViewport = zoomed;
+    viewer.dragViewport = zoomed;
+  }
   zoom.textContent = label(zoomed ? 'fit' : 'zoom_in');
   zoom.setAttribute('aria-pressed', String(zoomed));
   status.textContent = label(zoomed ? 'zoomed' : 'connected');

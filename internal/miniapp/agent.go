@@ -25,7 +25,7 @@ import (
 
 type Config struct {
 	Origin, ViewerOrigin, DashboardAPI string
-	TicketKey                          string
+	TicketKey, WorkerKey               string
 	BotID                              int64
 	Workers                            map[int64]luxmed.BrowserRoute
 }
@@ -48,6 +48,7 @@ func newTicket(ttl time.Duration) ticket {
 
 type worker struct {
 	api    string
+	shared bool
 	proxy  *httputil.ReverseProxy
 	launch ticket
 	view   ticket
@@ -86,12 +87,19 @@ func newApp(cfg Config) (*app, error) {
 		}},
 	}
 	for id, route := range cfg.Workers {
-		if id <= 0 || !validURL(route.API, "http", "") || !validURL(route.Viewer, "http", "/vnc") {
+		scope := ""
+		if route.Shared {
+			scope = "/accounts/" + strconv.FormatInt(id, 10)
+			if !luxmed.ValidTicketKey(cfg.WorkerKey) {
+				return nil, errors.New("shared workers require LUXMED_WORKER_KEY")
+			}
+		}
+		if id <= 0 || !validURL(route.API, "http", scope) || !validURL(route.Viewer, "http", scope+"/vnc") {
 			return nil, errors.New("invalid Mini App browser worker")
 		}
 		upstream, _ := url.Parse(route.Viewer)
 		origin := &url.URL{Scheme: upstream.Scheme, Host: upstream.Host}
-		a.workers[id] = &worker{api: route.API, proxy: &httputil.ReverseProxy{
+		a.workers[id] = &worker{api: route.API, shared: route.Shared, proxy: &httputil.ReverseProxy{
 			Rewrite: func(request *httputil.ProxyRequest) {
 				request.SetURL(origin)
 				request.Out.URL.Path = upstream.Path
@@ -187,7 +195,11 @@ func (a *app) exchange(w http.ResponseWriter, r *http.Request, id int64, launch,
 	token := browser.view.token
 	a.views[token] = browser
 	a.mu.Unlock()
-	reply(w, http.StatusOK, map[string]string{"viewerToken": token})
+	result := map[string]string{"viewerToken": token}
+	if browser.shared {
+		result["transport"] = "cdp"
+	}
+	reply(w, http.StatusOK, result)
 }
 
 func (a *app) access(ctx context.Context, initData string) int {
@@ -246,7 +258,7 @@ func (a *app) viewer(w http.ResponseWriter, r *http.Request) {
 		a.mu.Unlock()
 	}()
 
-	workerToken, err := a.workerTicket(r.Context(), browser.api)
+	workerToken, err := a.workerTicket(r.Context(), browser)
 	if err != nil {
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
@@ -256,13 +268,19 @@ func (a *app) viewer(w http.ResponseWriter, r *http.Request) {
 	r.Header.Del("Cookie")
 	r.Header.Del("Authorization")
 	r.Header.Del("X-Telegram-Init-Data")
+	if browser.shared {
+		r.Header.Set("Authorization", "Bearer "+a.config.WorkerKey)
+	}
 	browser.proxy.ServeHTTP(w, r)
 }
 
-func (a *app) workerTicket(ctx context.Context, api string) (string, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, api+"/viewer", nil)
+func (a *app) workerTicket(ctx context.Context, browser *worker) (string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, browser.api+"/viewer", nil)
 	if err != nil {
 		return "", err
+	}
+	if browser.shared {
+		req.Header.Set("Authorization", "Bearer "+a.config.WorkerKey)
 	}
 	res, err := a.client.Do(req)
 	if err != nil {

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log"
@@ -24,6 +25,16 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	if os.Getenv("LUXMED_BROWSER_SHARED") == "1" {
+		if workers != nil {
+			log.Fatal("shared workers take account IDs from LUXMED_BROWSER_ACCOUNT_IDS")
+		}
+		workers, err = luxmed.SharedBrowserRoutes(os.Getenv("LUXMED_BROWSER_API_URL"), os.Getenv("LUXMED_BROWSER_VIEWER_URL"),
+			cmp.Or(os.Getenv("LUXMED_BROWSER_ACCOUNT_IDS"), os.Getenv("ADMIN_TELEGRAM_IDS")))
+		if err != nil {
+			log.Fatal(err)
+		}
+	}
 	if workers == nil {
 		ownerID, _ := strconv.ParseInt(strings.TrimSpace(os.Getenv("ADMIN_TELEGRAM_IDS")), 10, 64)
 		workers = map[int64]luxmed.BrowserRoute{
@@ -35,6 +46,7 @@ func main() {
 		ViewerOrigin: os.Getenv("LUXMED_VIEWER_URL"), BotID: botID, Workers: workers,
 		DashboardAPI: os.Getenv("LUXMED_DASHBOARD_API_URL"),
 		TicketKey:    strings.TrimSpace(os.Getenv("LUXMED_INTERNAL_KEY")),
+		WorkerKey:    strings.TrimSpace(os.Getenv("LUXMED_WORKER_KEY")),
 	}, os.DirFS("/app/web"), os.DirFS("/app/vendor"))
 	if err != nil {
 		log.Fatal(err)

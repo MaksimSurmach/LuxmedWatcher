@@ -56,6 +56,7 @@ type HTTPClient struct {
 	creds       Credentials
 	rawPayloads bool
 	browser     bool
+	workerKey   string
 }
 
 func NewHTTPClient(rawPayloads bool) *HTTPClient {
@@ -212,6 +213,9 @@ func (c *HTTPClient) request(ctx context.Context, method, endpoint string, body 
 		return nil, fmt.Errorf("create luxmed request: %w", ErrResponse)
 	}
 	req.Header.Set("Accept", "application/json")
+	if c.workerKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.workerKey)
+	}
 	if len(body) > 0 {
 		req.Header.Set("Content-Type", "application/json")
 	}

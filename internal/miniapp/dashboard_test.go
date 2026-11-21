@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -141,5 +142,121 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	watch, err = db.Watch(ctx, id)
 	if err != nil || watch.ServiceName != "Konsultacja dermatologiczna" {
 		t.Fatalf("stored Polish label changed: %q, %v", watch.ServiceName, err)
+	}
+}
+
+func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
+	ctx := t.Context()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "database.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	const origin = "https://app.example"
+	d := &dashboard{db: db, sessions: newSessions(), cfg: DashboardConfig{Origin: origin},
+		browsers: make(map[int64]*luxmed.Browser)}
+	addUser := func(id int64, serve http.HandlerFunc) domain.User {
+		t.Helper()
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: id, Status: domain.UserStatusActive, Locale: "pl"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		worker := httptest.NewServer(serve)
+		t.Cleanup(worker.Close)
+		d.browsers[id], err = luxmed.NewBrowser(worker.URL, origin)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return user
+	}
+	owner := addUser(24, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.RequestURI() {
+		case luxmed.ReferralServicesURL:
+			fmt.Fprint(w, `{"referrals":[{"id":43210,"serviceVariantId":6,"serviceName":"private referral label","doctor":"private doctor"},{"serviceVariantId":6,"serviceName":"duplicate"},{"serviceVariantId":98,"serviceName":"unknown"},{"id":2,"eReferralId":"private referral id","serviceName":"No procedure ID"}]}`)
+		case luxmed.RecentSearchesURL:
+			fmt.Fprint(w, `{"serviceVariantId":3,"searchName":"private metadata","searchParameters":[{"serviceVariantId":6,"searchName":"Already referred"},{"serviceVariantId":1,"searchName":"private search label"}]}`)
+		case luxmed.PopularServicesURL:
+			fmt.Fprint(w, `[{"serviceId":1,"serviceName":"Recent"},{"serviceId":2,"serviceName":"Upstream popular label"},{"serviceId":2,"serviceName":"Duplicate"},{"serviceId":99,"serviceName":"Unknown in this city"}]`)
+		case luxmed.ServiceVariantsGroupsURL:
+			fmt.Fprint(w, `[{"id":2,"name":"Popular"}]`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	other := addUser(42, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == luxmed.PopularServicesURL {
+			fmt.Fprint(w, `[{"serviceId":2,"serviceName":"Popular"}]`)
+			return
+		}
+		http.NotFound(w, r)
+	})
+	cities := []domain.City{{ID: 1, Name: "Warszawa"}, {ID: 2, Name: "Łódź"}, {ID: 3, Name: "Kraków"}}
+	if err := db.UpsertCities(ctx, cities); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertProcedures(ctx, cities[0], []domain.Procedure{
+		{ID: 1, Name: "Recent"}, {ID: 2, Name: "Popular"}, {ID: 3, Name: "Other user's search"},
+		{ID: 4, Name: "Deleted search"}, {ID: 6, Name: "Referred"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertProcedures(ctx, cities[1], []domain.Procedure{{ID: 99, Name: "Other city"}}); err != nil {
+		t.Fatal(err)
+	}
+	addWatch := func(user domain.User, cityID, serviceID int) int64 {
+		t.Helper()
+		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: cityID, ServiceID: serviceID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	addWatch(owner, 1, 1)
+	addWatch(owner, 1, 1)
+	addWatch(owner, 2, 99)
+	addWatch(other, 1, 3)
+	if err := db.SetWatchStatus(ctx, addWatch(owner, 1, 4), domain.WatchStatusDeleted); err != nil {
+		t.Fatal(err)
+	}
+	handler := d.handler()
+	tests := []struct {
+		name   string
+		user   domain.User
+		cityID int
+		want   procedurePicks
+	}{
+		{"uses only own referrals and portal searches", owner, 1, procedurePicks{
+			Referred: []domain.Service{{ID: 6, Name: "Referred"}},
+			Recent:   []domain.Service{{ID: 1, Name: "Recent"}},
+			Popular:  []domain.Service{{ID: 2, Name: "Popular"}},
+		}},
+		{"preserves saved searches and popular results if private sources fail", other, 1, procedurePicks{
+			Saved:   []domain.Service{{ID: 3, Name: "Other user's search"}},
+			Popular: []domain.Service{{ID: 2, Name: "Popular"}},
+		}},
+		{"loads a city catalog on first use", owner, 3, procedurePicks{Popular: []domain.Service{{ID: 2, Name: "Popular"}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, dashboardPrefix+"procedure-picks", strings.NewReader(fmt.Sprintf(`{"CityID":%d}`, tt.cityID)))
+			req.Header.Set("Origin", origin)
+			req.Header.Set("Authorization", "Bearer "+d.sessions.issue(tt.user.TelegramUserID, time.Now()))
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			var picks procedurePicks
+			if err := json.Unmarshal(res.Body.Bytes(), &picks); err != nil || res.Code != http.StatusOK {
+				t.Fatalf("status = %d, body = %s, err = %v", res.Code, res.Body, err)
+			}
+			if res.Header().Get("Cache-Control") != "no-store" {
+				t.Fatal("personal suggestions must not be cached")
+			}
+			if strings.Contains(res.Body.String(), "private") || strings.Contains(res.Body.String(), "43210") {
+				t.Fatal("personal metadata was included in recommendations")
+			}
+			if !slices.Equal(picks.Referred, tt.want.Referred) || !slices.Equal(picks.Recent, tt.want.Recent) ||
+				!slices.Equal(picks.Saved, tt.want.Saved) || !slices.Equal(picks.Popular, tt.want.Popular) {
+				t.Fatalf("picks = %+v, want %+v", picks, tt.want)
+			}
+		})
 	}
 }

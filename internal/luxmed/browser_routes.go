@@ -13,6 +13,7 @@ import (
 type BrowserRoute struct {
 	API    string `json:"api"`
 	Viewer string `json:"viewer"`
+	Shared bool   `json:"-"`
 }
 
 func ParseBrowserRoutes(raw string) (map[int64]BrowserRoute, error) {
@@ -71,4 +72,27 @@ func workerEndpoint(raw, path string) *url.URL {
 		return nil
 	}
 	return u
+}
+
+// SharedBrowserRoutes maps each configured account to its own scope at a shared worker.
+func SharedBrowserRoutes(api, viewer, accountIDs string) (map[int64]BrowserRoute, error) {
+	if workerEndpoint(api, "") == nil || workerEndpoint(viewer, "/vnc") == nil {
+		return nil, errors.New("invalid shared browser worker endpoints")
+	}
+	routes := make(map[int64]BrowserRoute)
+	for value := range strings.SplitSeq(accountIDs, ",") {
+		value = strings.TrimSpace(value)
+		id, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || id <= 0 || id > 1<<53-1 || value != strconv.FormatInt(id, 10) {
+			return nil, errors.New("invalid shared browser account ID")
+		}
+		if _, duplicate := routes[id]; duplicate {
+			return nil, errors.New("duplicate shared browser account ID")
+		}
+		scope := "/accounts/" + value
+		routes[id] = BrowserRoute{
+			API: api + scope, Viewer: strings.TrimSuffix(viewer, "/vnc") + scope + "/vnc", Shared: true,
+		}
+	}
+	return routes, nil
 }

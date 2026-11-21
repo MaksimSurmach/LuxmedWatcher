@@ -76,7 +76,7 @@ func (a *App) Run(ctx context.Context) error {
 	if routes != nil {
 		browsers = make(map[int64]*luxmed.Browser, len(routes))
 		for id, route := range routes {
-			browser, err := luxmed.NewBrowser(route.API, a.cfg.BrowserViewerURL)
+			browser, err := luxmed.NewRoutedBrowser(id, route, a.cfg.BrowserViewerURL, a.cfg.BrowserWorkerKey)
 			if err != nil {
 				return err
 			}

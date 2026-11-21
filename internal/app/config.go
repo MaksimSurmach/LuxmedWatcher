@@ -1,6 +1,7 @@
 package app
 
 import (
+	"cmp"
 	"encoding/base64"
 	"fmt"
 	"log/slog"
@@ -31,6 +32,7 @@ type Config struct {
 	HealthAddr             string
 	BrowserAPIURL          string
 	BrowserRoutes          map[int64]luxmed.BrowserRoute
+	BrowserWorkerKey       string
 	BrowserViewerURL       string
 	MiniAppURL             string
 	MiniAppAgentURL        string
@@ -52,6 +54,7 @@ func LoadConfig() (Config, error) {
 		HealthAddr:           envString("HEALTH_ADDR", ":8080"),
 		BrowserAPIURL:        strings.TrimSpace(os.Getenv("LUXMED_BROWSER_API_URL")),
 		BrowserViewerURL:     strings.TrimSpace(os.Getenv("LUXMED_VIEWER_URL")),
+		BrowserWorkerKey:     strings.TrimSpace(os.Getenv("LUXMED_WORKER_KEY")),
 		MiniAppURL:           strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_URL")),
 		MiniAppAgentURL:      strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_AGENT_URL")),
 		MiniAppTicketKey:     strings.TrimSpace(os.Getenv("LUXMED_INTERNAL_KEY")),
@@ -67,6 +70,16 @@ func LoadConfig() (Config, error) {
 	cfg.BrowserRoutes, err = luxmed.ParseBrowserRoutes(os.Getenv("LUXMED_BROWSER_ROUTES"))
 	if err != nil {
 		return Config{}, err
+	}
+	if os.Getenv("LUXMED_BROWSER_SHARED") == "1" {
+		if cfg.BrowserRoutes != nil || !luxmed.ValidTicketKey(cfg.BrowserWorkerKey) {
+			return Config{}, fmt.Errorf("shared workers require LUXMED_WORKER_KEY and account IDs")
+		}
+		cfg.BrowserRoutes, err = luxmed.SharedBrowserRoutes(cfg.BrowserAPIURL, os.Getenv("LUXMED_BROWSER_VIEWER_URL"),
+			cmp.Or(os.Getenv("LUXMED_BROWSER_ACCOUNT_IDS"), os.Getenv("ADMIN_TELEGRAM_IDS")))
+		if err != nil {
+			return Config{}, err
+		}
 	}
 	if cfg.BrowserRoutes == nil && cfg.BrowserAPIURL != "" && len(cfg.AdminTelegramIDs) != 1 {
 		return Config{}, fmt.Errorf("browser mode requires exactly one admin Telegram ID")

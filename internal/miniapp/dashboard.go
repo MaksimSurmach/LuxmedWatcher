@@ -50,6 +50,7 @@ func (d *dashboard) handler() http.Handler {
 	mux.HandleFunc("POST "+dashboardPrefix+"history", d.authorize(d.history))
 	mux.HandleFunc("POST "+dashboardPrefix+"cities", d.authorize(d.cities))
 	mux.HandleFunc("POST "+dashboardPrefix+"procedures", d.authorize(d.procedures))
+	mux.HandleFunc("POST "+dashboardPrefix+"procedure-picks", d.authorize(d.procedurePicks))
 	mux.HandleFunc("POST "+dashboardPrefix+"providers", d.authorize(d.providers))
 	mux.HandleFunc("POST "+dashboardPrefix+"settings", d.authorize(d.settings))
 	mux.HandleFunc("POST "+dashboardPrefix+"watch", d.authorize(d.saveWatch))
@@ -193,11 +194,7 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 	ctx := r.Context()
 	city, err := d.db.City(ctx, input.CityID)
 	if err == nil {
-		var cached []domain.Procedure
-		cached, err = d.db.SearchProceduresPage(ctx, city.ID, "", 1, 0)
-		if err == nil && len(cached) == 0 {
-			err = d.cacheProcedures(ctx, city, d.browsers[user.TelegramUserID].Client())
-		}
+		err = d.ensureProcedureCatalog(ctx, city, d.browsers[user.TelegramUserID].Client())
 	}
 	if err != nil {
 		dashboardResult(w, nil, err)
@@ -214,7 +211,92 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 	}{items[:min(pageSize, len(items))], len(items) > pageSize}, err)
 }
 
-func (d *dashboard) cacheProcedures(ctx context.Context, city domain.City, client luxmed.Client) error {
+type procedurePicks struct {
+	Referred []domain.Service
+	Recent   []domain.Service
+	Saved    []domain.Service
+	Popular  []domain.Service
+}
+
+func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user domain.User) {
+	var input struct{ CityID int }
+	if !decodeDashboard(w, r, &input) {
+		return
+	}
+	ctx := r.Context()
+	city, err := d.db.City(ctx, input.CityID)
+	if err != nil {
+		dashboardResult(w, nil, err)
+		return
+	}
+	client := d.browsers[user.TelegramUserID].Client()
+	portalCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := d.ensureProcedureCatalog(portalCtx, city, client); err != nil {
+		dashboardResult(w, nil, err)
+		return
+	}
+	watches, err := d.db.WatchesByUser(ctx, user.ID)
+	if err != nil {
+		dashboardResult(w, nil, err)
+		return
+	}
+
+	var saved []domain.Procedure
+	for _, watch := range watches {
+		if watch.CityID == city.ID {
+			saved = append(saved, domain.Procedure{ID: watch.ServiceID})
+		}
+	}
+
+	// The browser serves one request per account at a time.
+	referred, _ := client.GetReferredProcedures(portalCtx)
+	recent, _ := client.GetRecentProcedures(portalCtx)
+	popular, _ := client.GetPopularProcedures(portalCtx)
+
+	var picks procedurePicks
+	seen := make(map[int]bool)
+	groups := []struct {
+		target     *[]domain.Service
+		candidates []domain.Procedure
+	}{
+		{&picks.Referred, referred},
+		{&picks.Recent, recent},
+		{&picks.Saved, saved},
+		{&picks.Popular, popular},
+	}
+	for _, group := range groups {
+		if group.target == &picks.Saved && len(picks.Recent) > 0 {
+			continue
+		}
+		const limit = 4
+		for _, item := range group.candidates {
+			if seen[item.ID] {
+				continue
+			}
+			service, err := d.db.Procedure(ctx, city.ID, item.ID)
+			if errors.Is(err, sql.ErrNoRows) {
+				continue
+			}
+			if err != nil {
+				dashboardResult(w, nil, err)
+				return
+			}
+			seen[item.ID] = true
+			*group.target = append(*group.target, domain.Service{ID: item.ID, Name: procedures.Name(user.Locale, service.Name)})
+			if len(*group.target) == limit {
+				break
+			}
+		}
+	}
+	reply(w, http.StatusOK, picks)
+}
+
+func (d *dashboard) ensureProcedureCatalog(ctx context.Context, city domain.City, client luxmed.Client) error {
+	cached, err := d.db.SearchProceduresPage(ctx, city.ID, "", 1, 0)
+	if err != nil || len(cached) > 0 {
+		return err
+	}
 	items, err := client.GetServices(ctx)
 	if err != nil {
 		return err

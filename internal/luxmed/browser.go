@@ -7,11 +7,13 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"strconv"
 	"time"
 )
 
 type Browser struct {
 	api    string
+	key    string
 	viewer url.URL
 }
 
@@ -25,6 +27,24 @@ func NewBrowser(api, viewer string) (*Browser, error) {
 	return &Browser{api: endpoint.Scheme + "://" + endpoint.Host, viewer: *display}, nil
 }
 
+func NewRoutedBrowser(id int64, route BrowserRoute, display, key string) (*Browser, error) {
+	if !route.Shared {
+		return NewBrowser(route.API, display)
+	}
+	scope := "/accounts/" + strconv.FormatInt(id, 10)
+	endpoint := workerEndpoint(route.API, scope)
+	if id <= 0 || endpoint == nil || !ValidTicketKey(key) {
+		return nil, errors.New("invalid shared browser worker")
+	}
+	browser, err := NewBrowser(endpoint.Scheme+"://"+endpoint.Host, display)
+	if err != nil {
+		return nil, err
+	}
+	browser.api = route.API
+	browser.key = key
+	return browser, nil
+}
+
 func validOrigin(u *url.URL) bool {
 	return u != nil && (u.Scheme == "http" || u.Scheme == "https") && u.Hostname() != "" &&
 		u.User == nil && u.RawQuery == "" && u.Fragment == "" && (u.Path == "" || u.Path == "/")
@@ -33,6 +53,7 @@ func validOrigin(u *url.URL) bool {
 func (b *Browser) Client() *HTTPClient {
 	client := newHTTPClient(b.api, false)
 	client.browser = true
+	client.workerKey = b.key
 	client.client.Timeout = 30 * time.Second
 	return client
 }

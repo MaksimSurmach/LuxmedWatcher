@@ -55,3 +55,25 @@ func TestBrowserUsesWorkerWithoutPasswordOrPortalTokens(t *testing.T) {
 		t.Fatalf("unexpected viewer link: %v", err)
 	}
 }
+
+func TestSharedBrowserUsesPrivateAccountAndWorkerKey(t *testing.T) {
+	key := strings.Repeat("a", 64)
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/accounts/123/session" || r.Header.Get("Authorization") != "Bearer "+key {
+			t.Errorf("shared browser request received unexpected scope or private auth")
+			w.WriteHeader(http.StatusForbidden)
+		}
+	}))
+	defer worker.Close()
+	route := BrowserRoute{API: worker.URL + "/accounts/123", Shared: true}
+	browser, err := NewRoutedBrowser(123, route, "http://localhost:18769", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := browser.Check(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewRoutedBrowser(456, route, "http://localhost:18769", key); err == nil {
+		t.Fatal("another account could claim the route")
+	}
+}

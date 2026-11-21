@@ -19,7 +19,25 @@ docker compose --env-file .env --env-file .miniapp.env \
 
 The public app listens on port 19090 on the WireGuard address. Traefik reaches it over the private existing link. The bot's ticket API is accessible only inside Compose. With the default Compose files the browser is assigned to the single ID in `ADMIN_TELEGRAM_IDS`. The public origin must match the HTTPS address sent by Telegram. `LUXMED_DASHBOARD_API_URL` points to the private Go API, which must be online to authorize new browser streams.
 
-## Additional users
+## Shared browser backends
+
+Use `compose.browser.shared.yml` in place of `compose.browser.yml` with the Mini App overlay. Keep `LUXMED_INTERNAL_KEY` and set a distinct `LUXMED_WORKER_KEY`, both generated locally with `openssl rand -hex 32`. If you omit `LUXMED_BROWSER_ACCOUNT_IDS`, the configured Telegram admins receive a browser assignment. Set a comma-separated list to include invited accounts. Existing invite checks still apply. Remove `LUXMED_BROWSER_ROUTES` when switching to a shared worker.
+
+- Set `LUXMED_BROWSER_BACKEND=chromium` for one local Chromium process. The worker downloads the pinned Playwright headless shell to its cache on first use if it is absent. Each account gets an isolated context and a private state file with cookies, local storage and IndexedDB.
+- Set `LUXMED_BROWSER_BACKEND=steel` and `STEEL_BASE_URL` to the private origin of a self-hosted Steel server. The worker connects over CDP and uses the same per-account state storage. If the server returns a debugger address unreachable from the Docker network, configure `STEEL_CDP_URL` with the trusted CDP URL. Keep Steel's API and debugger on a trusted network. Self-hosted Steel serves one session at a time, so concurrent requests wait for a subsequent check. Use an instance reserved for this worker if other clients can create Steel sessions.
+
+```sh
+docker compose --env-file .env --env-file .miniapp.env \
+  -p luxmed-watcher-mvp -f compose.browser.shared.yml -f compose.miniapp.yml up -d --build
+```
+
+Shared mode uses the existing watcher database and a new `browser-profiles` volume. Sign in to LuxMed again for each shared profile. To return to the existing noVNC setup, deploy with `compose.browser.yml` and the Mini App overlay. Keep both profile volumes if you plan to switch back.
+
+## Quick procedure selection
+
+The search editor shows services from LuxMed referrals, recent portal searches, saved searches and popular services. The picks use the signed user's browser and select ordinary service filters. Use **Skierowania** in the official portal to complete a referral-based booking.
+
+## Additional users with dedicated noVNC workers
 
 Assign one dedicated browser worker, private Docker network and profile volume to each Telegram user ID. The users share the Go service and city and procedure dictionaries, with separate search settings, slot history and LuxMed sessions. The provider evaluates appointment availability through each user's worker. Keep only administrators in `ADMIN_TELEGRAM_IDS`. An admin assigned to a browser can issue `/invite` codes. After the assignment is deployed, the invited user opens the private chat and sends `/start CODE`. A worker assignment alone does not activate an account.
 
