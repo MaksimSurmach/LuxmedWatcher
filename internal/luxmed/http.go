@@ -27,6 +27,7 @@ const (
 var (
 	ErrAuthentication = errors.New("luxmed authentication required or rejected")
 	ErrUnavailable    = errors.New("luxmed temporarily unavailable")
+	ErrBrowserBusy    = errors.New("luxmed browser is busy")
 	ErrResponse       = errors.New("unexpected luxmed response")
 )
 
@@ -142,7 +143,7 @@ func (c *HTTPClient) get(ctx context.Context, endpoint string) ([]byte, error) {
 				return nil, errors.Join(ErrAuthentication, err)
 			}
 			if status.StatusCode == http.StatusConflict {
-				return nil, errors.Join(ErrUnavailable, err)
+				return nil, errors.Join(ErrBrowserBusy, err)
 			}
 		}
 		return body, err

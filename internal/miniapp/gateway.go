@@ -48,7 +48,6 @@ func (a *app) public(web, vendor fs.FS) http.Handler {
 			Rewrite: func(request *httputil.ProxyRequest) {
 				request.SetURL(upstream)
 				request.Out.Header.Del("Cookie")
-				request.Out.Header.Del("Authorization")
 			},
 			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
 				reply(w, http.StatusServiceUnavailable, nil)

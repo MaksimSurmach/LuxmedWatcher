@@ -1,0 +1,29 @@
+services:
+  luxmed-watcher:
+    networks: [default, browser-two]
+
+  miniapp-agent:
+    networks: [default, browser-two]
+
+  browser-two:
+    build: ./tools/browser-session
+    init: true
+    restart: unless-stopped
+    hostname: luxmed-browser-two
+    environment:
+      LUXMED_VIEWER_URL: ${LUXMED_VIEWER_URL:-http://localhost:18769}
+    volumes:
+      - chrome-profile-two:/profile
+    networks: [browser-two]
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./deploy/homelab/chromium-seccomp.json
+    cap_drop: [ALL]
+    cap_add: [SYS_CHROOT]
+    shm_size: 512mb
+
+networks:
+  browser-two:
+
+volumes:
+  chrome-profile-two:

@@ -65,16 +65,27 @@ func (a *App) Run(ctx context.Context) error {
 		return errors.New("connect to Telegram Bot API: check the token and network")
 	}
 
-	var browser *luxmed.Browser
-	if a.cfg.BrowserAPIURL != "" {
-		browser, err = luxmed.NewBrowser(a.cfg.BrowserAPIURL, a.cfg.BrowserViewerURL)
-		if err != nil {
-			return err
+	var browsers map[int64]*luxmed.Browser
+	routes := a.cfg.BrowserRoutes
+	if routes == nil && a.cfg.BrowserAPIURL != "" {
+		routes = make(map[int64]luxmed.BrowserRoute)
+		for id := range a.cfg.AdminTelegramIDs {
+			routes[id] = luxmed.BrowserRoute{API: a.cfg.BrowserAPIURL}
+		}
+	}
+	if routes != nil {
+		browsers = make(map[int64]*luxmed.Browser, len(routes))
+		for id, route := range routes {
+			browser, err := luxmed.NewBrowser(route.API, a.cfg.BrowserViewerURL)
+			if err != nil {
+				return err
+			}
+			browsers[id] = browser
 		}
 	}
 	var miniApp *luxmed.MiniApp
 	if a.cfg.MiniAppURL != "" {
-		miniApp, err = luxmed.NewMiniApp(a.cfg.MiniAppAgentURL, a.cfg.MiniAppURL)
+		miniApp, err = luxmed.NewMiniApp(a.cfg.MiniAppAgentURL, a.cfg.MiniAppURL, a.cfg.MiniAppTicketKey)
 		if err != nil {
 			return err
 		}
@@ -85,28 +96,20 @@ func (a *App) Run(ctx context.Context) error {
 		MinimumInterval:  a.cfg.MinimumInterval,
 		DefaultInterval:  a.cfg.DefaultInterval,
 		PollTimeout:      a.cfg.PollTimeout,
-		Browser:          browser,
+		Browsers:         browsers,
 		MiniApp:          miniApp,
 	}, a.logger)
 	runner := scheduler.NewRunner(db, cryptor, tgBot, a.cfg.MinimumInterval, a.cfg.NotificationCooldown, a.cfg.EnableRawLuxMedPayload)
-	if browser != nil {
-		for id := range a.cfg.AdminTelegramIDs {
-			runner.UseBrowser(browser, id)
-		}
-	}
+	runner.UseBrowsers(browsers)
 	tgBot.SetRunner(runner)
 	watcher := scheduler.New(db, runner, 15*time.Second, a.cfg.HistoryRetention, a.logger)
 
 	var dashboard http.Handler
 	if miniApp != nil {
-		var ownerID int64
-		for id := range a.cfg.AdminTelegramIDs {
-			ownerID = id
-		}
 		dashboard = miniapp.Dashboard(miniapp.DashboardConfig{
-			Origin: miniApp.Origin(), BotID: api.Self.ID, OwnerID: ownerID,
+			Origin: miniApp.Origin(), BotID: api.Self.ID,
 			MinimumInterval: a.cfg.MinimumInterval, DefaultInterval: a.cfg.DefaultInterval,
-		}, db, browser, miniApp)
+		}, db, browsers, miniApp)
 	}
 	var workers sync.WaitGroup
 	workers.Add(2)

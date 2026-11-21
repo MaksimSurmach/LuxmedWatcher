@@ -1,92 +1,192 @@
 package miniapp
 
 import (
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/fstest"
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
-func TestViewerChecksOriginConsumesTicketAndProxiesBinary(t *testing.T) {
-	const clientOrigin = "https://app.example"
+func signTelegram(userID, botID int64, when time.Time, key ed25519.PrivateKey) string {
+	user := fmt.Sprintf(`{"id":%d}`, userID)
+	auth := strconv.FormatInt(when.Unix(), 10)
+	message := fmt.Sprintf("%d:WebAppData\nauth_date=%s\nuser=%s", botID, auth, user)
+	signature := base64.RawURLEncoding.EncodeToString(ed25519.Sign(key, []byte(message)))
+	return url.Values{"auth_date": {auth}, "user": {user}, "signature": {signature}}.Encode()
+}
+
+func TestGatewayRoutesIndependentViewerStreams(t *testing.T) {
+	const origin = "https://app.example"
 	const workerOrigin = "http://localhost:18769"
-	workerToken := strings.Repeat("b", 64)
-	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/viewer":
-			if r.Method != http.MethodPost {
-				http.Error(w, "expected POST", http.StatusMethodNotAllowed)
-				return
+	const botID = 123
+	ticketKey := strings.Repeat("3", 64)
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	makeWorker := func(marker string) luxmed.BrowserRoute {
+		token := strings.Repeat(marker, 64)
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/viewer":
+				if r.Method != http.MethodPost {
+					http.Error(w, "expected POST", http.StatusMethodNotAllowed)
+					return
+				}
+				fmt.Fprintf(w, `{"ticket":%q}`, token)
+			case "/vnc":
+				if r.Header.Get("Origin") != workerOrigin ||
+					r.Header.Get("Sec-WebSocket-Protocol") != "binary, ticket-"+token ||
+					r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" ||
+					r.Header.Get("X-Telegram-Init-Data") != "" {
+					http.Error(w, "invalid worker upgrade", http.StatusForbidden)
+					return
+				}
+				conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
+					OriginPatterns: []string{"localhost:18769"}, Subprotocols: []string{"binary"},
+				})
+				if err != nil {
+					return
+				}
+				defer conn.CloseNow()
+				if err := conn.Write(r.Context(), websocket.MessageBinary, []byte(marker)); err != nil {
+					return
+				}
+				kind, data, err := conn.Read(r.Context())
+				if err == nil {
+					conn.Write(r.Context(), kind, append([]byte(marker), data...))
+				}
+			default:
+				http.NotFound(w, r)
 			}
-			fmt.Fprintf(w, `{"ticket":%q}`, workerToken)
-		case "/vnc":
-			if r.Header.Get("Origin") != workerOrigin ||
-				r.Header.Get("Sec-WebSocket-Protocol") != "binary, ticket-"+workerToken ||
-				r.Header.Get("Cookie") != "" || r.Header.Get("Authorization") != "" {
-				http.Error(w, "invalid worker upgrade", http.StatusForbidden)
-				return
-			}
-			socket, err := websocket.Accept(w, r, &websocket.AcceptOptions{
-				OriginPatterns: []string{"localhost:18769"}, Subprotocols: []string{"binary"},
-			})
-			if err != nil {
-				return
-			}
-			defer socket.CloseNow()
-			if err := socket.Write(r.Context(), websocket.MessageBinary, []byte("RFB 003.008\n")); err == nil {
-				socket.Read(r.Context())
-			}
-
-		default:
-			http.NotFound(w, r)
+		}))
+		t.Cleanup(server.Close)
+		return luxmed.BrowserRoute{API: server.URL, Viewer: server.URL + "/vnc"}
+	}
+	var blocked atomic.Int64
+	core := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id, ok := verifiedTelegramID(r.Header.Get("X-Telegram-Init-Data"), botID, time.Now(), time.Minute, pub)
+		if r.URL.Path != dashboardPrefix+"viewer-access" || r.Header.Get("Origin") != origin || !ok || blocked.Load() == id {
+			w.WriteHeader(http.StatusForbidden)
+			return
 		}
+		w.WriteHeader(http.StatusNoContent)
 	}))
-	defer worker.Close()
-
+	defer core.Close()
 	a, err := newApp(Config{
-		Origin: clientOrigin, WorkerAPI: worker.URL, WorkerViewer: worker.URL + "/vnc",
-		ViewerOrigin: workerOrigin, BotID: 123, OwnerID: 321,
+		Origin: origin, ViewerOrigin: workerOrigin, BotID: botID, DashboardAPI: core.URL, TicketKey: ticketKey,
+		Workers: map[int64]luxmed.BrowserRoute{12: makeWorker("a"), 34: makeWorker("b")},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	a.key = pub
+	public := a.public(fstest.MapFS{}, fstest.MapFS{})
+	issue := func(id int64, status int) string {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/ticket", nil)
+		req.SetPathValue("telegramID", strconv.FormatInt(id, 10))
+		if status != http.StatusUnauthorized {
+			req.Header.Set("Authorization", "Bearer "+ticketKey)
+		}
+		res := httptest.NewRecorder()
+		a.issue(res, req)
+		if res.Code != status {
+			t.Fatalf("issue status %d, want %d", res.Code, status)
+		}
+		var result struct{ Ticket string }
+		if status == http.StatusOK && json.Unmarshal(res.Body.Bytes(), &result) != nil {
+			t.Fatal("invalid ticket response")
+		}
+		return result.Ticket
+	}
+	redeem := func(id int64, ticket string, status int) string {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"initData": signTelegram(id, botID, time.Now(), priv), "ticket": ticket})
+		req := httptest.NewRequest(http.MethodPost, "/api/session", strings.NewReader(string(body)))
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Content-Type", "application/json")
+		res := httptest.NewRecorder()
+		public.ServeHTTP(res, req)
+		if res.Code != status {
+			t.Fatalf("redeem status %d, want %d", res.Code, status)
+		}
+		var result struct{ ViewerToken string }
+		if status == http.StatusOK && json.Unmarshal(res.Body.Bytes(), &result) != nil {
+			t.Fatal("invalid viewer response")
+		}
+		return result.ViewerToken
+	}
+	issue(12, http.StatusUnauthorized)
+	launchA := issue(12, http.StatusOK)
+	launchB := issue(34, http.StatusOK)
+	issue(99, http.StatusNotFound)
+	redeem(34, launchA, http.StatusUnauthorized)
+	blocked.Store(34)
+	redeem(34, launchB, http.StatusForbidden)
+	blocked.Store(0)
+	viewA := redeem(12, launchA, http.StatusOK)
+	viewB := redeem(34, launchB, http.StatusOK)
+	redeem(12, launchA, http.StatusUnauthorized)
 
-	a.mu.Lock()
-	a.view = newTicket(time.Minute)
-	token := a.view.token
-	a.mu.Unlock()
-	server := httptest.NewServer(a.public(fstest.MapFS{}, fstest.MapFS{}))
+	server := httptest.NewServer(public)
 	defer server.Close()
 	endpoint := "ws" + strings.TrimPrefix(server.URL, "http") + "/vnc"
 	dial := func(origin, token string) (*websocket.Conn, *http.Response, error) {
-		t.Helper()
 		return websocket.Dial(t.Context(), endpoint, &websocket.DialOptions{
-			HTTPHeader:   http.Header{"Origin": {origin}, "Cookie": {"private=1"}, "Authorization": {"private"}},
+			HTTPHeader: http.Header{
+				"Origin": {origin}, "Cookie": {"private=1"}, "Authorization": {"private"}, "X-Telegram-Init-Data": {"private"},
+			},
 			Subprotocols: []string{"binary", "viewer-" + token},
 		})
 	}
-	if _, res, err := dial("https://other.example", token); err == nil || (res == nil || res.StatusCode != http.StatusForbidden) {
-		t.Fatalf("unexpected cross-origin result: %v", err)
+	reject := func(origin, token string) {
+		t.Helper()
+		if conn, res, err := dial(origin, token); err == nil || res == nil || res.StatusCode != http.StatusForbidden {
+			if conn != nil {
+				conn.CloseNow()
+			}
+			t.Fatalf("unexpected viewer result: %v", err)
+		}
 	}
-	if _, res, err := dial(clientOrigin, strings.Repeat("1", 64)); err == nil || (res == nil || res.StatusCode != http.StatusForbidden) {
-		t.Fatalf("unexpected invalid ticket result: %v", err)
-	}
-	client, _, err := dial(clientOrigin, token)
+	reject("https://other.example", viewA)
+	reject(origin, strings.Repeat("1", 64))
+	aStream, _, err := dial(origin, viewA)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.CloseNow()
-	kind, message, err := client.Read(t.Context())
-	if err != nil || kind != websocket.MessageBinary || string(message) != "RFB 003.008\n" {
-		t.Fatalf("unexpected RFB frame %q: %v", message, err)
+	defer aStream.CloseNow()
+	bStream, _, err := dial(origin, viewB)
+	if err != nil {
+		t.Fatal(err)
 	}
-	client.CloseNow()
-	if _, res, err := dial(clientOrigin, token); err == nil || (res == nil || res.StatusCode != http.StatusForbidden) {
-		t.Fatalf("unexpected reused ticket result: %v", err)
+	defer bStream.CloseNow()
+	issue(12, http.StatusConflict)
+	issue(34, http.StatusConflict)
+	reject(origin, viewB)
+	for marker, stream := range map[string]*websocket.Conn{"a": aStream, "b": bStream} {
+		kind, data, err := stream.Read(t.Context())
+		if err != nil || kind != websocket.MessageBinary || string(data) != marker {
+			t.Fatalf("wrong worker stream: %q %v", data, err)
+		}
+		if err := stream.Write(t.Context(), websocket.MessageBinary, []byte("test")); err != nil {
+			t.Fatal(err)
+		}
+		_, echo, err := stream.Read(t.Context())
+		if err != nil || string(echo) != marker+"test" {
+			t.Fatalf("wrong worker echo: %q %v", echo, err)
+		}
 	}
 }

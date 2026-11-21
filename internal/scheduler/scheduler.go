@@ -29,7 +29,7 @@ type Notifier interface {
 
 type accountCheck struct {
 	busy                     bool
-	next                     time.Time
+	next, lastCheck          time.Time
 	failures                 int
 	authenticatedAt          time.Time
 	login, encryptedPassword string
@@ -37,8 +37,7 @@ type accountCheck struct {
 }
 
 type Runner struct {
-	browser              *luxmed.Browser
-	browserOwner         int64
+	browsers             map[int64]*luxmed.Browser
 	db                   *storage.DB
 	cryptor              *security.Cryptor
 	notifier             Notifier
@@ -60,8 +59,8 @@ func NewRunner(db *storage.DB, cryptor *security.Cryptor, notifier Notifier, min
 	}
 }
 
-func (r *Runner) UseBrowser(browser *luxmed.Browser, ownerTelegramID int64) {
-	r.browser, r.browserOwner = browser, ownerTelegramID
+func (r *Runner) UseBrowsers(browsers map[int64]*luxmed.Browser) {
+	r.browsers = browsers
 }
 
 func (r *Runner) CheckWatch(ctx context.Context, watch domain.Watch) error {
@@ -85,6 +84,7 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 		return 0, ErrRateLimited
 	}
 	state.busy = true
+	state.lastCheck = time.Now()
 	r.mu.Unlock()
 
 	defer func() {
@@ -134,6 +134,13 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		err = errors.Join(err, luxmed.ErrUnavailable, ctx.Err())
 	}
+	if errors.Is(err, luxmed.ErrBrowserBusy) && count == 0 {
+		r.mu.Lock()
+		state.next = time.Now().Add(3*time.Second + jitter(time.Second))
+		r.mu.Unlock()
+		return 0, ErrRateLimited
+	}
+	r.mu.Lock()
 	state.next = time.Now().Add(r.minimumInterval + jitter(r.minimumInterval/10))
 	var status string
 	if err != nil {
@@ -150,6 +157,7 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 	} else {
 		state.failures = 0
 	}
+	r.mu.Unlock()
 	if errors.Is(err, ErrInactive) {
 		return count, err
 	}
@@ -163,11 +171,12 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 
 func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, state *accountCheck, started time.Time) (int, error) {
 	var client luxmed.Client
-	if r.browser != nil {
-		if user.TelegramUserID != r.browserOwner {
+	if r.browsers != nil {
+		browser := r.browsers[user.TelegramUserID]
+		if browser == nil {
 			return 0, ErrInactive
 		}
-		client = r.browser.Client()
+		client = browser.Client()
 	} else {
 		var err error
 		client, err = r.passwordClient(ctx, user.ID, state)
@@ -326,6 +335,9 @@ func New(db *storage.DB, runner *Runner, interval, retention time.Duration, logg
 
 func (s *Scheduler) Run(ctx context.Context) {
 	var nextCleanup time.Time
+	var checks sync.WaitGroup
+	defer checks.Wait()
+	dispatched := make(chan struct{}, cap(s.runner.capacity))
 	for ctx.Err() == nil {
 		if s.retention > 0 && time.Now().After(nextCleanup) {
 			if err := s.db.PurgeHistory(ctx, time.Now().Add(-s.retention)); err != nil {
@@ -333,7 +345,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 			}
 			nextCleanup = time.Now().Add(24 * time.Hour)
 		}
-		s.tick(ctx)
+		s.tick(ctx, &checks, dispatched)
 
 		timer := time.NewTimer(s.interval + jitter(s.interval/5))
 		select {
@@ -345,11 +357,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 	}
 }
 
-func (s *Scheduler) tick(ctx context.Context) {
+func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched chan struct{}) {
 	now := time.Now()
 	s.runner.mu.Lock()
 	for userID, account := range s.runner.accounts {
-		if !account.busy && now.After(account.next) && now.Sub(account.authenticatedAt) > 15*time.Minute {
+		if !account.busy && now.After(account.next) && now.Sub(account.lastCheck) > 15*time.Minute {
 			delete(s.runner.accounts, userID)
 		}
 	}
@@ -360,9 +372,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 		s.logger.Warn("load due watches", "err", err)
 		return
 	}
-	var checks sync.WaitGroup
-	defer checks.Wait()
-	accounts := make(map[int64]bool, len(watches))
+	accounts := make(map[int64]bool)
 	for _, watch := range watches {
 		if ctx.Err() != nil {
 			return
@@ -371,9 +381,20 @@ func (s *Scheduler) tick(ctx context.Context) {
 			continue
 		}
 		accounts[watch.UserID] = true
-		checks.Add(1)
-		go func() {
-			defer checks.Done()
+		s.runner.mu.Lock()
+		account := s.runner.accounts[watch.UserID]
+		blocked := account != nil && (account.busy || now.Before(account.next))
+		s.runner.mu.Unlock()
+		if blocked {
+			continue
+		}
+		select {
+		case dispatched <- struct{}{}:
+		default:
+			return
+		}
+		checks.Go(func() {
+			defer func() { <-dispatched }()
 			count, err := s.runner.check(ctx, watch, false)
 			if err == nil {
 				s.logger.Info("scheduled slot search completed", "watch_id", watch.ID, "matches", count)
@@ -381,7 +402,7 @@ func (s *Scheduler) tick(ctx context.Context) {
 			if err != nil && !errors.Is(err, ErrRateLimited) && !errors.Is(err, ErrInactive) {
 				s.logger.Warn("watch check failed", "watch_id", watch.ID, "status", checkStatus(err), "err", err)
 			}
-		}()
+		})
 	}
 }
 

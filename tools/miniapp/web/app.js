@@ -29,6 +29,7 @@ function renderLanguage() {
   const labels = {
     title: 'title', close: 'close', keyboard: 'keyboard', keyboardLabel: 'keyboard_hint',
     backspace: 'backspace', 'tab-key': 'tab_key', 'enter-key': 'enter_key',
+    'remote-notice': 'remote_notice', 'start-viewer': 'continue',
   };
   for (const [id, key] of Object.entries(labels)) element(id).textContent = label(key);
   document.title = label('title');
@@ -36,7 +37,7 @@ function renderLanguage() {
   element('scroll-up').setAttribute('aria-label', label('scroll_up'));
   element('scroll-down').setAttribute('aria-label', label('scroll_down'));
   zoom.textContent = label('zoom_in');
-  status.textContent = label('starting');
+  status.textContent = '';
 }
 
 telegram?.ready();
@@ -62,12 +63,13 @@ function close(message) {
   opening.abort();
   viewer?.disconnect();
   keys.value = '';
+  screen.hidden = true;
   typing.hidden = true;
   controls.hidden = true;
   status.textContent = label(message) || 'Nie udało się wczytać okna logowania.';
 }
 
-async function start() {
+async function init() {
   try {
     await loadLanguage(initialLanguage(telegram, locationURL.searchParams.get('lang')));
     renderLanguage();
@@ -87,6 +89,14 @@ async function start() {
     close('failed');
     return;
   }
+  element('notice').hidden = false;
+  element('start-viewer').addEventListener('click', start, { once: true });
+}
+
+async function start() {
+  if (closed) return;
+  element('notice').hidden = true;
+  status.textContent = label('starting');
   startupTimer = setTimeout(() => close('failed'), 30_000);
   try {
     const response = await fetch('/api/session', {
@@ -97,6 +107,10 @@ async function start() {
       cache: 'no-store',
       signal: opening.signal,
     });
+    if (response.status === 403) {
+      close('access_denied');
+      return;
+    }
     if (!response.ok) throw new Error('Request failed');
     const { viewerToken } = await response.json();
     if (closed) return;
@@ -106,6 +120,7 @@ async function start() {
 
     const address = new URL('/vnc', location.href);
     address.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    screen.hidden = false;
     viewer = new RFB(screen, address.href, { wsProtocols: ['binary', `viewer-${viewerToken}`] });
     viewer.scaleViewport = true;
     viewer.addEventListener('connect', () => {
@@ -218,4 +233,4 @@ zoom.addEventListener('click', () => {
   status.textContent = label(zoomed ? 'zoomed' : 'connected');
 });
 
-void start();
+void init();

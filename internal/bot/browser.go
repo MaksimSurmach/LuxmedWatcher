@@ -13,23 +13,25 @@ import (
 )
 
 func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
-	if b.cfg.Browser != nil {
-		if !b.cfg.AdminTelegramIDs[user.TelegramUserID] {
+	if b.cfg.Browsers != nil {
+		browser := b.cfg.Browsers[user.TelegramUserID]
+		if browser == nil {
 			return luxmed.ErrAuthentication
 		}
-		return b.cfg.Browser.Check(ctx)
+		return browser.Check(ctx)
 	}
 	_, err := b.db.LuxMedAccount(ctx, user.ID)
 	return err
 }
 
 func (b *Bot) showAccount(ctx context.Context, user domain.User) {
-	if b.cfg.Browser == nil {
+	if b.cfg.Browsers == nil {
 		b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
 		b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
 		return
 	}
-	if !user.IsActive() || !b.cfg.AdminTelegramIDs[user.TelegramUserID] {
+	browser := b.cfg.Browsers[user.TelegramUserID]
+	if !user.IsActive() || browser == nil {
 		return
 	}
 	b.clearFlow(user.ID)
@@ -37,7 +39,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 		b.showMiniApp(ctx, user)
 		return
 	}
-	link, err := b.cfg.Browser.ViewerLink(ctx)
+	link, err := browser.ViewerLink(ctx)
 	if err != nil {
 		b.logger.Warn("open browser viewer failed", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
@@ -56,7 +58,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 }
 
 func (b *Bot) showMiniApp(ctx context.Context, user domain.User) {
-	link, err := b.cfg.MiniApp.Link(ctx)
+	link, err := b.cfg.MiniApp.Link(ctx, user.TelegramUserID)
 	if err != nil {
 		b.logger.Warn("Mini App unavailable", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
