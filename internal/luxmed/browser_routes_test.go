@@ -12,6 +12,7 @@ func TestBrowserRouteConfiguration(t *testing.T) {
 	for _, raw := range []string{
 		"{" + one + "," + one + "}",
 		`{` + one + `,"456":{"api":"http://browser:8091","viewer":"http://browser:8092/vnc"}}`,
+		`{` + one + `,"456":{"api":"http://browser:9091","viewer":"http://browser:9092/vnc"}}`,
 		`{"456":{"api":"http://browser:8091","viewer":"http://second:8092/vnc"}}`,
 		"{" + one + "} {}",
 		"{}",

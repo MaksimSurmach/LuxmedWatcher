@@ -1601,6 +1601,8 @@ func (b *Bot) checkWatchNow(ctx context.Context, user domain.User, watch domain.
 			key = "errors.auth_failed"
 		case errors.Is(err, luxmed.ErrPartialResults):
 			key = "watch.check_partial"
+		case errors.Is(err, luxmed.ErrBrowserBusy):
+			key = "watch.browser_busy"
 		case errors.Is(err, luxmed.ErrUnavailable):
 			key = "errors.luxmed_unavailable"
 		}

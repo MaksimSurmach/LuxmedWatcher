@@ -249,3 +249,37 @@ func TestAppointmentNotificationEscapesHTMLAndShowsRemainingSlots(t *testing.T) 
 		}
 	}
 }
+
+func TestBrowserBotAdmitsOnlyInvitedUsersWithAnAssignedWorker(t *testing.T) {
+	ctx := t.Context()
+	b := testBot(t)
+	const ownerID, assignedID, unassignedID = 101, 202, 303
+	b.cfg.AdminTelegramIDs = map[int64]bool{ownerID: true}
+	b.cfg.Browsers = map[int64]*luxmed.Browser{ownerID: {}, assignedID: {}}
+	owner := createUser(t, b, ownerID, domain.UserStatusActive)
+	if err := b.db.CreateInvite(ctx, "invite-example", owner.ID, 1, nil); err != nil {
+		t.Fatal(err)
+	}
+	start := func(id int64, code string) {
+		b.handleUpdate(ctx, tgbotapi.Update{Message: &tgbotapi.Message{
+			From:     &tgbotapi.User{ID: id},
+			Chat:     &tgbotapi.Chat{ID: id, Type: "private"},
+			Text:     strings.TrimSpace("/start " + code),
+			Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len("/start")}},
+		}})
+	}
+	start(assignedID, "")
+	pending, err := b.db.UserByTelegramID(ctx, assignedID)
+	if err != nil || pending.IsActive() {
+		t.Fatalf("assignment did not start in pending state: %+v, %v", pending, err)
+	}
+	start(unassignedID, "invite-example")
+	if _, err := b.db.UserByTelegramID(ctx, unassignedID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("unassigned user was admitted: %v", err)
+	}
+	start(assignedID, "invite-example")
+	active, err := b.db.UserByTelegramID(ctx, assignedID)
+	if err != nil || !active.IsActive() || active.IsAdmin() {
+		t.Fatalf("invited user was not admitted as regular user: %+v, %v", active, err)
+	}
+}

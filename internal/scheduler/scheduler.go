@@ -138,7 +138,7 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 		r.mu.Lock()
 		state.next = time.Now().Add(3*time.Second + jitter(time.Second))
 		r.mu.Unlock()
-		return 0, ErrRateLimited
+		return 0, err
 	}
 	r.mu.Lock()
 	state.next = time.Now().Add(r.minimumInterval + jitter(r.minimumInterval/10))
@@ -399,7 +399,7 @@ func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched
 			if err == nil {
 				s.logger.Info("scheduled slot search completed", "watch_id", watch.ID, "matches", count)
 			}
-			if err != nil && !errors.Is(err, ErrRateLimited) && !errors.Is(err, ErrInactive) {
+			if err != nil && !errors.Is(err, ErrRateLimited) && !errors.Is(err, ErrInactive) && !errors.Is(err, luxmed.ErrBrowserBusy) {
 				s.logger.Warn("watch check failed", "watch_id", watch.ID, "status", checkStatus(err), "err", err)
 			}
 		})

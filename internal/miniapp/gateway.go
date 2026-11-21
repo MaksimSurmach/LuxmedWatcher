@@ -42,18 +42,16 @@ func (a *app) public(web, vendor fs.FS) http.Handler {
 	for _, folder := range []string{"core", "vendor"} {
 		mux.Handle("GET /vendor/"+folder+"/", http.StripPrefix("/vendor/", http.FileServerFS(vendor)))
 	}
-	if a.config.DashboardAPI != "" {
-		upstream, _ := url.Parse(a.config.DashboardAPI)
-		mux.Handle("POST "+dashboardPrefix, &httputil.ReverseProxy{
-			Rewrite: func(request *httputil.ProxyRequest) {
-				request.SetURL(upstream)
-				request.Out.Header.Del("Cookie")
-			},
-			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
-				reply(w, http.StatusServiceUnavailable, nil)
-			},
-		})
-	}
+	upstream, _ := url.Parse(a.config.DashboardAPI)
+	mux.Handle("POST "+dashboardPrefix, &httputil.ReverseProxy{
+		Rewrite: func(request *httputil.ProxyRequest) {
+			request.SetURL(upstream)
+			request.Out.Header.Del("Cookie")
+		},
+		ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+			reply(w, http.StatusServiceUnavailable, nil)
+		},
+	})
 	mux.HandleFunc("POST /api/session", a.session)
 	mux.HandleFunc("GET /vnc", a.viewer)
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {

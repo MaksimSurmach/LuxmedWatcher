@@ -17,11 +17,11 @@ docker compose --env-file .env --env-file .miniapp.env \
   -p luxmed-watcher-mvp -f compose.browser.yml -f compose.miniapp.yml up -d --build
 ```
 
-The public app listens on port 19090 on the WireGuard address. Traefik reaches it over the private existing link. The bot's ticket API is accessible only inside Compose. With the default Compose files the browser is assigned to the single ID in `ADMIN_TELEGRAM_IDS`. The public origin must match the HTTPS address sent by Telegram.
+The public app listens on port 19090 on the WireGuard address. Traefik reaches it over the private existing link. The bot's ticket API is accessible only inside Compose. With the default Compose files the browser is assigned to the single ID in `ADMIN_TELEGRAM_IDS`. The public origin must match the HTTPS address sent by Telegram. `LUXMED_DASHBOARD_API_URL` points to the private Go API, which must be online to authorize new browser streams.
 
 ## Additional users
 
-Assign one dedicated browser worker, private Docker network and profile volume to each Telegram user ID. The users share the Go service, with separate search settings and history. Keep only administrators in `ADMIN_TELEGRAM_IDS`. An admin assigned to a browser can issue `/invite` codes. After the assignment is deployed, the invited user opens the private chat and sends `/start CODE`. A worker assignment alone does not activate an account.
+Assign one dedicated browser worker, private Docker network and profile volume to each Telegram user ID. The users share the Go service and city and procedure dictionaries, with separate search settings, slot history and LuxMed sessions. The provider evaluates appointment availability through each user's worker. Keep only administrators in `ADMIN_TELEGRAM_IDS`. An admin assigned to a browser can issue `/invite` codes. After the assignment is deployed, the invited user opens the private chat and sends `/start CODE`. A worker assignment alone does not activate an account.
 
 To add a second user, set `LUXMED_INTERNAL_KEY` in `.miniapp.env` to a 32-byte hex secret generated locally with `openssl rand -hex 32`. The watcher and gateway use this shared secret for ticket issuance. The browser workers do not receive it. Put the following route example in the same file. Replace the example IDs with the existing owner's Telegram ID and the new user's Telegram ID. Keep the first worker named `browser` to preserve the owner's current profile. Explicit routes replace the default single-owner mapping.
 

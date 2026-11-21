@@ -113,6 +113,7 @@
   "watch.checked": "Sprawdzanie zakończone. Pasujące terminy: %d.",
   "watch.check_partial": "Sprawdzono część wybranych dat. Potwierdzone terminy: %d. Pozostałe sprawdź w LUX MED.",
   "watch.check_rate_limited": "Trwa sprawdzanie lub obowiązuje przerwa między sprawdzeniami. Spróbuj ponownie później.",
+  "watch.browser_busy": "Przeglądarka jest zajęta. Zamknij okno logowania lub spróbuj ponownie za chwilę.",
   "watch.check_inactive": "Wznów obserwację, aby ją sprawdzić.",
   "watch.deleted": "Obserwacja usunięta.",
   "watch.list.item": "%s\nStatus: %s\nCel: %s / %s\nOstatnie sprawdzenie: %s\nZnaleziono: %d",

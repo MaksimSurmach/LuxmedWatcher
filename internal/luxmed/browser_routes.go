@@ -47,11 +47,11 @@ func ParseBrowserRoutes(raw string) (map[int64]BrowserRoute, error) {
 		if api == nil || viewer == nil || !strings.EqualFold(api.Hostname(), viewer.Hostname()) {
 			return nil, invalid
 		}
-		apiKey, viewerKey := strings.ToLower(api.Host), strings.ToLower(viewer.Host)
-		if apiKey == viewerKey || used[apiKey] || used[viewerKey] {
+		host := strings.ToLower(api.Hostname())
+		if api.Port() == viewer.Port() || used[host] {
 			return nil, invalid
 		}
-		used[apiKey], used[viewerKey] = true, true
+		used[host] = true
 		routes[id] = route
 	}
 	if token, err := dec.Token(); err != nil || token != json.Delim('}') || len(routes) == 0 {

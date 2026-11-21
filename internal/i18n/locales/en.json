@@ -113,6 +113,7 @@
   "watch.checked": "Check complete. Matching slots: %d.",
   "watch.check_partial": "Search covered only part of the requested dates. Verified slots: %d. Open LuxMed for the rest.",
   "watch.check_rate_limited": "A check is running or the account is cooling down. Try again later.",
+  "watch.browser_busy": "The browser is busy. Close the sign-in window or try again in a moment.",
   "watch.check_inactive": "Resume this watch before checking it.",
   "watch.deleted": "Watch deleted.",
   "watch.list.item": "%s\nStatus: %s\nTarget: %s / %s\nLast check: %s\nFound: %d",

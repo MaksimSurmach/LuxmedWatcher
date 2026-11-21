@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
+	"sync"
 	"testing"
 	"time"
 
@@ -235,9 +238,9 @@ func TestBrowserChecksUseIndependentWorkers(t *testing.T) {
 		return browser
 	}
 	runner.UseBrowsers(map[int64]*luxmed.Browser{42: makeWorker(watchA), 84: makeWorker(watchB)})
-	results := make(chan error, 2)
-	go func() { results <- runner.CheckWatch(ctx, watchA) }()
-	go func() { results <- runner.CheckWatch(ctx, watchB) }()
+	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var checks sync.WaitGroup
+	scheduler.tick(ctx, &checks, make(chan struct{}, cap(runner.capacity)))
 	seen := make(map[int]bool)
 	for range 2 {
 		select {
@@ -254,9 +257,11 @@ func TestBrowserChecksUseIndependentWorkers(t *testing.T) {
 		t.Fatalf("the same user ran two checks: %v", err)
 	}
 	close(release)
-	for range 2 {
-		if err := <-results; err != nil {
-			t.Fatal(err)
+	checks.Wait()
+	for _, id := range []int64{watchA.ID, watchB.ID} {
+		watch, err := db.Watch(ctx, id)
+		if err != nil || watch.LastSuccessAt == nil {
+			t.Fatalf("scheduled watch %d did not finish: %+v, %v", id, watch, err)
 		}
 	}
 }
