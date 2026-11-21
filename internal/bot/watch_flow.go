@@ -11,6 +11,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
 )
 
 func allowsFlowCallback(state *flow, data string) bool {
@@ -258,7 +259,7 @@ func (b *Bot) watchSummary(user domain.User, watch domain.Watch) string {
 			days = strings.Join(names, ", ")
 		}
 	}
-	return tr("flow.watch.preview", watch.ServiceName, watch.CityName, doctor, truncateMessage(facilities, 400), dates, days, hours, (time.Duration(watch.CheckIntervalSeconds) * time.Second).String())
+	return tr("flow.watch.preview", procedures.Name(user.Locale, watch.ServiceName), watch.CityName, doctor, truncateMessage(facilities, 400), dates, days, hours, (time.Duration(watch.CheckIntervalSeconds) * time.Second).String())
 }
 
 func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {
@@ -271,7 +272,7 @@ func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
-	if _, err := b.db.LuxMedAccount(ctx, user.ID); err != nil {
+	if err := b.checkAccount(ctx, user); err != nil {
 		b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}

@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 )
 
 type Config struct {
@@ -25,6 +28,10 @@ type Config struct {
 	LogLevel               slog.Level
 	EnableRawLuxMedPayload bool
 	HealthAddr             string
+	BrowserAPIURL          string
+	BrowserViewerURL       string
+	MiniAppURL             string
+	MiniAppAgentURL        string
 }
 
 func LoadConfig() (Config, error) {
@@ -40,6 +47,10 @@ func LoadConfig() (Config, error) {
 		PollTimeout:          envInt("TELEGRAM_POLL_TIMEOUT", 30),
 		LogLevel:             parseLogLevel(envString("LOG_LEVEL", "INFO")),
 		HealthAddr:           envString("HEALTH_ADDR", ":8080"),
+		BrowserAPIURL:        strings.TrimSpace(os.Getenv("LUXMED_BROWSER_API_URL")),
+		BrowserViewerURL:     strings.TrimSpace(os.Getenv("LUXMED_VIEWER_URL")),
+		MiniAppURL:           strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_URL")),
+		MiniAppAgentURL:      strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_AGENT_URL")),
 	}
 	cfg.EnableRawLuxMedPayload = envBool("ENABLE_RAW_LUXMED_PAYLOAD", false)
 
@@ -49,11 +60,17 @@ func LoadConfig() (Config, error) {
 	}
 	cfg.MasterKey = key
 
+	if cfg.BrowserAPIURL != "" && len(cfg.AdminTelegramIDs) != 1 {
+		return Config{}, fmt.Errorf("browser mode requires exactly one admin Telegram ID")
+	}
+	if (cfg.MiniAppURL == "") != (cfg.MiniAppAgentURL == "") || (cfg.MiniAppURL != "" && cfg.BrowserAPIURL == "") {
+		return Config{}, fmt.Errorf("Mini App requires browser mode and both Mini App URLs")
+	}
 	if cfg.TelegramToken == "" {
 		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN is required")
 	}
-	if cfg.DefaultLocale != "en" && cfg.DefaultLocale != "ru" && cfg.DefaultLocale != "pl" {
-		return Config{}, fmt.Errorf("DEFAULT_LOCALE must be one of en, ru, pl")
+	if !slices.Contains(i18n.SupportedLocales, cfg.DefaultLocale) {
+		return Config{}, fmt.Errorf("DEFAULT_LOCALE must be one of %s", strings.Join(i18n.SupportedLocales, ", "))
 	}
 	if cfg.MinimumInterval < time.Second || cfg.PollTimeout < 1 || cfg.PollTimeout > 60 || cfg.NotificationCooldown < 0 {
 		return Config{}, fmt.Errorf("invalid check interval, polling timeout or notification cooldown")

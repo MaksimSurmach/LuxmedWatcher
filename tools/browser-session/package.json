@@ -1,0 +1,18 @@
+{
+  "name": "luxmed-watcher-browser-session",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "connect": "node cli.mjs connect",
+    "check": "node cli.mjs check",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@novnc/novnc": "1.7.0",
+    "playwright": "1.65.1",
+    "ws": "8.23.0"
+  }
+}

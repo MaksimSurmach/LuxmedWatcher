@@ -71,6 +71,14 @@ func (db *DB) SetUserPreferredCity(ctx context.Context, userID int64, city domai
 	return err
 }
 
+func (db *DB) SetUserPreferences(ctx context.Context, userID int64, locale string, city domain.City) error {
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE users SET locale=$1, preferred_city_id=NULLIF($2, 0), preferred_city_name=$3, updated_at=$4
+		WHERE id=$5
+	`, locale, city.ID, city.Name, time.Now().UTC(), userID)
+	return requireOneRow(res, err)
+}
+
 func (db *DB) CreateInvite(ctx context.Context, code string, createdBy int64, maxUses int, expiresAt *time.Time) error {
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO invite_codes (code_hash, created_by_user_id, max_uses, used_count, expires_at, created_at)
@@ -278,6 +286,13 @@ func (db *DB) Watch(ctx context.Context, id int64) (domain.Watch, error) {
 func (db *DB) SetWatchStatus(ctx context.Context, id int64, status domain.WatchStatus) error {
 	_, err := db.sql.ExecContext(ctx, `UPDATE watches SET status=$1, updated_at=$2 WHERE id=$3`, status, time.Now().UTC(), id)
 	return err
+}
+
+func (db *DB) SetUserWatchStatus(ctx context.Context, userID, id int64, status domain.WatchStatus) error {
+	res, err := db.sql.ExecContext(ctx, `
+		UPDATE watches SET status=$1, updated_at=$2 WHERE id=$3 AND user_id=$4 AND status <> $5
+	`, status, time.Now().UTC(), id, userID, domain.WatchStatusDeleted)
+	return requireOneRow(res, err)
 }
 
 func (db *DB) MarkWatchChecked(ctx context.Context, id int64, success bool, errText string) error {

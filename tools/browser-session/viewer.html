@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Вход в LuxMed</title>
+<style>
+body { margin: 0; background: #151a20; color: white; font: 16px system-ui; }
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 18px; }
+button { font: inherit; padding: 8px 14px; cursor: pointer; }
+#screen { height: calc(100dvh - 64px); }
+</style>
+<header><span id="status" role="status">Подключаю Chrome…</span><button id="done">Закрыть просмотр</button></header>
+<div id="screen"></div>
+<script type="module" src="/viewer.mjs"></script>
+</html>

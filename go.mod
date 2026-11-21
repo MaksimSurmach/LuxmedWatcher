@@ -3,6 +3,7 @@ module github.com/maksimsurmach/luxmed-watcher
 go 1.26.11
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/lib/pq v1.12.3
 	modernc.org/sqlite v1.36.3

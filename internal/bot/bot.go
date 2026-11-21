@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	randv2 "math/rand/v2"
 	"net/url"
@@ -19,6 +20,7 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
@@ -30,6 +32,8 @@ type Config struct {
 	MinimumInterval  time.Duration
 	DefaultInterval  time.Duration
 	PollTimeout      int
+	Browser          *luxmed.Browser
+	MiniApp          *luxmed.MiniApp
 }
 
 type Bot struct {
@@ -135,27 +139,54 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	if len(histories) == 0 {
 		return 0, nil
 	}
-	var text strings.Builder
-	text.WriteString(b.catalog.T(user.Locale, "notification.batch", max(total, len(histories)), truncateMessage(watch.Name, 140)))
-	for _, item := range histories[:min(10, len(histories))] {
-		fmt.Fprintf(&text, "\n\n%s\n%s · %s", item.DateTime.In(luxmed.Location()).Format("2006-01-02 15:04"),
-			truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120))
+	msg := tgbotapi.NewMessage(user.TelegramChatID, b.appointmentNotification(user.Locale, watch, histories, total))
+	msg.ParseMode = tgbotapi.ModeHTML
+	msg.DisableWebPagePreview = true
+	keyboard := [][]miniAppButton{
+		{{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), portalURL(histories[0].BookingURL))}},
+		{
+			{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.pause"), fmt.Sprintf("watch:pause:%d", watch.ID))},
+			{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.show_watch"), fmt.Sprintf("watch:show:%d", watch.ID))},
+		},
+		{{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID))}},
 	}
-
-	msg := tgbotapi.NewMessage(user.TelegramChatID, text.String())
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), portalURL(histories[0].BookingURL))),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.pause"), fmt.Sprintf("watch:pause:%d", watch.ID)),
-			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.show_watch"), fmt.Sprintf("watch:show:%d", watch.ID)),
-		),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID))),
-	)
+	if b.cfg.MiniApp != nil && b.cfg.AdminTelegramIDs[user.TelegramUserID] {
+		button := newMiniAppButton(b.catalog.T(user.Locale, "button.open_app"), b.cfg.MiniApp.DashboardURL()+"?tab=history")
+		keyboard = append(keyboard, []miniAppButton{button})
+	}
+	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": keyboard}
 	sent, err := b.api.Send(msg)
 	if err != nil {
 		return 0, fmt.Errorf("Telegram notification delivery failed")
 	}
 	return sent.MessageID, nil
+}
+
+func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histories []domain.AppointmentHistory, total int) string {
+	var text strings.Builder
+	count := max(total, len(histories))
+	title := b.catalog.T(locale, "notification.title", count)
+	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(locale, watch), 240)))
+	preview := histories[:min(10, len(histories))]
+	for _, item := range preview {
+		fmt.Fprintf(&text, "\n\n<b>%s</b>", item.DateTime.In(luxmed.Location()).Format("02.01.2006 · 15:04"))
+		var details []string
+		for _, value := range []string{truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120)} {
+			if value != "" {
+				details = append(details, html.EscapeString(value))
+			}
+		}
+		if len(details) > 0 {
+			text.WriteString("\n" + strings.Join(details, " · "))
+		}
+		if item.Address != "" {
+			text.WriteString("\n" + html.EscapeString(truncateMessage(item.Address, 100)))
+		}
+	}
+	if remaining := count - len(preview); remaining > 0 {
+		fmt.Fprintf(&text, "\n\n<i>%s</i>", html.EscapeString(b.catalog.T(locale, "notification.more", remaining)))
+	}
+	return text.String()
 }
 
 func portalURL(raw string) string {
@@ -189,7 +220,8 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		b.handleCallback(ctx, update.CallbackQuery)
 		return
 	}
-	if update.Message == nil || !privateChat(update.Message.Chat, update.Message.From) {
+	if update.Message == nil || !privateChat(update.Message.Chat, update.Message.From) ||
+		(b.cfg.Browser != nil && !b.cfg.AdminTelegramIDs[update.Message.From.ID]) {
 		return
 	}
 	user, err := b.upsertUser(ctx, update.Message)
@@ -272,6 +304,14 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 		b.showMenu(user)
 	case "new":
 		b.startWatchFlow(ctx, user)
+	case "app":
+		if b.cfg.MiniApp == nil {
+			b.showMenu(user)
+			return
+		}
+		b.sendMiniApp(user, "flow.browser.dashboard", "button.open_app", b.cfg.MiniApp.DashboardURL())
+	case "connect":
+		b.showAccount(ctx, user)
 	case "watches":
 		b.showWatches(ctx, user)
 	case "history":
@@ -291,7 +331,11 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
-		b.send(user, b.catalog.T(user.Locale, "flow.account.removed"), mainKeyboard(b.catalog, user.Locale))
+		key := "flow.account.removed"
+		if b.cfg.Browser != nil {
+			key = "flow.browser.logout"
+		}
+		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
 	case "invite":
 		b.createInvite(ctx, user, msg.CommandArguments())
 	default:
@@ -382,7 +426,8 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 }
 
 func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
-	if cb.Message == nil || !privateChat(cb.Message.Chat, cb.From) {
+	if cb.Message == nil || !privateChat(cb.Message.Chat, cb.From) ||
+		(b.cfg.Browser != nil && !b.cfg.AdminTelegramIDs[cb.From.ID]) {
 		return
 	}
 	user, err := b.db.UserByTelegramID(ctx, cb.From.ID)
@@ -424,8 +469,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		b.clearFlow(user.ID)
 		b.showMenu(user)
 	case data == "account":
-		b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
-		b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
+		b.showAccount(ctx, user)
 	case data == "new":
 		b.startWatchFlow(ctx, user)
 	case data == "watches":
@@ -571,7 +615,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 }
 
 func (b *Bot) startWatchFlow(ctx context.Context, user domain.User) {
-	if _, err := b.db.LuxMedAccount(ctx, user.ID); err != nil {
+	if err := b.checkAccount(ctx, user); err != nil {
 		b.send(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
@@ -1384,7 +1428,7 @@ func (b *Bot) showProcedureSearchResultsPage(ctx context.Context, user domain.Us
 	page = min(max(page, 0), 10000)
 
 	offset := page * pageSize
-	procedures, err := b.db.SearchProceduresPage(ctx, state.Watch.CityID, query, pageSize+1, offset)
+	procedures, err := procedures.Search(ctx, b.db, state.Watch.CityID, user.Locale, query, pageSize+1, offset)
 
 	b.logger.Info(
 		"search procedures page",
@@ -1425,12 +1469,12 @@ func (b *Bot) showProcedureSearchResultsPage(ctx context.Context, user domain.Us
 	b.sendProcedureOptions(user, title, procedures, procedureResultsKeyboard(procedures, previousCallback, nextCallback, b.catalog, user.Locale))
 }
 
-func (b *Bot) sendProcedureOptions(user domain.User, title string, procedures []domain.Procedure, markup tgbotapi.InlineKeyboardMarkup) {
+func (b *Bot) sendProcedureOptions(user domain.User, title string, items []domain.Procedure, markup tgbotapi.InlineKeyboardMarkup) {
 	var lines []string
 	lines = append(lines, strings.TrimSpace(title))
 
-	for i, proc := range procedures {
-		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, proc.Name, proc.ID))
+	for i, proc := range items {
+		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, procedures.Name(user.Locale, proc.Name), proc.ID))
 	}
 
 	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)
@@ -1456,6 +1500,12 @@ func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domai
 }
 
 func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (luxmed.Client, error) {
+	if b.cfg.Browser != nil {
+		if err := b.checkAccount(ctx, user); err != nil {
+			return nil, err
+		}
+		return b.cfg.Browser.Client(), nil
+	}
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil {
 		return nil, err
@@ -1490,7 +1540,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "pause":
 		state = domain.WatchStatusPaused
 	case "resume":
-		if _, err := b.db.LuxMedAccount(ctx, user.ID); err != nil {
+		if err := b.checkAccount(ctx, user); err != nil {
 			b.send(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
 			return
 		}

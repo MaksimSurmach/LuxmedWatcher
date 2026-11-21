@@ -1,0 +1,58 @@
+:root {
+  color-scheme: light dark;
+  font: 16px/1.45 system-ui, sans-serif;
+  background: var(--tg-theme-bg-color, #f6f5ef);
+  color: var(--tg-theme-text-color, #102820);
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; }
+[hidden] { display: none !important; }
+
+main {
+  height: min(var(--tg-viewport-height, 100dvh), var(--visual-viewport-height, 100dvh));
+  display: flex;
+  flex-direction: column;
+  gap: .6rem;
+  padding: max(.6rem, env(safe-area-inset-top), var(--tg-content-safe-area-inset-top, 0px))
+    max(.7rem, env(safe-area-inset-right))
+    max(.6rem, env(safe-area-inset-bottom), var(--tg-content-safe-area-inset-bottom, 0px))
+    max(.7rem, env(safe-area-inset-left));
+}
+
+header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: .6rem;
+}
+
+h1 { margin: 0; font-size: 1.12rem; }
+p { margin: .15rem 0 0; font-size: .875rem; }
+
+#screen {
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  touch-action: none;
+  border-radius: .9rem;
+  background: var(--tg-theme-secondary-bg-color, ButtonFace);
+}
+
+#controls, #remote-keys { display: flex; flex-wrap: wrap; gap: .45rem; }
+#controls [data-scroll] { min-width: 44px; }
+#typing { display: grid; gap: .35rem; }
+#typing label { font-size: .875rem; }
+
+button, input {
+  min-height: 44px;
+  font: inherit;
+  color: inherit;
+  background: var(--tg-theme-secondary-bg-color, ButtonFace);
+  border: 1px solid var(--tg-theme-hint-color, ButtonBorder);
+  border-radius: .45rem;
+  padding: .3rem .65rem;
+}
+
+button { cursor: pointer; }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--tg-theme-link-color, Highlight); }
