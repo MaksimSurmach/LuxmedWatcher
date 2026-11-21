@@ -1,7 +1,8 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { allowedPortalResources, fetchCatalog } from './portal-api.mjs';
+import { allowedPortalResources } from './portal-api.mjs';
+import { requestPortalResource } from './direct-session.mjs';
 import { checkPortal, observeSession, portalOrigin } from './session.mjs';
 import { startScreencast } from './screencast-server.mjs';
 
@@ -29,11 +30,16 @@ default:
 }
 
 const profiles = new Map();
+const views = new Set();
 const wss = new WebSocketServer({ noServer: true, maxPayload: 8192, handleProtocols: () => 'binary' });
 let stopping = false;
 
-function reply(res, status, body = '') {
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(body);
+function reply(res, status, body = '', retryAfter) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
+    ...(retryAfter && { 'Retry-After': retryAfter }),
+  }).end(body);
 }
 
 function authorized(req) {
@@ -53,53 +59,17 @@ function entryFor(id) {
   let entry = profiles.get(id);
   if (entry) return entry;
   if (profiles.size >= 12) return;
-  entry = { busy: false, viewer: null, ticket: '', expires: 0, readyUntil: 0, snapshotAt: 0 };
+  entry = { busy: false, viewer: null, ticket: '', expires: 0, needsLogin: false };
   profiles.set(id, entry);
   return entry;
 }
 
 function deferCleanup(id, entry) {
   clearTimeout(entry.idle);
-  entry.idle = setTimeout(async () => {
-    if (entry.busy || entry.viewer) return;
-    entry.busy = true;
-    try {
-      if (entry.readyUntil) await saveProfile(entry, true);
-    } finally {
-      await entry.handle?.close().catch(() => {});
-      if (profiles.get(id) === entry) profiles.delete(id);
-    }
+  entry.idle = setTimeout(() => {
+    if (!entry.busy && !entry.viewer) profiles.delete(id);
   }, Math.max(idleTime[mode], entry.expires - Date.now()));
   entry.idle.unref();
-}
-
-async function saveProfile(entry, force = false) {
-  if (!entry.handle || !force && Date.now() < entry.snapshotAt + 60_000) return;
-  try {
-    await entry.handle.save();
-    entry.snapshotAt = Date.now();
-  } catch {
-    // Keep the latest valid on-disk profile if the context closes mid-snapshot.
-  }
-}
-
-async function pageFor(id, entry) {
-  if (!entry.handle || entry.handle.page.isClosed() || !entry.handle.page.context().browser()?.isConnected()) {
-    const handle = await provider.open(id);
-    entry.handle = handle;
-    entry.report = observeSession(handle.page.context());
-    entry.readyUntil = 0;
-    entry.snapshotAt = 0;
-  }
-  return entry.handle.page;
-}
-
-async function portalReady(page, entry) {
-  if (Date.now() < entry.readyUntil && new URL(page.url()).origin === portalOrigin) return 'ready';
-  const state = await checkPortal(page);
-  entry.report(state);
-  entry.readyUntil = state === 'ready' ? Date.now() + 60_000 : 0;
-  return state;
 }
 
 const api = createServer(async (req, res) => {
@@ -120,15 +90,10 @@ const api = createServer(async (req, res) => {
 
   entry.busy = true;
   try {
-    const page = await pageFor(id, entry);
-    const ready = await portalReady(page, entry);
-    if (ready === 'needs_login') return reply(res, 401);
-    if (ready !== 'ready') return reply(res, 503);
-    await saveProfile(entry);
-    if (route === '/session') return reply(res, 200);
-    const response = await fetchCatalog(page, route + search);
-    if (response.status === 401) entry.readyUntil = 0;
-    return reply(res, response.status, response.body);
+    if (entry.needsLogin) return reply(res, 401);
+    const { status, body, retryAfter } = await requestPortalResource(profileDir, id, route === '/session' ? route : route + search);
+    entry.needsLogin = status === 401;
+    return reply(res, status, body, retryAfter);
   } catch (error) {
     reply(res, error?.code === 'BROWSER_BUSY' ? 409 : 503);
   } finally {
@@ -150,43 +115,46 @@ web.on('upgrade', (req, socket, head) => {
   }
   entry.ticket = '';
   entry.expires = 0;
-  entry.readyUntil = 0;
-  wss.handleUpgrade(req, socket, head, (client) => void view(address.id, entry, client));
+  wss.handleUpgrade(req, socket, head, (client) => {
+    const task = view(address.id, entry, client);
+    views.add(task);
+    void task.finally(() => views.delete(task));
+  });
 });
 
 async function view(id, entry, socket) {
   entry.viewer = socket;
   const timeout = setTimeout(() => socket.close(), 10 * 60_000);
-  let cleanup;
-  let closed = false;
-
-  const opening = (async () => {
-    const page = await pageFor(id, entry);
-    if (closed) return;
-    if (new URL(page.url()).origin !== portalOrigin) await portalReady(page, entry);
-    if (closed || socket.readyState !== WebSocket.OPEN) return;
-    cleanup = await startScreencast(page, socket);
-  })();
-
+  const disconnected = new Promise(resolve => socket.once('close', resolve));
   socket.once('error', () => socket.terminate());
-  socket.once('close', async () => {
-    closed = true;
-    clearTimeout(timeout);
-    try {
-      await opening;
-      await cleanup?.();
-      await saveProfile(entry, true);
-    } catch {
-      // The page may have closed before the viewer attached.
-    } finally {
-      entry.viewer = null;
-      if (!stopping) deferCleanup(id, entry);
-    }
-  });
+  let handle;
+  let cleanup;
+
   try {
-    await opening;
+    handle = await provider.open(id);
+    if (socket.readyState === WebSocket.OPEN) {
+      const report = observeSession(handle.page.context());
+      report(await checkPortal(handle.page));
+      if (socket.readyState === WebSocket.OPEN) cleanup = await startScreencast(handle.page, socket);
+    }
+    await disconnected;
   } catch (error) {
     socket.close(error?.code === 'BROWSER_BUSY' ? 1013 : 1011);
+    await disconnected;
+  } finally {
+    clearTimeout(timeout);
+    await cleanup?.().catch(() => {});
+    if (handle) {
+      try {
+        await handle.save();
+        entry.needsLogin = false;
+      } catch {
+        console.warn('Could not save the LuxMed login profile');
+      }
+      await handle.close().catch(() => {});
+    }
+    entry.viewer = null;
+    if (!stopping) deferCleanup(id, entry);
   }
 }
 
@@ -201,6 +169,7 @@ async function stop() {
   }
   api.close();
   web.close();
+  await Promise.allSettled(views);
   await provider.close().catch(() => {
     console.warn('Could not close the browser provider cleanly');
   });

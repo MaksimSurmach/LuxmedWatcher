@@ -1,4 +1,5 @@
 {
+  "button.connect": "Падключыць LuxMed",
   "button.account": "Акаўнт LuxMed",
   "button.afternoon": "12:00–16:00",
   "button.all_places_in_city": "Усе клінікі ў горадзе",
@@ -28,6 +29,8 @@
   "button.new_watch": "Новы пошук",
   "button.next": "Далей",
   "button.next_days": "Наступныя %d дн.",
+  "button.book_portal": "Запіс у LUX MED",
+  "button.slot_results": "Глядзець тэрміны",
   "button.open_app": "Адкрыць праграму",
   "button.open_luxmed": "Адкрыць LuxMed",
   "button.pause": "Паўза",
@@ -106,6 +109,7 @@
   "menu.main.title": "Галоўнае меню",
   "notification.appointment_found.body": "Пошук: %s\nДата: %s\nУрач: %s\nКлініка: %s\nПрацэдура: %s\n\nЗапіс адпавядае вашым фільтрам.",
   "notification.appointment_found.title": "Знойдзены запіс LuxMed",
+  "notification.booking_hint": "Пацвердзіце запіс на сайце LUX MED.",
   "notification.title": "Знойдзена слотаў LuxMed: %d",
   "notification.more": "Яшчэ ў гісторыі: %d",
   "settings.city_saved": "Горад захаваны: %s.",
@@ -121,5 +125,11 @@
   "watch.resumed": "Пошук адноўлены.",
   "watch.status.active": "Актыўны",
   "watch.status.checked": "Статус: %s\nАпошняя праверка: %s\nВынікаў у гісторыі: %d",
-  "watch.status.paused": "На паўзе"
+  "watch.status.paused": "На паўзе",
+  "command.start": "Запусціць Luxmed Watcher",
+  "command.help": "Паказаць даведку",
+  "widget.start": "Адсочвайце запісы ў LuxMed і атрымлівайце апавяшчэнні ў Telegram, калі з’явіцца прыдатны час.",
+  "widget.start_connect": "Падключыце акаўнт і стварыце першы пошук. Уводзьце даныя для ўваходу толькі ў акне ўваходу LuxMed.",
+  "widget.connect": "Адкрыйце LuxMed, увайдзіце і пры неабходнасці пацвердзіце ўваход. Затым закрыйце акно ўваходу. Не адпраўляйце лагін і пароль LuxMed у гэты чат.",
+  "widget.error": "Не ўдалося выканаць дзеянне. Паспрабуйце яшчэ раз або скарыстайцеся кнопкамі ніжэй."
 }

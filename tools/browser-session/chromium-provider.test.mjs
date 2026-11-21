@@ -74,6 +74,9 @@ test('Chromium accounts share a browser and restore only their own private state
   const reopened = await provider.open('1');
   await reopened.page.goto(origin);
   assert.deepEqual(await fixtureState(reopened.page), ['fixture=one', 'one', 'one']);
+  const reopenedBrowser = reopened.page.context().browser();
+  await reopened.close();
+  assert.equal(reopenedBrowser.isConnected(), false);
   const firstStatePath = join(profileDir, '1', 'storage-state.json');
   const secondStatePath = join(profileDir, '2', 'storage-state.json');
   await copyFile(firstStatePath, secondStatePath);

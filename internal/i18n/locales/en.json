@@ -1,4 +1,5 @@
 {
+  "button.connect": "Connect LuxMed",
   "button.account": "LuxMed account",
   "button.afternoon": "12:00–16:00",
   "button.all_places_in_city": "All places in city",
@@ -28,6 +29,8 @@
   "button.new_watch": "New watch",
   "button.next": "Next",
   "button.next_days": "Next %d days",
+  "button.book_portal": "Book in LUX MED",
+  "button.slot_results": "View slots",
   "button.open_app": "Open app",
   "button.open_luxmed": "Open LuxMed",
   "button.pause": "Pause",
@@ -106,6 +109,7 @@
   "menu.main.title": "Main menu",
   "notification.appointment_found.body": "Watch: %s\nDate: %s\nDoctor: %s\nFacility: %s\nService: %s\n\nThis result matches your filters.",
   "notification.appointment_found.title": "Found LuxMed appointment",
+  "notification.booking_hint": "Confirm your appointment in the LUX MED portal.",
   "notification.title": "LuxMed appointments found: %d",
   "notification.more": "More in history: %d",
   "settings.city_saved": "City saved: %s.",
@@ -121,5 +125,11 @@
   "watch.resumed": "Watch resumed.",
   "watch.status.active": "Active",
   "watch.status.checked": "Status: %s\nLast check: %s\nResults in history: %d",
-  "watch.status.paused": "Paused"
+  "watch.status.paused": "Paused",
+  "command.start": "Start Luxmed Watcher",
+  "command.help": "Show help",
+  "widget.start": "Watch LuxMed for appointments and get a Telegram alert when a slot matches your search.",
+  "widget.start_connect": "Connect your account, then create your first watch. Enter LuxMed credentials only in the LuxMed sign-in window.",
+  "widget.connect": "Open LuxMed, sign in, and complete verification if prompted. Close the sign-in window when finished. Do not send your LuxMed login or password in this chat.",
+  "widget.error": "This action could not be completed. Try again or use the buttons below."
 }

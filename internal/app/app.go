@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -104,14 +106,41 @@ func (a *App) Run(ctx context.Context) error {
 	tgBot.SetRunner(runner)
 	watcher := scheduler.New(db, runner, 15*time.Second, a.cfg.HistoryRetention, a.logger)
 
+	dashboardCfg := miniapp.DashboardConfig{
+		MinimumInterval: a.cfg.MinimumInterval,
+		DefaultInterval: a.cfg.DefaultInterval,
+	}
 	var dashboard http.Handler
 	if miniApp != nil {
-		dashboard = miniapp.Dashboard(miniapp.DashboardConfig{
-			Origin: miniApp.Origin(), BotID: api.Self.ID,
-			MinimumInterval: a.cfg.MinimumInterval, DefaultInterval: a.cfg.DefaultInterval,
-		}, db, browsers, miniApp)
+		dashboardCfg.Origin, dashboardCfg.BotID = miniApp.Origin(), api.Self.ID
+		dashboard = miniapp.Dashboard(dashboardCfg, db, browsers, miniApp)
 	}
 	var workers sync.WaitGroup
+	if a.cfg.ControlKey != "" {
+		if browsers[a.cfg.ControlTelegramID] == nil {
+			return errors.New("control API user needs an assigned browser")
+		}
+		listener, err := net.Listen("tcp", "127.0.0.1:8094")
+		if err != nil {
+			return fmt.Errorf("listen for private control API: %w", err)
+		}
+		server := &http.Server{
+			Handler:           miniapp.Control(dashboardCfg, db, browsers, a.cfg.ControlTelegramID, a.cfg.ControlKey),
+			ReadHeaderTimeout: 5 * time.Second,
+			ReadTimeout:       10 * time.Second,
+			WriteTimeout:      30 * time.Second,
+			IdleTimeout:       30 * time.Second,
+			MaxHeaderBytes:    8 << 10,
+		}
+		context.AfterFunc(ctx, func() { _ = server.Close() })
+		workers.Go(func() {
+			a.logger.Info("private control API listening", "addr", listener.Addr())
+			if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				a.logger.Error("private control API stopped", "error", err)
+				stop()
+			}
+		})
+	}
 	workers.Add(2)
 	go func() {
 		defer workers.Done()

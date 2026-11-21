@@ -345,6 +345,10 @@ func (d *dashboard) settings(w http.ResponseWriter, r *http.Request, user domain
 }
 
 func (d *dashboard) status(w http.ResponseWriter, r *http.Request, user domain.User) {
+	d.setStatus(w, r, user, true)
+}
+
+func (d *dashboard) setStatus(w http.ResponseWriter, r *http.Request, user domain.User, allowDelete bool) {
 	var input struct {
 		ID     int64
 		Status domain.WatchStatus
@@ -352,12 +356,12 @@ func (d *dashboard) status(w http.ResponseWriter, r *http.Request, user domain.U
 	if !decodeDashboard(w, r, &input) {
 		return
 	}
-	switch input.Status {
-	case domain.WatchStatusActive, domain.WatchStatusPaused, domain.WatchStatusDeleted:
-		dashboardResult(w, nil, d.db.SetUserWatchStatus(r.Context(), user.ID, input.ID, input.Status))
-	default:
+	if input.Status != domain.WatchStatusActive && input.Status != domain.WatchStatusPaused &&
+		!(allowDelete && input.Status == domain.WatchStatusDeleted) {
 		reply(w, http.StatusBadRequest, nil)
+		return
 	}
+	dashboardResult(w, nil, d.db.SetUserWatchStatus(r.Context(), user.ID, input.ID, input.Status))
 }
 
 func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {

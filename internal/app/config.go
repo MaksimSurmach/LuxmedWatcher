@@ -37,6 +37,8 @@ type Config struct {
 	MiniAppURL             string
 	MiniAppAgentURL        string
 	MiniAppTicketKey       string
+	ControlKey             string
+	ControlTelegramID      int64
 }
 
 func LoadConfig() (Config, error) {
@@ -58,6 +60,7 @@ func LoadConfig() (Config, error) {
 		MiniAppURL:           strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_URL")),
 		MiniAppAgentURL:      strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_AGENT_URL")),
 		MiniAppTicketKey:     strings.TrimSpace(os.Getenv("LUXMED_INTERNAL_KEY")),
+		ControlKey:           strings.TrimSpace(os.Getenv("LUXMED_CONTROL_KEY")),
 	}
 	cfg.EnableRawLuxMedPayload = envBool("ENABLE_RAW_LUXMED_PAYLOAD", false)
 
@@ -95,6 +98,23 @@ func LoadConfig() (Config, error) {
 		}
 		if cfg.MiniAppURL == "" || !adminAssigned || !luxmed.ValidTicketKey(cfg.MiniAppTicketKey) {
 			return Config{}, fmt.Errorf("browser routes require the Mini App, a browser assigned to an admin and a 32-byte hex LUXMED_INTERNAL_KEY")
+		}
+	}
+	if cfg.ControlKey != "" {
+		if !luxmed.ValidTicketKey(cfg.ControlKey) {
+			return Config{}, fmt.Errorf("LUXMED_CONTROL_KEY must be a 32-byte hex key")
+		}
+		if raw := strings.TrimSpace(os.Getenv("LUXMED_CONTROL_TELEGRAM_ID")); raw != "" {
+			cfg.ControlTelegramID, err = strconv.ParseInt(raw, 10, 64)
+			if err != nil || cfg.ControlTelegramID <= 0 {
+				return Config{}, fmt.Errorf("invalid LUXMED_CONTROL_TELEGRAM_ID")
+			}
+		} else if len(cfg.AdminTelegramIDs) == 1 {
+			for id := range cfg.AdminTelegramIDs {
+				cfg.ControlTelegramID = id
+			}
+		} else {
+			return Config{}, fmt.Errorf("set LUXMED_CONTROL_TELEGRAM_ID to the assigned account")
 		}
 	}
 	if cfg.TelegramToken == "" {
