@@ -96,21 +96,25 @@ function show(title, html, focus = true) {
   }
 }
 
-function accountSection() {
-  return `<section class="card stack account">
+// The portal connection is only checked when the user asks (never automatically).
+// Compact: a status line with the two actions, used on Home. Full: adds instructions, used in Settings.
+function accountSection(compact = false) {
+  return `<section class="card stack account${compact ? ' compact' : ''}" data-state="${account}" aria-labelledby="account-heading">
     <div class="account-head">
-      <h2>${text('account.title')}</h2>
+      <h2 id="account-heading">${text('account.title')}</h2>
       <p class="account-status" data-state="${account}" role="status">${text(`account.${account}`)}</p>
     </div>
     <div class="account-actions">
-      <button type="button" class="secondary" id="connect" aria-describedby="account-instructions">${text('account.sign_in')} ${icon('link')}</button>
-      <button type="button" class="flat" id="account-check">${text('settings.check_account')}</button>
+      <button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text('account.sign_in')} ${icon('link')}</button>
+      <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
     </div>
-    <p class="muted" id="account-instructions">${text('account.instructions')}</p>
+    <p class="muted error" data-account-error role="status"></p>
+    ${compact ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
   </section>`;
 }
 
 function bindAccount() {
+  const failure = main.querySelector('[data-account-error]');
   const connect = main.querySelector('#connect');
   connect.onclick = () => void run(connect, async () => {
     const { url } = await api('connect');
@@ -119,39 +123,35 @@ function bindAccount() {
     target.searchParams.set('return', 'app');
     target.hash = location.hash;
     location.assign(target.href);
-  });
+  }, failure);
   const check = main.querySelector('#account-check');
   check.onclick = () => void run(check, async () => {
     account = (await api('account')).state;
+    const section = main.querySelector('.account');
     const status = main.querySelector('.account-status');
+    if (section) section.dataset.state = account;
     if (status) {
       status.dataset.state = account;
       status.textContent = t(`account.${account}`);
     }
-  });
+  }, failure);
 }
 
 function home() {
   const count = state.Watches?.length ?? 0;
   const searchHint = count ? text('home.saved_searches', { count }) : text('watches.empty');
   show(t('home.title'), `<p class="home-intro">${text('home.intro')}</p>
-    <div class="stack">
+    <div class="stack home">
       <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
-      <div class="home-shortcuts">
-        <button type="button" class="secondary" id="recommendations">${text('editor.recommendations')}</button>
-        <a class="secondary" href="${referralsPortal}" target="_blank" rel="noopener">${text('home.referrals')} ${icon('link')}</a>
+      <p class="home-count">${searchHint}</p>
+      <div class="rows">
+        <button type="button" class="row" id="recommendations"><span>${text('editor.recommendations')}</span></button>
+        <a class="row" href="${referralsPortal}" target="_blank" rel="noopener"><span>${text('home.referrals')}</span>${icon('link')}</a>
       </div>
-      ${accountSection()}
-      <div class="home-links">
-        <button type="button" data-open="watches">
-          ${icon('calendar')}<span>${text('tabs.watches')}</span><small>${searchHint}</small>
-        </button>
-        <button type="button" data-open="history">${icon('history')}<span>${text('tabs.history')}</span></button>
-        <button type="button" data-open="settings">${icon('settings')}<span>${text('tabs.settings')}</span></button>
-        <button type="button" data-open="settings" id="change-language">
-          ${icon('language')}<span>${text('home.change_language')}</span><small lang="${language}">${escape(languages[language])}</small>
-        </button>
-      </div>
+      ${accountSection(true)}
+      <button type="button" class="row row-quiet" data-open="settings" id="change-language">
+        <span>${icon('language')}${text('home.change_language')}</span><small lang="${language}">${escape(languages[language])}</small>
+      </button>
     </div>`);
   main.querySelector('#new-watch').onclick = () => void editor();
   main.querySelector('#recommendations').onclick = () => void editor(undefined, true);
@@ -164,20 +164,30 @@ function home() {
   bindAccount();
 }
 
+function hoursLabel(windows) {
+  return windows.map(window => `${weekdays[window.weekday]} ${window.from}–${window.to}`).join(' · ');
+}
+
 function watchCard(watch) {
   const active = watch.Status === 'active';
   const dates = watch.DateFrom && watch.DateTo
     ? `${dateText(watch.DateFrom)} — ${dateText(watch.DateTo)}`
     : text('watches.period_days', { days: watch.NextDays });
   const lastRun = watch.LastCheckedAt ? `${dateText(watch.LastCheckedAt)}, ${clock.format(new Date(watch.LastCheckedAt))}` : '';
-  return `<article class="card">
-    <div class="card-head"><h2><button type="button" class="watch-open" data-edit="${watch.ID}">${escape(watch.ServiceName || watch.Name)}</button></h2>
+  const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
+  return `<article class="card watch" data-status="${active ? 'active' : 'paused'}">
+    <div class="card-head"><h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
       <span class="badge ${active ? 'active' : ''}">${text(active ? 'watches.active' : 'watches.paused')}</span></div>
     <p class="meta">${icon('pin')}${escape(watch.CityName)}</p>
     <p class="meta">${icon('calendar')}${dates}</p>
     ${watch.DoctorName ? `<p class="meta">${escape(watch.DoctorName)}</p>` : ''}
-    ${lastRun ? `<p class="meta">${text(watch.LastError ? 'watches.check_error' : 'watches.checked')} · ${lastRun}</p>` : ''}
-    <div class="actions"><button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}">${text(active ? 'watches.pause' : 'watches.resume')}</button></div>
+    ${watch.TimeWindows?.length ? `<p class="meta">${escape(hoursLabel(watch.TimeWindows))}</p>` : ''}
+    ${minutes ? `<p class="meta">${text('watches.interval_card', { minutes })}</p>` : ''}
+    ${lastRun ? `<p class="meta ${watch.LastError ? 'error' : ''}">${text(watch.LastError ? 'watches.check_error' : 'watches.checked')} · ${lastRun}</p>` : ''}
+    <div class="actions">
+      <button type="button" class="secondary" data-edit="${watch.ID}" aria-describedby="watch-${watch.ID}">${text('watches.edit')}</button>
+      <button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}" aria-describedby="watch-${watch.ID}">${text(active ? 'watches.pause' : 'watches.resume')}</button>
+    </div>
   </article>`;
 }
 
@@ -186,6 +196,10 @@ function watches() {
   show(titleFor('watches'), `<div class="stack">
     <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
     ${items.length ? items.map(watchCard).join('') : `<div class="card empty"><h2>${text('watches.empty')}</h2><p>${text('watches.empty_hint')}</p></div>`}
+    ${items.length ? `<section class="stack">
+      <p class="muted" id="check-hint">${text('watches.check_chat_hint')}</p>
+      <button type="button" class="secondary" id="check-in-chat" aria-describedby="check-hint">${text('watches.check_chat')}</button>
+    </section>` : ''}
   </div>`);
   main.querySelector('#new-watch').onclick = () => void editor();
   for (const button of main.querySelectorAll('[data-edit]')) {
@@ -197,6 +211,11 @@ function watches() {
       await update('watches');
     });
   }
+  const chat = main.querySelector('#check-in-chat');
+  if (chat) chat.onclick = () => {
+    if (telegram?.close) telegram.close();
+    else flash(t('watches.check_chat_hint'));
+  };
 }
 
 function slotCard(slot) {
@@ -204,15 +223,17 @@ function slotCard(slot) {
   const expired = slot.Status === 'expired' || date < new Date();
   const parts = shortDate.formatToParts(date);
   const part = (name) => parts.find((item) => item.type === name)?.value;
-  return `<article class="card slot">
+  return `<article class="card slot${expired ? ' expired' : ''}">
     <div class="date-tile"><strong>${escape(part('day'))}</strong>${escape(part('month'))}</div>
-    <div>
+    <div class="slot-body">
       <h2>${clock.format(date)}</h2>
-      <h3>${escape(slot.Service || t('history.appointment'))}</h3>
-      ${[slot.Doctor, slot.Facility, slot.Address].filter(Boolean).map((line) => `<p class="meta">${escape(line)}</p>`).join('')}
+      ${slot.Facility ? `<p class="slot-clinic">${escape(slot.Facility)}</p>` : ''}
+      ${slot.Address ? `<p class="meta">${escape(slot.Address)}</p>` : ''}
+      ${slot.Doctor ? `<p class="meta">${escape(slot.Doctor)}</p>` : ''}
+      <p class="meta slot-service">${escape(slot.Service || t('history.appointment'))}</p>
       ${expired ? `<p class="muted">${text('history.expired')}</p>` : ''}
     </div>
-    ${expired ? '' : `<a class="flat" href="${portal}" target="_blank" rel="noopener">${text('history.open_portal')} ${icon('link')}</a>`}
+    ${expired ? '' : `<a class="primary" href="${portal}" target="_blank" rel="noopener">${text('history.open_portal')} ${icon('link')}</a>`}
   </article>`;
 }
 
@@ -225,6 +246,7 @@ async function historyScreen(id) {
     results.querySelector('button')?.remove();
     const cards = Slots.map(slotCard).join('');
     if (!offset) results.replaceChildren();
+    if (!offset && cards) results.insertAdjacentHTML('beforeend', `<p class="muted">${text('history.found_note')}</p>`);
     results.insertAdjacentHTML('beforeend', cards || `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`);
     if (More) {
       results.insertAdjacentHTML('beforeend', `<button class="secondary" type="button">${text('common.more')}</button>`);
@@ -250,8 +272,8 @@ async function settingsScreen(id) {
   show(titleFor('settings'), `<div class="stack">
     ${accountSection()}
     <form class="stack">
-      <section class="card stack">
-        <h2>${text('settings.preferences')}</h2>
+      <section class="card stack" aria-labelledby="preferences-heading">
+        <h2 id="preferences-heading">${text('settings.preferences')}</h2>
         <label class="field">${text('settings.default_city')}<select name="city"></select></label>
         <button type="button" class="secondary" id="load-cities" hidden>${text('settings.load_cities')}</button>
         <label class="field">${text('settings.language')}<select name="locale">
@@ -307,6 +329,7 @@ async function editor(watch, focusPicks = false) {
   let doctor = watch?.DoctorID ?? 0;
   let facilities = new Set(watch?.FacilityIDs);
   const existingHours = new Map((watch?.TimeWindows ?? []).map((window) => [window.weekday, window]));
+  const advancedOpen = Boolean(doctor || facilities.size);
   show(title, `<form class="stack">
     <fieldset class="card stack"><legend>${text('editor.what')}</legend>
       <label class="field">${text('editor.city')}<select name="city" required>${cityOptions(options, city, t('editor.choose_city'))}</select></label>
@@ -316,12 +339,11 @@ async function editor(watch, focusPicks = false) {
         <div class="stack" id="picks-list"></div>
         <button type="button" class="secondary" id="retry-picks" hidden>${text('common.retry')}</button>
       </section>`}
+      <p class="catalog-heading">${text('editor.catalog')}</p>
       <label class="field">${text('editor.service')}<input type="search" name="query" placeholder="${text('editor.service_placeholder')}" maxlength="80" autocomplete="off"></label>
       <button type="button" class="secondary" id="search-services">${text('editor.find_service')}</button>
-      <div class="options" id="services"></div>
-      <p class="meta" id="selected-service" tabindex="-1"></p>
-      <button type="button" class="secondary" id="providers">${text('editor.choose_providers')}</button>
-      <div class="stack" id="provider-options"></div>
+      <div class="options" id="services" aria-live="polite"></div>
+      <p class="selection" id="selected-service" tabindex="-1" data-set="false"></p>
       <a class="flat referrals" href="${referralsPortal}" target="_blank" rel="noopener">${text('editor.referrals')} ${icon('link')}</a>
     </fieldset>
     <fieldset class="card stack"><legend>${text('editor.when')}</legend>
@@ -342,8 +364,19 @@ async function editor(watch, focusPicks = false) {
           </div>`;
         }).join('')}
       </details>
-      <label class="field">${text('editor.interval')}<input name="minutes" type="number" required min="${state.MinimumMinutes}" max="1440" value="${watch ? Math.ceil(watch.CheckIntervalSeconds / 60) : state.DefaultMinutes}"></label>
     </fieldset>
+    <details class="card advanced" id="advanced"${advancedOpen ? ' open' : ''}>
+      <summary>${text('editor.advanced')}</summary>
+      <div class="stack">
+        <button type="button" class="secondary" id="providers">${text('editor.choose_providers')}</button>
+        <div class="stack" id="provider-options"></div>
+        <label class="field">${text('editor.interval')}<input name="minutes" type="number" required min="${state.MinimumMinutes}" max="1440" value="${watch ? Math.ceil(watch.CheckIntervalSeconds / 60) : state.DefaultMinutes}"></label>
+      </div>
+    </details>
+    <section class="card stack summary" aria-labelledby="summary-heading">
+      <h2 id="summary-heading">${text('editor.summary')}</h2>
+      <dl id="summary"></dl>
+    </section>
     <p class="muted error" data-error role="status"></p>
     <button type="submit" class="primary">${text('editor.save')}</button>
     <button type="button" class="secondary" id="cancel">${text('common.cancel')}</button>
@@ -359,13 +392,54 @@ async function editor(watch, focusPicks = false) {
   const picked = form.querySelector('#selected-service');
   const providers = form.querySelector('#providers');
   const providerOptions = form.querySelector('#provider-options');
+  const summary = form.querySelector('#summary');
   const error = form.querySelector('[data-error]');
   let serviceSearch = 0;
   let serviceSearchOffset = 0;
   let picksRequest = 0;
 
+  // A closed disclosure cannot show native validation; open it so the user sees the problem.
+  form.addEventListener('invalid', (event) => {
+    const details = event.target.closest('details');
+    if (details) details.open = true;
+  }, true);
+
+  function providerSummary() {
+    const select = providerOptions.querySelector('select');
+    const doctorName = !doctor ? t('editor.any_doctor')
+      : select ? select.selectedOptions[0]?.textContent : watch?.DoctorName;
+    const boxes = [...providerOptions.querySelectorAll('[data-facility]:checked')];
+    const clinics = !facilities.size ? t('editor.all_clinics')
+      : (boxes.length ? boxes.map((box) => box.dataset.name) : watch?.FacilityNames ?? []).filter(Boolean).join(', ')
+        || String(facilities.size);
+    return { doctorName, clinics };
+  }
+  function selectedHours() {
+    return [...form.querySelectorAll('[data-day]')].filter(row => row.querySelector('[type="checkbox"]').checked).map(row => {
+      const [from, to] = row.querySelectorAll('input[type="time"]');
+      return { weekday: Number(row.dataset.day), from: from.value, to: to.value };
+    });
+  }
+  function summarize() {
+    const range = fields.dateMode.value === 'range';
+    const dates = !range ? t('watches.period_days', { days: fields.days.value })
+      : fields.from.value && fields.to.value ? `${dateText(fields.from.value)} — ${dateText(fields.to.value)}` : '—';
+    const { doctorName, clinics } = providerSummary();
+    const hours = selectedHours();
+    const rows = [
+      ['editor.service', service?.Name ?? t('editor.choose_service')],
+      ['editor.city', Number(fields.city.value) ? fields.city.selectedOptions[0]?.textContent : t('editor.choose_city')],
+      ['editor.period', dates],
+      ['editor.days_and_hours', hoursLabel(hours) || t('editor.any_time')],
+      ['editor.doctor', doctorName],
+      ['editor.clinics', clinics],
+      ['editor.interval', fields.minutes.value ? t('watches.interval_card', { minutes: fields.minutes.value }) : '—'],
+    ];
+    summary.innerHTML = rows.map(([label, value]) => `<div><dt>${text(label)}</dt><dd>${escape(value)}</dd></div>`).join('');
+  }
   function markSelection() {
     picked.textContent = service ? t('editor.selected_service', { service: service.Name }) : t('editor.choose_service');
+    picked.dataset.set = String(Boolean(service));
     providers.disabled = !service;
     if (service && (doctor || facilities.size) && !providerOptions.querySelector('select')) {
       providerOptions.textContent = [watch?.DoctorName, ...(watch?.FacilityNames ?? [])].filter(Boolean).join(' · ');
@@ -373,6 +447,7 @@ async function editor(watch, focusPicks = false) {
     for (const button of quickPicks?.querySelectorAll('[data-service]') ?? []) {
       button.setAttribute('aria-pressed', String(Number(button.dataset.service) === service?.ID));
     }
+    summarize();
   }
   function resetProviders() {
     doctor = 0;
@@ -407,8 +482,13 @@ async function editor(watch, focusPicks = false) {
       ];
       for (const [label, items] of groups) {
         if (!items?.length) continue;
-        picksList.insertAdjacentHTML('beforeend', `<section><h3>${text(label)}</h3><div class="actions">${items.map(({ ID, Name }) =>
-          `<button type="button" class="secondary" data-service="${ID}" aria-pressed="false">${escape(Name)}</button>`).join('')}</div></section>`);
+        const choices = items.map(({ ID, Name }) =>
+          `<button type="button" class="secondary" data-service="${ID}" aria-pressed="false">${escape(Name)}</button>`);
+        picksList.insertAdjacentHTML('beforeend', `<section><h3>${text(label)}</h3>
+          <div class="actions">${choices.slice(0, 2).join('')}</div>
+          ${choices.length > 2 ? `<details class="more-options"><summary>${text('common.more')}</summary>
+            <div class="actions">${choices.slice(2).join('')}</div></details>` : ''}
+        </section>`);
         const group = picksList.lastElementChild;
         for (const item of items) group.querySelector(`[data-service="${item.ID}"]`).onclick = () => selectService(item);
       }
@@ -443,15 +523,28 @@ async function editor(watch, focusPicks = false) {
   fields.dateMode.onchange = updateDates;
   updateDates();
   markSelection();
+  // Keep the summary current for every field change without extra state.
+  form.addEventListener('input', summarize);
+  form.addEventListener('change', summarize);
   if (focusPicks) (fields.city.value === '0' ? fields.city : quickPicks)?.focus();
   void loadQuickPicks();
   const search = form.querySelector('#search-services');
   async function findServices(append = false) {
     const cityID = Number(fields.city.value);
     if (!cityID) throw new Error(t('error.city_first'));
-    if (!append) serviceSearchOffset = 0;
+    if (!append) {
+      serviceSearchOffset = 0;
+      results.innerHTML = `<p class="muted">${text('editor.searching')}</p>`;
+    }
     const seq = ++serviceSearch;
-    const { Items, More } = await api('procedures', { CityID: cityID, Query: fields.query.value.trim(), Offset: serviceSearchOffset });
+    let response;
+    try {
+      response = await api('procedures', { CityID: cityID, Query: fields.query.value.trim(), Offset: serviceSearchOffset });
+    } catch (failure) {
+      if (!append && seq === serviceSearch) results.replaceChildren();
+      throw failure;
+    }
+    const { Items, More } = response;
     if (seq !== serviceSearch) return;
     results.querySelector('[data-more]')?.remove();
     const items = Items ?? [];
@@ -492,7 +585,7 @@ async function editor(watch, focusPicks = false) {
         </select></label>
         <div><p class="muted">${text('editor.facilities_hint')}</p>
         <div class="options">${(Facilities ?? []).map(({ ID, Name, Address }) => `<label class="option">
-          <input type="checkbox" data-facility="${ID}" ${facilities.has(ID) ? 'checked' : ''}><span>${escape(Name)}${Address ? `<br><span class="muted">${escape(Address)}</span>` : ''}</span></label>`).join('')}</div></div>`;
+          <input type="checkbox" data-facility="${ID}" data-name="${escape(Name)}" ${facilities.has(ID) ? 'checked' : ''}><span>${escape(Name)}${Address ? `<br><span class="muted">${escape(Address)}</span>` : ''}</span></label>`).join('')}</div></div>`;
       fields.doctor.value = doctor;
       fields.doctor.onchange = () => { doctor = Number(fields.doctor.value); };
       for (const checkbox of providerOptions.querySelectorAll('[data-facility]')) {
@@ -502,6 +595,7 @@ async function editor(watch, focusPicks = false) {
           else facilities.delete(facility);
         };
       }
+      summarize();
     }, error);
   }
 
@@ -519,10 +613,7 @@ async function editor(watch, focusPicks = false) {
     event.preventDefault();
     void run(form.querySelector('[type="submit"]'), async () => {
       if (!service) throw new Error(t('editor.choose_service'));
-      const windows = [...form.querySelectorAll('[data-day]')].filter((row) => row.querySelector('[type="checkbox"]').checked).map((row) => {
-        const [from, to] = row.querySelectorAll('input[type="time"]');
-        return { weekday: Number(row.dataset.day), from: from.value, to: to.value };
-      });
+      const windows = selectedHours();
       const range = fields.dateMode.value === 'range';
       await api('watch', { ID: watch?.ID ?? 0, CityID: Number(fields.city.value), ServiceID: service.ID, DoctorID: doctor,
         FacilityIDs: [...facilities], DateFrom: range ? fields.from.value : '', DateTo: range ? fields.to.value : '',
@@ -549,6 +640,8 @@ function screenError(title, error, retry) {
 }
 
 async function switchTab(next) {
+  clearTimeout(flashTimer);
+  announcement.textContent = '';
   tab = next;
   const id = ++renderID;
   for (const button of navigation.querySelectorAll('button')) {
