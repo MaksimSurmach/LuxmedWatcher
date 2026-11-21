@@ -24,6 +24,7 @@ func main() {
 		Origin:    strings.TrimRight(os.Getenv("LUXMED_MINIAPP_URL"), "/"),
 		WorkerAPI: os.Getenv("LUXMED_BROWSER_API_URL"), WorkerViewer: os.Getenv("LUXMED_BROWSER_VIEWER_URL"),
 		ViewerOrigin: os.Getenv("LUXMED_VIEWER_URL"), BotID: botID, OwnerID: ownerID,
+		DashboardAPI: os.Getenv("LUXMED_DASHBOARD_API_URL"),
 	}, os.DirFS("/app/web"), os.DirFS("/app/vendor"))
 	if err != nil {
 		log.Fatal(err)

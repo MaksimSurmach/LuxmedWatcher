@@ -18,8 +18,8 @@ import (
 )
 
 type Config struct {
-	Origin, WorkerAPI, WorkerViewer, ViewerOrigin string
-	BotID, OwnerID                                int64
+	Origin, WorkerAPI, WorkerViewer, ViewerOrigin, DashboardAPI string
+	BotID, OwnerID                                              int64
 }
 
 type ticket struct {
@@ -60,7 +60,7 @@ func New(cfg Config, web, vendor fs.FS) (public, private http.Handler, err error
 func newApp(cfg Config) (*app, error) {
 	if !validURL(cfg.Origin, "https", "") || !validURL(cfg.WorkerAPI, "http", "") ||
 		!validURL(cfg.WorkerViewer, "http", "/vnc") || !validURL(cfg.ViewerOrigin, "http", "") ||
-		cfg.BotID <= 0 || cfg.OwnerID <= 0 {
+		cfg.BotID <= 0 || cfg.OwnerID <= 0 || (cfg.DashboardAPI != "" && !validURL(cfg.DashboardAPI, "http", "")) {
 		return nil, errors.New("invalid Mini App settings")
 	}
 	upstream, err := url.Parse(cfg.WorkerViewer)

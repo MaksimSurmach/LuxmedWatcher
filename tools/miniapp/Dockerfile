@@ -2,7 +2,7 @@ FROM golang:1.26.11-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
-COPY internal/miniapp ./internal/miniapp
+COPY internal ./internal
 COPY cmd/miniapp ./cmd/miniapp
 RUN CGO_ENABLED=0 go build -trimpath -o /out/miniapp ./cmd/miniapp
 

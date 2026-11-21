@@ -1,8 +1,8 @@
 :root {
   color-scheme: light dark;
   font: 16px/1.45 system-ui, sans-serif;
-  background: var(--tg-theme-bg-color, Canvas);
-  color: var(--tg-theme-text-color, CanvasText);
+  background: var(--tg-theme-bg-color, #f6f5ef);
+  color: var(--tg-theme-text-color, #102820);
 }
 
 * { box-sizing: border-box; }
@@ -35,7 +35,7 @@ p { margin: .15rem 0 0; font-size: .875rem; }
   min-height: 0;
   overflow: hidden;
   touch-action: none;
-  border-radius: .55rem;
+  border-radius: .9rem;
   background: var(--tg-theme-secondary-bg-color, ButtonFace);
 }
 

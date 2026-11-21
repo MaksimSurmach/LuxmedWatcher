@@ -61,21 +61,33 @@ func (b *Bot) showMiniApp(ctx context.Context, user domain.User) {
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
 		return
 	}
-	type button struct {
-		Text   string            `json:"text"`
-		WebApp map[string]string `json:"web_app"`
+	b.sendMiniApp(user, "flow.browser.miniapp", "button.open_luxmed", link)
+}
+
+// The pinned Bot API client predates the web_app field.
+type miniAppButton struct {
+	tgbotapi.InlineKeyboardButton
+	WebApp map[string]string `json:"web_app,omitempty"`
+}
+
+func newMiniAppButton(label, link string) miniAppButton {
+	return miniAppButton{
+		InlineKeyboardButton: tgbotapi.InlineKeyboardButton{Text: label},
+		WebApp:               map[string]string{"url": link},
 	}
-	markup, err := json.Marshal(map[string][][]button{"inline_keyboard": {{
-		{Text: b.catalog.T(user.Locale, "button.open_luxmed"), WebApp: map[string]string{"url": link}},
-	}}})
+}
+
+func (b *Bot) sendMiniApp(user domain.User, messageKey, buttonKey, link string) {
+	markup, err := json.Marshal(map[string][][]miniAppButton{
+		"inline_keyboard": {{newMiniAppButton(b.catalog.T(user.Locale, buttonKey), link)}},
+	})
 	if err != nil {
 		b.logger.Error("encode Mini App button", "err", err)
 		return
 	}
-	// The pinned Bot API client predates the web_app field.
 	_, err = b.api.MakeRequest("sendMessage", tgbotapi.Params{
 		"chat_id":      strconv.FormatInt(user.TelegramChatID, 10),
-		"text":         b.catalog.T(user.Locale, "flow.browser.miniapp"),
+		"text":         b.catalog.T(user.Locale, messageKey),
 		"reply_markup": string(markup),
 	})
 	if err != nil {

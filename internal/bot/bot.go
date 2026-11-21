@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	randv2 "math/rand/v2"
 	"net/url"
@@ -137,27 +138,54 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	if len(histories) == 0 {
 		return 0, nil
 	}
-	var text strings.Builder
-	text.WriteString(b.catalog.T(user.Locale, "notification.batch", max(total, len(histories)), truncateMessage(watch.Name, 140)))
-	for _, item := range histories[:min(10, len(histories))] {
-		fmt.Fprintf(&text, "\n\n%s\n%s · %s", item.DateTime.In(luxmed.Location()).Format("2006-01-02 15:04"),
-			truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120))
+	msg := tgbotapi.NewMessage(user.TelegramChatID, b.appointmentNotification(user.Locale, watch, histories, total))
+	msg.ParseMode = tgbotapi.ModeHTML
+	msg.DisableWebPagePreview = true
+	keyboard := [][]miniAppButton{
+		{{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), portalURL(histories[0].BookingURL))}},
+		{
+			{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.pause"), fmt.Sprintf("watch:pause:%d", watch.ID))},
+			{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.show_watch"), fmt.Sprintf("watch:show:%d", watch.ID))},
+		},
+		{{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID))}},
 	}
-
-	msg := tgbotapi.NewMessage(user.TelegramChatID, text.String())
-	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), portalURL(histories[0].BookingURL))),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.pause"), fmt.Sprintf("watch:pause:%d", watch.ID)),
-			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.show_watch"), fmt.Sprintf("watch:show:%d", watch.ID)),
-		),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID))),
-	)
+	if b.cfg.MiniApp != nil && b.cfg.AdminTelegramIDs[user.TelegramUserID] {
+		button := newMiniAppButton(b.catalog.T(user.Locale, "button.open_app"), b.cfg.MiniApp.DashboardURL()+"?tab=history")
+		keyboard = append(keyboard, []miniAppButton{button})
+	}
+	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": keyboard}
 	sent, err := b.api.Send(msg)
 	if err != nil {
 		return 0, fmt.Errorf("Telegram notification delivery failed")
 	}
 	return sent.MessageID, nil
+}
+
+func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histories []domain.AppointmentHistory, total int) string {
+	var text strings.Builder
+	count := max(total, len(histories))
+	title := b.catalog.T(locale, "notification.title", count)
+	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(watch.Name, 140)))
+	preview := histories[:min(10, len(histories))]
+	for _, item := range preview {
+		fmt.Fprintf(&text, "\n\n<b>%s</b>", item.DateTime.In(luxmed.Location()).Format("02.01.2006 · 15:04"))
+		var details []string
+		for _, value := range []string{truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120)} {
+			if value != "" {
+				details = append(details, html.EscapeString(value))
+			}
+		}
+		if len(details) > 0 {
+			text.WriteString("\n" + strings.Join(details, " · "))
+		}
+		if item.Address != "" {
+			text.WriteString("\n" + html.EscapeString(truncateMessage(item.Address, 100)))
+		}
+	}
+	if remaining := count - len(preview); remaining > 0 {
+		fmt.Fprintf(&text, "\n\n<i>%s</i>", html.EscapeString(b.catalog.T(locale, "notification.more", remaining)))
+	}
+	return text.String()
 }
 
 func portalURL(raw string) string {
@@ -275,6 +303,12 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 		b.showMenu(user)
 	case "new":
 		b.startWatchFlow(ctx, user)
+	case "app":
+		if b.cfg.MiniApp == nil {
+			b.showMenu(user)
+			return
+		}
+		b.sendMiniApp(user, "flow.browser.dashboard", "button.open_app", b.cfg.MiniApp.DashboardURL())
 	case "connect":
 		b.showAccount(ctx, user)
 	case "watches":

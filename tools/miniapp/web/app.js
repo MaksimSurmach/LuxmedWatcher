@@ -7,7 +7,8 @@ initLogging('none');
 const telegram = window.Telegram?.WebApp;
 const initData = telegram?.initData ?? '';
 const locationURL = new URL(location.href);
-const ticket = new URLSearchParams(initData).get('start_param') || locationURL.searchParams.get('ticket');
+const ticket = locationURL.searchParams.get('ticket') || new URLSearchParams(initData).get('start_param');
+const returnToApp = locationURL.searchParams.get('return') === 'app';
 if (locationURL.searchParams.has('ticket')) {
   locationURL.searchParams.delete('ticket');
   history.replaceState(history.state, '', locationURL);
@@ -129,7 +130,7 @@ async function start() {
       connected = true;
       status.textContent = labels.connected;
       controls.hidden = false;
-      if (telegram?.isVersionAtLeast?.('7.7')) telegram.disableVerticalSwipes();
+        if (telegram?.isVersionAtLeast?.('7.7')) telegram.disableVerticalSwipes();
       if (matchMedia('(pointer: fine)').matches) viewer.focus({ preventScroll: true });
     });
     viewer.addEventListener('disconnect', () => close(connected ? labels.disconnected : labels.failed));
@@ -150,7 +151,11 @@ function sendText() {
 
 element('close').addEventListener('click', () => {
   close(labels.disconnected);
-  telegram?.close();
+  if (returnToApp) {
+    location.replace('/app?tab=settings' + location.hash);
+  } else {
+    telegram?.close();
+  }
 });
 window.addEventListener('pagehide', () => close(labels.disconnected));
 keyboard.addEventListener('click', () => {

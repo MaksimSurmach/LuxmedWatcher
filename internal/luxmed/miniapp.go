@@ -27,6 +27,14 @@ func NewMiniApp(agent, public string) (*MiniApp, error) {
 	return &MiniApp{agent: a.Scheme + "://" + a.Host, public: *p, client: http.Client{Timeout: 4 * time.Second}}, nil
 }
 
+func (m *MiniApp) Origin() string {
+	return m.public.Scheme + "://" + m.public.Host
+}
+
+func (m *MiniApp) DashboardURL() string {
+	return m.Origin() + "/app"
+}
+
 func (m *MiniApp) Link(ctx context.Context) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.agent+"/ticket", nil)
 	if err != nil {

@@ -3,6 +3,7 @@ services:
     environment:
       LUXMED_MINIAPP_URL: ${LUXMED_MINIAPP_URL:?Mini App HTTPS origin required}
       LUXMED_MINIAPP_AGENT_URL: http://miniapp-agent:8093
+      HEALTH_ADDR: ":8080"
     depends_on:
       - miniapp-agent
 
@@ -18,6 +19,7 @@ services:
       LUXMED_MINIAPP_URL: ${LUXMED_MINIAPP_URL:?Mini App HTTPS origin required}
       LUXMED_BOT_ID: ${LUXMED_BOT_ID:?Telegram bot ID required}
       ADMIN_TELEGRAM_IDS: ${ADMIN_TELEGRAM_IDS:?Telegram owner ID required}
+      LUXMED_DASHBOARD_API_URL: http://luxmed-watcher:8080
       LUXMED_BROWSER_API_URL: http://browser:8091
       LUXMED_BROWSER_VIEWER_URL: http://browser:8092/vnc
       LUXMED_VIEWER_URL: ${LUXMED_VIEWER_URL:-http://localhost:18769}

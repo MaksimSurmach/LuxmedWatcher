@@ -16,6 +16,10 @@ import (
 const telegramPublicKey = "e7bf03a2fa4602af4580703d88dda5bb59f32ed8b02a56c187fe7d34caed242d"
 
 func authorizedUser(raw string, botID, ownerID int64, now time.Time, key ed25519.PublicKey) bool {
+	return authorizedUserWithMaxAge(raw, botID, ownerID, now, 5*time.Minute, key)
+}
+
+func authorizedUserWithMaxAge(raw string, botID, ownerID int64, now time.Time, maxAge time.Duration, key ed25519.PublicKey) bool {
 	if len(raw) > 12<<10 {
 		return false
 	}
@@ -43,7 +47,7 @@ func authorizedUser(raw string, botID, ownerID int64, now time.Time, key ed25519
 	}
 	seconds, err := strconv.ParseInt(values.Get("auth_date"), 10, 64)
 	age := now.Sub(time.Unix(seconds, 0))
-	if err != nil || age < -30*time.Second || age > 5*time.Minute {
+	if err != nil || age < -30*time.Second || age > maxAge {
 		return false
 	}
 	var user struct {

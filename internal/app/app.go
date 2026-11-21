@@ -15,6 +15,7 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/bot"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/miniapp"
 	"github.com/maksimsurmach/luxmed-watcher/internal/observability"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
@@ -96,11 +97,22 @@ func (a *App) Run(ctx context.Context) error {
 	tgBot.SetRunner(runner)
 	watcher := scheduler.New(db, runner, 15*time.Second, a.cfg.HistoryRetention, a.logger)
 
+	var dashboard http.Handler
+	if miniApp != nil {
+		var ownerID int64
+		for id := range a.cfg.AdminTelegramIDs {
+			ownerID = id
+		}
+		dashboard = miniapp.Dashboard(miniapp.DashboardConfig{
+			Origin: miniApp.Origin(), BotID: api.Self.ID, OwnerID: ownerID,
+			MinimumInterval: a.cfg.MinimumInterval, DefaultInterval: a.cfg.DefaultInterval,
+		}, db, browser, miniApp)
+	}
 	var workers sync.WaitGroup
 	workers.Add(2)
 	go func() {
 		defer workers.Done()
-		observability.RunHealth(ctx, a.cfg.HealthAddr, db.Ping, a.logger)
+		observability.RunHealth(ctx, a.cfg.HealthAddr, db.Ping, dashboard, a.logger)
 	}()
 	go func() {
 		defer workers.Done()

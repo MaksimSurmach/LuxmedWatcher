@@ -3,15 +3,20 @@ package miniapp
 import (
 	"io/fs"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"strings"
 )
 
 func (a *app) public(web, vendor fs.FS) http.Handler {
 	mux := http.NewServeMux()
-	for _, file := range []string{"index.html", "app.js", "style.css"} {
+	for _, file := range []string{"index.html", "app.js", "style.css", "dashboard.html", "dashboard.js", "dashboard.css"} {
 		path := "/" + file
-		if file == "index.html" {
+		switch file {
+		case "index.html":
 			path = "/{$}"
+		case "dashboard.html":
+			path = "/app"
 		}
 		mux.HandleFunc("GET "+path, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, web, file)
@@ -19,6 +24,19 @@ func (a *app) public(web, vendor fs.FS) http.Handler {
 	}
 	for _, folder := range []string{"core", "vendor"} {
 		mux.Handle("GET /vendor/"+folder+"/", http.StripPrefix("/vendor/", http.FileServerFS(vendor)))
+	}
+	if a.config.DashboardAPI != "" {
+		upstream, _ := url.Parse(a.config.DashboardAPI)
+		mux.Handle("POST "+dashboardPrefix, &httputil.ReverseProxy{
+			Rewrite: func(request *httputil.ProxyRequest) {
+				request.SetURL(upstream)
+				request.Out.Header.Del("Cookie")
+				request.Out.Header.Del("Authorization")
+			},
+			ErrorHandler: func(w http.ResponseWriter, _ *http.Request, _ error) {
+				reply(w, http.StatusServiceUnavailable, nil)
+			},
+		})
 	}
 	mux.HandleFunc("POST /api/session", a.session)
 	mux.HandleFunc("GET /vnc", a.viewer)

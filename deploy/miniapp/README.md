@@ -30,6 +30,12 @@ sudo kubectl apply -f deploy/miniapp/gateway.yaml
 curl -fsS -o /dev/null -w '%{http_code}\n' https://luxmed.ranus.site/healthz
 ```
 
+## App and settings
+
+Send `/app` in the owner's private bot chat. The three screens share the bot's searches, slot history and user preferences. New searches start active. The app can edit or pause them, and notices can open the history screen. Preferences set the default city and bot/notification language. The app verifies signed Telegram launch data on each dashboard API request. Only the configured owner can access this deployment.
+
+Use **Settings → Sign in to LuxMed** or send `/connect` to open the server's Chromium. Opening the dashboard alone does not check or refresh the LuxMed session.
+
 ## Manual acceptance
 
 1. From a phone on cellular data send `/connect` to the bot and open the latest **Open LuxMed** button.

@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -234,5 +235,17 @@ func TestOnlyOwnerCanHideHistory(t *testing.T) {
 	items, err = b.db.WatchHistory(ctx, owner.ID, watchID, 10, 0)
 	if err != nil || len(items) != 0 {
 		t.Fatalf("owner hide did not change history: count=%d, err=%v", len(items), err)
+	}
+}
+
+func TestAppointmentNotificationEscapesHTMLAndShowsRemainingSlots(t *testing.T) {
+	b := testBot(t)
+	text := b.appointmentNotification("en", domain.Watch{Name: "A < B & C"}, []domain.AppointmentHistory{
+		{Appointment: domain.Appointment{DateTime: time.Unix(0, 0), DoctorName: "<b>Example</b>", FacilityName: "A & B", Address: "Street 12"}},
+	}, 3)
+	for _, value := range []string{"<b>LuxMed appointments found: 3</b>", "A &lt; B &amp; C", "&lt;b&gt;Example&lt;/b&gt;", "A &amp; B", "Street 12", "<i>More in history: 2</i>"} {
+		if !strings.Contains(text, value) {
+			t.Errorf("notification missing %q in %q", value, text)
+		}
 	}
 }
