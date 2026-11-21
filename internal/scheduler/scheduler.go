@@ -1,6 +1,7 @@
 package scheduler
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"errors"
@@ -196,7 +197,13 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		return 0, errors.Join(searchErr, err)
 	}
 
-	slices.SortFunc(appointments, func(a, b domain.Appointment) int { return a.DateTime.Compare(b.DateTime) })
+	slices.SortFunc(appointments, func(a, b domain.Appointment) int {
+		return cmp.Or(
+			a.DateTime.Compare(b.DateTime),
+			cmp.Compare(a.FacilityName, b.FacilityName),
+			cmp.Compare(a.DoctorName, b.DoctorName),
+		)
+	})
 	seen := make(map[string]struct{}, len(appointments))
 	var pending []domain.AppointmentHistory
 	for _, appointment := range filterAppointmentsByTimeWindows(appointments, watch.TimeWindows) {

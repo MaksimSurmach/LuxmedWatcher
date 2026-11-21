@@ -105,7 +105,8 @@ func TestAuthenticateThenSearchAppointments(t *testing.T) {
 	}
 	app := apps[0]
 	if app.DateTime.Location() != Location() || app.DateTime.Hour() != 10 || app.DateTime.Minute() != 15 ||
-		app.FacilityName != "Example clinic" || app.Address != "Example Street" || app.ExternalID == "" || app.RawPayload != "" {
+		app.FacilityName != "Example clinic" || app.Address != "Example Street" ||
+		app.ExternalID == "" || app.ExternalID != app.Fingerprint || app.RawPayload != "" {
 		t.Fatalf("unexpected normalized appointment: %+v", app)
 	}
 	legacy := app
@@ -164,6 +165,7 @@ func TestNeverFollowLoginRedirectToAnotherHost(t *testing.T) {
 func TestDecodeTermsFailsOnUnreadableResults(t *testing.T) {
 	for _, body := range []string{
 		`{"success":false,"termsForService":null}`,
+		`{"success":false,"termsForService":{"termsForDays":[]}}`,
 		`{"success":true,"renamed":{}}`,
 		`{"termsForService":{}}`,
 		`{"termsForService":{"termsForDays":[{"terms":[{"dateTimeFrom":"broken"}]}]}}`,
