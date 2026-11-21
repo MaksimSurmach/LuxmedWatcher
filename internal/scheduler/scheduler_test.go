@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"testing"
@@ -52,6 +53,9 @@ func TestRunnerPersistsBeforeDeliveryAndDoesNotRepeatSuccess(t *testing.T) {
 		if err != nil || len(history) != 12 || len(items) != 10 || total != 12 {
 			t.Fatalf("history=%d, preview=%d, total=%d, error=%v", len(history), len(items), total, err)
 		}
+		if got := []string{items[0].Fingerprint, items[1].Fingerprint, items[2].Fingerprint}; !slices.Equal(got, []string{"2", "1", "0"}) {
+			t.Fatalf("order for slots at the same time = %v, want [2 1 0]", got)
+		}
 		notifications++
 		if notifications == 1 {
 			return 0, errors.New("temporary Telegram error")
@@ -61,11 +65,15 @@ func TestRunnerPersistsBeforeDeliveryAndDoesNotRepeatSuccess(t *testing.T) {
 	}))
 	db = database
 	var slots []domain.Appointment
+	first := time.Now().Add(time.Hour)
 	for i := range 12 {
 		slots = append(slots, domain.Appointment{
-			Fingerprint: fmt.Sprint(i), DateTime: time.Now().Add(time.Duration(i+1) * time.Hour),
+			Fingerprint: fmt.Sprint(i), DateTime: first.Add(time.Duration(i) * time.Hour),
 		})
 	}
+	slots[0].FacilityName, slots[0].DoctorName = "Clinic B", "Doctor A"
+	slots[1].DateTime, slots[1].FacilityName, slots[1].DoctorName = first, "Clinic A", "Doctor B"
+	slots[2].DateTime, slots[2].FacilityName, slots[2].DoctorName = first, "Clinic A", "Doctor A"
 	client := &fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) {
 		return append(append([]domain.Appointment(nil), slots...), slots[0]), nil
 	}}
