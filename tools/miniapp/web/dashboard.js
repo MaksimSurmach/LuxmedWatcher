@@ -5,7 +5,7 @@ const main = document.querySelector('#main');
 const navigation = document.querySelector('#navigation');
 const announcement = document.querySelector('#announcement');
 const portal = 'https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Reservation';
-const patientPortal = 'https://portalpacjenta.luxmed.pl/';
+const referralsPortal = 'https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Referrals';
 const icons = { home: '⌂', calendar: '▦', history: '▤', settings: '⚙', language: '◎', plus: '+', pin: '⌖', link: '↗' };
 const icon = (name) => `<span class="icon" aria-hidden="true">${icons[name]}</span>`;
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
@@ -137,6 +137,10 @@ function home() {
   show(t('home.title'), `<p class="home-intro">${text('home.intro')}</p>
     <div class="stack">
       <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
+      <div class="home-shortcuts">
+        <button type="button" class="secondary" id="recommendations">${text('editor.recommendations')}</button>
+        <a class="secondary" href="${referralsPortal}" target="_blank" rel="noopener">${text('home.referrals')} ${icon('link')}</a>
+      </div>
       ${accountSection()}
       <div class="home-links">
         <button type="button" data-open="watches">
@@ -150,6 +154,7 @@ function home() {
       </div>
     </div>`);
   main.querySelector('#new-watch').onclick = () => void editor();
+  main.querySelector('#recommendations').onclick = () => void editor(undefined, true);
   for (const button of main.querySelectorAll('[data-open]')) {
     button.onclick = async () => {
       await switchTab(button.dataset.open);
@@ -285,7 +290,7 @@ async function settingsScreen(id) {
   bindAccount();
 }
 
-async function editor(watch) {
+async function editor(watch, focusPicks = false) {
   const id = ++renderID;
   const title = t(watch ? 'editor.edit' : 'watches.new');
   show(title, `<p class="muted">${text('editor.loading_cities')}</p>`);
@@ -305,14 +310,19 @@ async function editor(watch) {
   show(title, `<form class="stack">
     <fieldset class="card stack"><legend>${text('editor.what')}</legend>
       <label class="field">${text('editor.city')}<select name="city" required>${cityOptions(options, city, t('editor.choose_city'))}</select></label>
+      ${watch ? '' : `<section class="quick-services stack" tabindex="-1" aria-labelledby="recommendations-heading">
+        <h2 id="recommendations-heading">${text('editor.recommendations')}</h2>
+        <p class="muted" id="picks-status" role="status"></p>
+        <div class="stack" id="picks-list"></div>
+        <button type="button" class="secondary" id="retry-picks" hidden>${text('common.retry')}</button>
+      </section>`}
       <label class="field">${text('editor.service')}<input type="search" name="query" placeholder="${text('editor.service_placeholder')}" maxlength="80" autocomplete="off"></label>
       <button type="button" class="secondary" id="search-services">${text('editor.find_service')}</button>
       <div class="options" id="services"></div>
-      ${watch ? '' : '<div class="quick-services stack" hidden></div>'}
       <p class="meta" id="selected-service" tabindex="-1"></p>
       <button type="button" class="secondary" id="providers">${text('editor.choose_providers')}</button>
       <div class="stack" id="provider-options"></div>
-      <a class="flat referrals" href="${patientPortal}" target="_blank" rel="noopener">${text('editor.referrals')} ${icon('link')}</a>
+      <a class="flat referrals" href="${referralsPortal}" target="_blank" rel="noopener">${text('editor.referrals')} ${icon('link')}</a>
     </fieldset>
     <fieldset class="card stack"><legend>${text('editor.when')}</legend>
       <label class="field">${text('editor.period')}<select name="dateMode"><option value="days">${text('editor.upcoming')}</option><option value="range">${text('editor.date_range')}</option></select></label>
@@ -343,6 +353,9 @@ async function editor(watch) {
   const fields = form.elements;
   const results = form.querySelector('#services');
   const quickPicks = form.querySelector('.quick-services');
+  const picksList = form.querySelector('#picks-list');
+  const picksStatus = form.querySelector('#picks-status');
+  const retryPicks = form.querySelector('#retry-picks');
   const picked = form.querySelector('#selected-service');
   const providers = form.querySelector('#providers');
   const providerOptions = form.querySelector('#provider-options');
@@ -378,8 +391,10 @@ async function editor(watch) {
     if (!quickPicks) return;
     const request = ++picksRequest;
     const cityID = Number(fields.city.value);
-    quickPicks.hidden = true;
-    quickPicks.replaceChildren();
+    picksList.replaceChildren();
+    retryPicks.hidden = true;
+    picksStatus.hidden = false;
+    picksStatus.textContent = t(cityID ? 'editor.loading_recommendations' : 'editor.choose_city');
     if (!cityID) return;
     try {
       const { Referred, Recent, Saved, Popular } = await api('procedure-picks', { CityID: cityID });
@@ -392,17 +407,21 @@ async function editor(watch) {
       ];
       for (const [label, items] of groups) {
         if (!items?.length) continue;
-        quickPicks.insertAdjacentHTML('beforeend', `<section><h2>${text(label)}</h2><div class="actions">${items.map(({ ID, Name }) =>
+        picksList.insertAdjacentHTML('beforeend', `<section><h3>${text(label)}</h3><div class="actions">${items.map(({ ID, Name }) =>
           `<button type="button" class="secondary" data-service="${ID}" aria-pressed="false">${escape(Name)}</button>`).join('')}</div></section>`);
-        const group = quickPicks.lastElementChild;
+        const group = picksList.lastElementChild;
         for (const item of items) group.querySelector(`[data-service="${item.ID}"]`).onclick = () => selectService(item);
       }
-      quickPicks.hidden = !quickPicks.childElementCount;
+      picksStatus.hidden = picksList.childElementCount > 0;
+      if (!picksStatus.hidden) picksStatus.textContent = t('editor.no_recommendations');
       markSelection();
-    } catch {
-      // Manual catalog search remains available if quick picks fail.
+    } catch (error) {
+      if (id !== renderID || request !== picksRequest) return;
+      picksStatus.textContent = error.message;
+      retryPicks.hidden = false;
     }
   }
+  if (retryPicks) retryPicks.onclick = () => void loadQuickPicks();
   fields.city.value = city.ID || 0;
   fields.city.onchange = () => {
     serviceSearch++;
@@ -424,6 +443,7 @@ async function editor(watch) {
   fields.dateMode.onchange = updateDates;
   updateDates();
   markSelection();
+  if (focusPicks) (fields.city.value === '0' ? fields.city : quickPicks)?.focus();
   void loadQuickPicks();
   const search = form.querySelector('#search-services');
   async function findServices(append = false) {
@@ -581,7 +601,7 @@ telegram?.enableVerticalSwipes?.();
 
 main.addEventListener('click', (event) => {
   const link = event.target.closest('a');
-  if (![portal, patientPortal].includes(link?.href) || !telegram?.openLink) return;
+  if (![portal, referralsPortal].includes(link?.href) || !telegram?.openLink) return;
   event.preventDefault();
   telegram.openLink(link.href);
 });

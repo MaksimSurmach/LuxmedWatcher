@@ -37,7 +37,7 @@ Shared mode uses the existing watcher database and a new `browser-profiles` volu
 
 ## Quick procedure selection
 
-The search editor shows services from LuxMed referrals, recent portal searches, saved searches and popular services. The picks use the signed user's browser and select ordinary service filters. Use **Skierowania** in the official portal to complete a referral-based booking.
+Open **Recommendations** from the Mini App home to see services from your Lux Med referrals, recent searches, saved searches and popular services. Choose a city to load the suggestions. **Referrals** opens the official portal's **Skierowania** section for referral-based booking.
 
 ## Additional users with dedicated noVNC workers
 
