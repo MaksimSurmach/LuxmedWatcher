@@ -6,7 +6,7 @@ const navigation = document.querySelector('#navigation');
 const announcement = document.querySelector('#announcement');
 const portal = 'https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Reservation';
 const patientPortal = 'https://portalpacjenta.luxmed.pl/';
-const icons = { calendar: '▦', history: '▤', settings: '⚙', plus: '+', pin: '⌖', time: '◷', check: '✓', link: '↗' };
+const icons = { home: '⌂', calendar: '▦', history: '▤', settings: '⚙', language: '◎', plus: '+', pin: '⌖', link: '↗' };
 const icon = (name) => `<span class="icon" aria-hidden="true">${icons[name]}</span>`;
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
@@ -15,7 +15,7 @@ const localDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Warsaw' }
 const dateOnly = (date) => date ? localDate.format(new Date(date)) : '';
 const dateText = (date) => shortDate.format(new Date(date));
 const text = (key, values) => escape(t(key, values));
-const tabs = ['watches', 'history', 'settings'];
+const tabs = ['home', 'watches', 'history', 'settings'];
 const titleFor = (tab) => t(`tabs.${tab}`);
 let shortDate;
 let clock;
@@ -23,7 +23,7 @@ let weekdays;
 let state;
 let apiToken;
 let cities;
-let tab = 'watches';
+let tab = 'home';
 let account = 'unchecked';
 let flashTimer;
 let renderID = 0;
@@ -96,8 +96,67 @@ function show(title, html, focus = true) {
   }
 }
 
-function accountNotice() {
-  return `<div class="notice ${account}">${icon(account === 'connected' ? 'check' : 'time')}${text(`account.${account}`)}</div>`;
+function accountSection() {
+  return `<section class="card stack account">
+    <div class="account-head">
+      <h2>${text('account.title')}</h2>
+      <p class="account-status" data-state="${account}" role="status">${text(`account.${account}`)}</p>
+    </div>
+    <div class="account-actions">
+      <button type="button" class="secondary" id="connect" aria-describedby="account-instructions">${text('account.sign_in')} ${icon('link')}</button>
+      <button type="button" class="flat" id="account-check">${text('settings.check_account')}</button>
+    </div>
+    <p class="muted" id="account-instructions">${text('account.instructions')}</p>
+  </section>`;
+}
+
+function bindAccount() {
+  const connect = main.querySelector('#connect');
+  connect.onclick = () => void run(connect, async () => {
+    const { url } = await api('connect');
+    const target = new URL(url);
+    if (target.origin !== location.origin || target.pathname !== '/') throw new Error(t('error.link'));
+    target.searchParams.set('return', 'app');
+    target.hash = location.hash;
+    location.assign(target.href);
+  });
+  const check = main.querySelector('#account-check');
+  check.onclick = () => void run(check, async () => {
+    account = (await api('account')).state;
+    const status = main.querySelector('.account-status');
+    if (status) {
+      status.dataset.state = account;
+      status.textContent = t(`account.${account}`);
+    }
+  });
+}
+
+function home() {
+  const count = state.Watches?.length ?? 0;
+  const searchHint = count ? text('home.saved_searches', { count }) : text('watches.empty');
+  show(t('home.title'), `<p class="home-intro">${text('home.intro')}</p>
+    <div class="stack">
+      <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
+      ${accountSection()}
+      <div class="home-links">
+        <button type="button" data-open="watches">
+          ${icon('calendar')}<span>${text('tabs.watches')}</span><small>${searchHint}</small>
+        </button>
+        <button type="button" data-open="history">${icon('history')}<span>${text('tabs.history')}</span></button>
+        <button type="button" data-open="settings">${icon('settings')}<span>${text('tabs.settings')}</span></button>
+        <button type="button" data-open="settings" id="change-language">
+          ${icon('language')}<span>${text('home.change_language')}</span><small lang="${language}">${escape(languages[language])}</small>
+        </button>
+      </div>
+    </div>`);
+  main.querySelector('#new-watch').onclick = () => void editor();
+  for (const button of main.querySelectorAll('[data-open]')) {
+    button.onclick = async () => {
+      await switchTab(button.dataset.open);
+      if (button.id === 'change-language') main.querySelector('[name="locale"]')?.focus();
+    };
+  }
+  bindAccount();
 }
 
 function watchCard(watch) {
@@ -119,7 +178,7 @@ function watchCard(watch) {
 
 function watches() {
   const items = state.Watches ?? [];
-  show(titleFor('watches'), `<div class="stack">${accountNotice()}
+  show(titleFor('watches'), `<div class="stack">
     <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
     ${items.length ? items.map(watchCard).join('') : `<div class="card empty"><h2>${text('watches.empty')}</h2><p>${text('watches.empty_hint')}</p></div>`}
   </div>`);
@@ -184,12 +243,7 @@ function cityOptions(items, selected, placeholder) {
 
 async function settingsScreen(id) {
   show(titleFor('settings'), `<div class="stack">
-    <section class="card stack">
-      <h2>${text('account.unchecked')}</h2>
-      ${accountNotice()}
-      <button type="button" class="primary" id="connect">${text('account.needs_login')} ${icon('link')}</button>
-      <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
-    </section>
+    ${accountSection()}
     <form class="stack">
       <section class="card stack">
         <h2>${text('settings.preferences')}</h2>
@@ -228,23 +282,7 @@ async function settingsScreen(id) {
       flash(t('settings.saved'));
     }, error);
   };
-  const connect = main.querySelector('#connect');
-  connect.onclick = () => void run(connect, async () => {
-    const { url } = await api('connect');
-    const target = new URL(url);
-    if (target.origin !== location.origin || target.pathname !== '/') throw new Error(t('error.link'));
-    target.searchParams.set('return', 'app');
-    target.hash = location.hash;
-    location.assign(target.href);
-  });
-  const check = main.querySelector('#account-check');
-  check.onclick = () => void run(check, async () => {
-    account = (await api('account')).state;
-    if (id === renderID) {
-      const notice = main.querySelector('.notice');
-      notice.outerHTML = accountNotice();
-    }
-  });
+  bindAccount();
 }
 
 async function editor(watch) {
@@ -473,7 +511,7 @@ async function editor(watch) {
       flash(t('watches.saved'));
     }, error);
   };
-  form.querySelector('#cancel').onclick = () => void switchTab('watches');
+  form.querySelector('#cancel').onclick = () => void switchTab(tab);
   const remove = form.querySelector('#delete');
   if (remove) remove.onclick = () => {
     if (!window.confirm(t('editor.confirm_delete'))) return;
@@ -498,6 +536,7 @@ async function switchTab(next) {
     else button.removeAttribute('aria-current');
   }
   try {
+    if (tab === 'home') home();
     if (tab === 'watches') watches();
     if (tab === 'history') await historyScreen(id);
     if (tab === 'settings') await settingsScreen(id);
@@ -526,11 +565,11 @@ async function start() {
     screenError('Luxmed Watcher', new Error(t('error.open_from_bot')));
     return;
   }
-  show(titleFor('watches'), `<p>${text('dashboard.loading')}</p>`, false);
+  show(titleFor('home'), `<p>${text('dashboard.loading')}</p>`, false);
   const initial = new URLSearchParams(location.search).get('tab');
   try {
     ({ token: apiToken } = await api('auth'));
-    await update(tabs.includes(initial) ? initial : 'watches');
+    await update(tabs.includes(initial) ? initial : 'home');
   } catch (error) {
     screenError('Luxmed Watcher', error, error.message === t('error.access_denied') ? undefined : start);
   }
