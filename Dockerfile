@@ -3,12 +3,12 @@ WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/luxmed-watcher ./cmd/luxmed-watcher
+RUN CGO_ENABLED=0 go build -o /out/ ./cmd/luxmed-watcher ./cmd/luxmed-mcp
 
 FROM alpine:3.21
 RUN adduser -D -h /app appuser && mkdir -p /app/data && chown -R appuser:appuser /app
 WORKDIR /app
-COPY --from=build /out/luxmed-watcher /usr/local/bin/luxmed-watcher
+COPY --from=build /out/ /usr/local/bin/
 USER appuser
 VOLUME ["/app/data"]
 EXPOSE 8080
