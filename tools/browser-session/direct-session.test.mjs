@@ -92,3 +92,16 @@ test('a rejected refresh does not write cookies or attempt the slot request', as
   assert.deepEqual(await requestPortalResource(dir, '2', termsPath, { origin }), { status: 401 });
   assert.deepEqual(calls, [termsPath, refreshPath]);
 });
+
+test('account checks use the authenticated cities endpoint and expose only the status', async t => {
+  const { dir, origin } = await fixture(t, (req,res) => {
+    assert.equal(req.url, '/PatientPortal/NewPortal/Dictionary/cities');
+    assert.ok(req.headers.cookie.includes('Authorization-Token='));
+    res.writeHead(200, { 'Content-Type': 'application/json' }).end('[{"fixture":"city"}]');
+  });
+  await writeProfile(dir, '1', {
+    cookies: [cookie('Authorization-Token', jwt(Math.floor(Date.now() / 1000) + 600))],
+    origins: [],
+  });
+  assert.deepEqual(await requestPortalResource(dir, '1', '/session', { origin }), { status: 200 });
+});

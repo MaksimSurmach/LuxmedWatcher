@@ -3,7 +3,7 @@ import { readProfile, writeProfile } from './profile-store.mjs';
 import { portalOrigin } from './session.mjs';
 
 const refreshPath = '/PatientPortal/NewPortal/Token/Refresh';
-const sessionProbe = '/PatientPortal/NewPortal/RecentSearchTermsParameters/recentSearchData';
+const sessionProbe = '/PatientPortal/NewPortal/Dictionary/cities';
 const maxResponseBytes = 8 * 1024 * 1024;
 
 function cookieFor(state, origin, name) {
