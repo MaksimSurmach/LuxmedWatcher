@@ -21,6 +21,7 @@ const status = element('status');
 const screen = element('screen');
 const controls = element('controls');
 const keyboard = element('keyboard');
+const paste = element('paste');
 const typing = element('typing');
 const keys = element('keys');
 const zoom = element('zoom');
@@ -28,7 +29,7 @@ const label = (name) => t(`viewer.${name}`);
 
 function renderLanguage() {
   const labels = {
-    title: 'title', close: 'close', keyboard: 'keyboard', keyboardLabel: 'keyboard_hint',
+    title: 'title', close: 'close', keyboard: 'keyboard', paste: 'paste', keyboardLabel: 'keyboard_hint',
     backspace: 'backspace', 'tab-key': 'tab_key', 'enter-key': 'enter_key',
     'remote-notice': 'remote_notice', 'start-viewer': 'continue',
   };
@@ -148,10 +149,8 @@ async function start() {
   }
 }
 
-function sendText() {
-  const text = keys.value;
-  keys.value = '';
-  if (!connected) return;
+function forwardText(text) {
+  if (!connected || !text) return;
   if (viewer instanceof Screencast) {
     viewer.sendText(text);
     return;
@@ -159,6 +158,24 @@ function sendText() {
   for (const character of text) {
     const code = character.codePointAt(0);
     if (code >= 0x20 && code !== 0x7f) viewer.sendKey(keysyms.lookup(code), null);
+  }
+}
+
+function sendText() {
+  const text = keys.value;
+  keys.value = '';
+  forwardText(text);
+}
+
+function pasteText(text) {
+  if (!connected) return;
+  if (!text) {
+    status.textContent = label('paste_empty');
+  } else if (text.length > 2048) {
+    status.textContent = label('paste_too_long');
+  } else {
+    forwardText(text);
+    status.textContent = label('connected');
   }
 }
 
@@ -176,15 +193,34 @@ element('close').addEventListener('click', () => {
   }
 });
 window.addEventListener('pagehide', () => close('disconnected'));
-keyboard.addEventListener('click', () => {
-  typing.hidden = !typing.hidden;
+function showKeyboard(show) {
+  typing.hidden = !show;
   keyboard.setAttribute('aria-expanded', String(!typing.hidden));
-  if (!typing.hidden) {
+  if (show) {
     keys.focus({ preventScroll: true });
   } else {
     keys.value = '';
     viewer?.focus({ preventScroll: true });
   }
+}
+keyboard.addEventListener('click', () => showKeyboard(typing.hidden));
+paste.addEventListener('click', async () => {
+  if (!connected) return;
+  paste.disabled = true;
+  try {
+    pasteText(await navigator.clipboard.readText());
+  } catch {
+    if (!connected) return;
+    showKeyboard(true);
+    status.textContent = label('paste_manually');
+  } finally {
+    paste.disabled = false;
+  }
+});
+keys.addEventListener('paste', (event) => {
+  if (!event.clipboardData) return;
+  event.preventDefault();
+  pasteText(event.clipboardData.getData('text/plain'));
 });
 keys.addEventListener('input', (event) => {
   if (!event.isComposing) sendText();
