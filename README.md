@@ -1,67 +1,46 @@
 # LuxmedWatcher
 
-Private Telegram bot for watching LuxMed appointment availability.
+LuxmedWatcher is a private Telegram bot that checks appointment availability in the LuxMed patient portal. Each user connects their own account, sets up a watch and receives a summary when matching slots appear. Book appointments in LuxMed.
 
-The current MVP implements:
+## Run
 
-- Telegram onboarding with admin whitelist and invite codes.
-- `en`, `ru`, and `pl` user-facing text from i18n catalogs.
-- One Telegram user to one encrypted LuxMed account.
-- Button-first Telegram menus for account setup, watch creation, watch list, history, pause/resume/delete, and manual check.
-- SQLite persistence for users, invites, LuxMed credentials, watches, found appointment history, and notification history.
-- Periodic scheduler with duplicate-notification protection.
-- Direct LuxMed API client using the endpoints recovered from the old `origin/develop` branch.
-- Docker Compose deployment with a persistent database volume.
+1. Create a Telegram bot with BotFather and run `cp .env.example .env`.
+2. Set `TELEGRAM_BOT_TOKEN` and `ADMIN_TELEGRAM_IDS` (comma-separated numeric Telegram user IDs). Use `openssl rand -base64 32` for `APP_MASTER_KEY`. Keep the same key across restarts and backups.
+3. Run `docker compose up --build -d`. The Compose volume keeps the SQLite database across container rebuilds.
 
-## Run Locally
+To run without Docker, install Go 1.26.11 or newer and load the env file into your shell:
 
-Create a Telegram bot token with BotFather, then prepare env:
-
-```bash
-cp .env.example .env
-openssl rand -base64 32
-```
-
-Put the generated key into `APP_MASTER_KEY`, set `TELEGRAM_BOT_TOKEN`, and add your Telegram numeric id to `ADMIN_TELEGRAM_IDS`.
-
-Run:
-
-```bash
-go test ./...
+```sh
+set -a
+. ./.env
+set +a
 go run ./cmd/luxmed-watcher
 ```
 
-The bot exposes `GET /healthz` on `HEALTH_ADDR` (`:8080` by default).
+Use one running watcher per database and Telegram token. The readiness probe is `GET /healthz` at `HEALTH_ADDR` (default `:8080`). It checks the database connection.
 
-## Docker
+### PostgreSQL
 
-```bash
-docker compose up --build -d
+Set `DATABASE_URL` to a PostgreSQL URL to select PostgreSQL. If the URL is empty, `DATABASE_PATH` selects the SQLite file. Use an existing database with a dedicated role that can create and update tables in its schema. For a remote database, use TLS with server verification, for example `sslmode=verify-full`. The app creates and updates its schema on startup.
+
+Selecting another database starts from the data already in that database. Keep the SQLite volume if it contains accounts or watches you want to retain. Back up the database and keep `APP_MASTER_KEY` separately.
+
+## Telegram workflow
+
+- Open the bot in a private chat and use `/start`. Admins can issue a limited-use invite with `/invite [max_uses]`.
+- Connect your LuxMed account, then use `/new` to choose a city, service, doctor or clinic filters and a check interval.
+- Use `/watches` to review, change, pause or manually check a watch. `/history` opens appointment history. `/logout_luxmed` removes the saved credentials and pauses active watches.
+- Open LuxMed from an alert to view or book the appointment. If the portal requires a fresh sign-in, a questionnaire or a referral, finish that step in LuxMed. A partial search can still report the slots it verified.
+
+The default minimum between checks of the same connected account is two minutes. `DATA_RETENTION_DAYS` defaults to 180 for appointment and notification history. Set it to 0 to disable cleanup.
+
+## Architecture and verification
+
+A single Go process runs the scheduler. LuxMed supplies slots through the HTTP client, storage supplies the same repository on SQLite or PostgreSQL, and Telegram handles interactions and notification delivery. The app assembles these adapters at startup.
+
+```sh
+go test -race ./...
+go vet ./...
 ```
 
-The SQLite database is stored in the `luxmed-watcher-data` named volume at `/app/data`, so container rebuilds do not delete bot state.
-
-## Telegram Commands
-
-- `/start` - onboarding or main menu.
-- `/menu` - main menu.
-- `/new` - create a watch.
-- `/watches` - list watches.
-- `/history` - found appointment history.
-- `/settings` and `/language` - language/settings.
-- `/help` - short help.
-- `/cancel` - cancel the current flow.
-- `/invite [max_uses]` - admin-only invite creation.
-
-## MVP Watch Input Format
-
-The bot is button-first where practical, but MVP city/service/facility lookup accepts explicit LuxMed ids while the full catalog search flow is still small:
-
-```text
-1|Warsaw
-456|Konsultacja kardiologiczna
-123|Dr. Jan Kowalski
-all
-```
-
-The LuxMed client includes dictionary methods for cities, services, doctors, and facilities, so the next step is to replace these typed ids with paginated search buttons.
+Set `TEST_DATABASE_URL` to run storage integration tests against PostgreSQL. Tests create and remove isolated schemas and require a role with `CREATE SCHEMA` permission. The Telegram and LuxMed tests use synthetic data and local HTTP fixtures. [LuxMed API notes](docs/LUXMED_API_NOTES.md)

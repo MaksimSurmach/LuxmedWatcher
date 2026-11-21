@@ -50,27 +50,16 @@ func doctorModeKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardM
 	)
 }
 
-func intervalKeyboard() tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("2 min", "interval:120"),
-			tgbotapi.NewInlineKeyboardButtonData("3 min", "interval:180"),
-			tgbotapi.NewInlineKeyboardButtonData("5 min", "interval:300"),
-			tgbotapi.NewInlineKeyboardButtonData("10 min", "interval:600"),
-		),
-	)
-}
-
 func timeWindowKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData("Любое время", "time:any")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.any_time"), "time:any")),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Утро 08–12", "time:morning"),
-			tgbotapi.NewInlineKeyboardButtonData("День 12–16", "time:day"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.morning"), "time:morning"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.afternoon"), "time:day"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Вечер 16–20", "time:evening"),
-			tgbotapi.NewInlineKeyboardButtonData("Рабочее 09–18", "time:workday"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.evening"), "time:evening"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.business_hours"), "time:workday"),
 		),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),
 	)
@@ -83,7 +72,11 @@ func watchKeyboard(c *i18n.Catalog, locale string, watch domain.Watch) tgbotapi.
 	}
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(statusButton, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.check_now"), fmt.Sprintf("watch:check:%d", watch.ID))),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.history"), "history"), tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.delete"), fmt.Sprintf("watch:delete:%d", watch.ID))),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.history"), fmt.Sprintf("watch:history:%d", watch.ID)),
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.edit_watch"), fmt.Sprintf("watch:edit:%d", watch.ID)),
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.delete"), fmt.Sprintf("watch:delete:%d", watch.ID)),
+		),
 	)
 }
 
@@ -242,8 +235,8 @@ func facilityResultsKeyboard(facilities []domain.Facility, mode string, page int
 
 	rows = append(rows,
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Готово", "facdone"),
-			tgbotapi.NewInlineKeyboardButtonData("Очистить", "facclear"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.done"), "facdone"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.clear"), "facclear"),
 		),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.all_places_in_city"), "fac:any")),
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.cancel"), "cancel")),

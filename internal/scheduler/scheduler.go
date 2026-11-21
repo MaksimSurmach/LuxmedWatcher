@@ -2,8 +2,13 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
+	"slices"
+	"sync"
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -12,143 +17,345 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
+var (
+	ErrRateLimited = errors.New("watch check is cooling down")
+	ErrInactive    = errors.New("watch or user is inactive")
+	ErrNoAccount   = errors.New("LuxMed account is not connected")
+)
+
 type Notifier interface {
-	NotifyAppointment(ctx context.Context, user domain.User, watch domain.Watch, history domain.AppointmentHistory) (int, error)
+	NotifyAppointments(context.Context, domain.User, domain.Watch, []domain.AppointmentHistory, int) (int, error)
+}
+
+type accountCheck struct {
+	busy                     bool
+	next                     time.Time
+	failures                 int
+	authenticatedAt          time.Time
+	login, encryptedPassword string
+	client                   luxmed.Client
 }
 
 type Runner struct {
 	db                   *storage.DB
 	cryptor              *security.Cryptor
 	notifier             Notifier
-	newClient            func(rawPayloads bool) luxmed.Client
+	newClient            func(bool) luxmed.Client
+	minimumInterval      time.Duration
 	notificationCooldown time.Duration
 	rawPayloads          bool
-	logger               *slog.Logger
+	mu                   sync.Mutex
+	accounts             map[int64]*accountCheck
+	capacity             chan struct{}
 }
 
-func NewRunner(db *storage.DB, cryptor *security.Cryptor, notifier Notifier, cooldown time.Duration, rawPayloads bool, logger *slog.Logger) *Runner {
+func NewRunner(db *storage.DB, cryptor *security.Cryptor, notifier Notifier, minimumInterval, cooldown time.Duration, rawPayloads bool) *Runner {
 	return &Runner{
-		db:                   db,
-		cryptor:              cryptor,
-		notifier:             notifier,
-		newClient:            func(rawPayloads bool) luxmed.Client { return luxmed.NewHTTPClient(rawPayloads) },
-		notificationCooldown: cooldown,
-		rawPayloads:          rawPayloads,
-		logger:               logger,
+		db: db, cryptor: cryptor, notifier: notifier,
+		newClient:       func(raw bool) luxmed.Client { return luxmed.NewHTTPClient(raw) },
+		minimumInterval: minimumInterval, notificationCooldown: cooldown, rawPayloads: rawPayloads,
+		accounts: make(map[int64]*accountCheck), capacity: make(chan struct{}, 3),
 	}
 }
 
 func (r *Runner) CheckWatch(ctx context.Context, watch domain.Watch) error {
-	user, err := r.db.UserByTelegramID(ctx, 0)
-	if err == nil {
-		_ = user
-	}
-	account, err := r.db.LuxMedAccount(ctx, watch.UserID)
-	if err != nil {
-		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, "luxmed account not configured")
-		return fmt.Errorf("load luxmed account: %w", err)
-	}
-	password, err := r.cryptor.Decrypt(account.EncryptedPassword)
-	if err != nil {
-		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, "decrypt credentials failed")
-		return err
-	}
-	client := r.newClient(r.rawPayloads)
-	if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
-		account.Status = domain.AccountStatusAuthFailed
-		account.LastLoginError = err.Error()
-		_ = r.db.UpsertLuxMedAccount(ctx, account)
-		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, err.Error())
-		return err
-	}
-	now := time.Now().UTC()
-	account.Status = domain.AccountStatusActive
-	account.LastLoginAt = &now
-	account.LastLoginError = ""
-	_ = r.db.UpsertLuxMedAccount(ctx, account)
+	_, err := r.check(ctx, watch, false)
+	return err
+}
 
-	apps, err := client.SearchAppointments(ctx, watch)
-	if err != nil {
-		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, err.Error())
-		return err
+func (r *Runner) ManualCheck(ctx context.Context, watch domain.Watch) (int, error) {
+	return r.check(ctx, watch, true)
+}
+
+func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool) (count int, err error) {
+	r.mu.Lock()
+	state := r.accounts[requested.UserID]
+	if state == nil {
+		state = &accountCheck{}
+		r.accounts[requested.UserID] = state
+	}
+	if state.busy || time.Now().Before(state.next) {
+		r.mu.Unlock()
+		return 0, ErrRateLimited
+	}
+	state.busy = true
+	r.mu.Unlock()
+
+	defer func() {
+		r.mu.Lock()
+		state.busy = false
+		r.mu.Unlock()
+	}()
+
+	select {
+	case r.capacity <- struct{}{}:
+		defer func() { <-r.capacity }()
+	case <-ctx.Done():
+		return 0, ctx.Err()
 	}
 
-	apps = filterAppointmentsByTimeWindows(apps, watch.TimeWindows)
+	parent := ctx
+	ctx, cancel := context.WithTimeout(parent, 70*time.Second)
+	defer cancel()
 
-	user, err = r.userByID(ctx, watch.UserID)
+	watch, err := r.db.Watch(ctx, requested.ID)
 	if err != nil {
-		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, err.Error())
-		return err
+		return 0, fmt.Errorf("load watch: %w", err)
 	}
-	for _, app := range apps {
-		history, isNew, err := r.db.UpsertAppointmentHistory(ctx, watch.ID, app)
+	if watch.UserID != requested.UserID || watch.Status != domain.WatchStatusActive {
+		return 0, ErrInactive
+	}
+	interval := max(time.Duration(watch.CheckIntervalSeconds)*time.Second, r.minimumInterval)
+	if manual {
+		interval = r.minimumInterval
+	}
+	if watch.LastCheckedAt != nil && time.Since(*watch.LastCheckedAt) < interval {
+		return 0, ErrRateLimited
+	}
+
+	user, err := r.db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		return 0, fmt.Errorf("load watch owner: %w", err)
+	}
+	if !user.IsActive() {
+		return 0, ErrInactive
+	}
+	started := time.Now().UTC()
+	count, err = r.run(ctx, user, watch, state, started)
+	if parent.Err() != nil {
+		return count, errors.Join(err, parent.Err())
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		err = errors.Join(err, luxmed.ErrUnavailable, ctx.Err())
+	}
+	state.next = time.Now().Add(r.minimumInterval + jitter(r.minimumInterval/10))
+	var status string
+	if err != nil {
+		status = checkStatus(err)
+		if errors.Is(err, luxmed.ErrUnavailable) {
+			state.failures = min(state.failures+1, 5)
+			backoff := (15 * time.Second) << (state.failures - 1)
+			var upstream *luxmed.HTTPError
+			if errors.As(err, &upstream) {
+				backoff = max(backoff, min(upstream.RetryAfter, 24*time.Hour))
+			}
+			state.next = maxTime(state.next, time.Now().Add(backoff+jitter(backoff/5)))
+		}
+	} else {
+		state.failures = 0
+	}
+	if errors.Is(err, ErrInactive) {
+		return count, err
+	}
+	recordCtx, stop := context.WithTimeout(parent, 5*time.Second)
+	defer stop()
+	if writeErr := r.db.MarkWatchChecked(recordCtx, watch.ID, err == nil, status); writeErr != nil {
+		err = errors.Join(err, fmt.Errorf("record watch result: %w", writeErr))
+	}
+	return count, err
+}
+
+func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, state *accountCheck, started time.Time) (int, error) {
+	account, err := r.db.LuxMedAccount(ctx, user.ID)
+	if errors.Is(err, sql.ErrNoRows) {
+		state.client = nil
+		state.login, state.encryptedPassword = "", ""
+		return 0, ErrNoAccount
+	}
+	if err != nil {
+		return 0, fmt.Errorf("load LuxMed account: %w", err)
+	}
+	if account.Status == domain.AccountStatusAuthFailed {
+		return 0, luxmed.ErrAuthentication
+	}
+	if state.client == nil || state.login != account.Login || state.encryptedPassword != account.EncryptedPassword || time.Since(state.authenticatedAt) > 15*time.Minute {
+		state.client = nil
+		password, err := r.cryptor.Decrypt(account.EncryptedPassword)
 		if err != nil {
-			r.logger.Warn("store appointment history failed", "watch_id", watch.ID, "err", err)
+			return 0, fmt.Errorf("decrypt LuxMed credentials: %w", err)
+		}
+		client := r.newClient(r.rawPayloads)
+		if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
+			if errors.Is(err, luxmed.ErrAuthentication) {
+				return 0, errors.Join(err, r.recordAuthFailure(ctx, account))
+			}
+			return 0, err
+		}
+
+		now := time.Now().UTC()
+		account.Status, account.LastLoginAt, account.LastLoginError = domain.AccountStatusActive, &now, ""
+		if err := r.db.UpdateLuxMedAccountAuth(ctx, account); err != nil {
+			return 0, fmt.Errorf("save LuxMed account status: %w", err)
+		}
+		state.client, state.authenticatedAt = client, now
+		state.login, state.encryptedPassword = account.Login, account.EncryptedPassword
+	}
+
+	appointments, searchErr := state.client.SearchAppointments(ctx, watch)
+	if errors.Is(searchErr, luxmed.ErrAuthentication) {
+		state.client = nil
+		return 0, searchErr
+	}
+	if searchErr != nil && len(appointments) == 0 {
+		return 0, searchErr
+	}
+	if err := r.checkWatchUnchanged(ctx, watch); err != nil {
+		return 0, errors.Join(searchErr, err)
+	}
+
+	slices.SortFunc(appointments, func(a, b domain.Appointment) int { return a.DateTime.Compare(b.DateTime) })
+	seen := make(map[string]struct{}, len(appointments))
+	var pending []domain.AppointmentHistory
+	for _, appointment := range filterAppointmentsByTimeWindows(appointments, watch.TimeWindows) {
+		if _, exists := seen[appointment.Fingerprint]; exists {
 			continue
 		}
-		if !isNew && !r.cooldownExpired(ctx, watch.ID, history.Fingerprint) {
-			continue
+		seen[appointment.Fingerprint] = struct{}{}
+		history, _, err := r.db.UpsertAppointmentHistory(ctx, watch.ID, appointment)
+		if err != nil {
+			return len(seen), errors.Join(searchErr, fmt.Errorf("write appointment history: %w", err))
 		}
-		messageID, notifyErr := r.notifier.NotifyAppointment(ctx, user, watch, history)
-		status := domain.NotificationStatusSent
-		errText := ""
-		if notifyErr != nil {
-			status = domain.NotificationStatusFailed
-			errText = notifyErr.Error()
-		}
-		if err := r.db.MarkNotified(ctx, watch.ID, history.ID, history.Fingerprint, messageID, status, errText); err != nil {
-			r.logger.Warn("store notification history failed", "watch_id", watch.ID, "err", err)
+		if history.Status != domain.HistoryStatusHidden && history.LastNotifiedAt == nil {
+			pending = append(pending, history)
 		}
 	}
-	return r.db.MarkWatchChecked(ctx, watch.ID, true, "")
-}
-
-func (r *Runner) cooldownExpired(ctx context.Context, watchID int64, fingerprint string) bool {
-	last, err := r.db.LastNotificationAt(ctx, watchID, fingerprint)
-	if err != nil || last == nil {
-		return true
+	if searchErr == nil {
+		if err := r.db.MarkMissingAppointments(ctx, watch.ID, started, started.Add(-r.notificationCooldown)); err != nil {
+			return len(seen), fmt.Errorf("update missing appointments: %w", err)
+		}
 	}
-	return time.Since(*last) >= r.notificationCooldown
+	if len(pending) == 0 {
+		return len(seen), searchErr
+	}
+
+	if err := r.checkWatchUnchanged(ctx, watch); err != nil {
+		return len(seen), errors.Join(searchErr, err)
+	}
+	preview := pending[:min(10, len(pending))]
+	messageID, notifyErr := r.notifier.NotifyAppointments(ctx, user, watch, preview, len(pending))
+	status, errText := domain.NotificationStatusSent, ""
+	if notifyErr != nil {
+		status, errText = domain.NotificationStatusFailed, "telegram delivery failed"
+		notifyErr = errors.New(errText)
+	}
+	deliveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	recordErr := r.db.MarkNotifications(deliveryCtx, pending, messageID, status, errText)
+	if recordErr != nil {
+		recordErr = fmt.Errorf("record notification delivery: %w", recordErr)
+	}
+	return len(seen), errors.Join(searchErr, notifyErr, recordErr)
 }
 
-func (r *Runner) userByID(ctx context.Context, userID int64) (domain.User, error) {
-	return r.db.UserByID(ctx, userID)
+func (r *Runner) checkWatchUnchanged(ctx context.Context, watch domain.Watch) error {
+	current, err := r.db.Watch(ctx, watch.ID)
+	if err != nil {
+		return fmt.Errorf("reload current watch: %w", err)
+	}
+	if current.Status != domain.WatchStatusActive || !current.UpdatedAt.Equal(watch.UpdatedAt) {
+		return ErrInactive
+	}
+	return nil
+}
+
+func (r *Runner) recordAuthFailure(ctx context.Context, account domain.LuxMedAccount) error {
+	account.Status, account.LastLoginError = domain.AccountStatusAuthFailed, "luxmed_authentication"
+	return r.db.UpdateLuxMedAccountAuth(ctx, account)
+}
+
+func checkStatus(err error) string {
+	switch {
+	case errors.Is(err, ErrNoAccount):
+		return "luxmed_account_missing"
+	case errors.Is(err, luxmed.ErrAuthentication):
+		return "luxmed_authentication"
+	case errors.Is(err, luxmed.ErrPartialResults):
+		return "luxmed_partial"
+	case errors.Is(err, luxmed.ErrUnavailable):
+		return "luxmed_unavailable"
+	default:
+		return "check_failed"
+	}
+}
+
+func jitter(maximum time.Duration) time.Duration {
+	return time.Duration(rand.Int64N(int64(maximum) + 1))
+}
+
+func maxTime(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+	return a
 }
 
 type Scheduler struct {
-	db       *storage.DB
-	runner   *Runner
-	interval time.Duration
-	logger   *slog.Logger
+	db        *storage.DB
+	runner    *Runner
+	interval  time.Duration
+	retention time.Duration
+	logger    *slog.Logger
 }
 
-func New(db *storage.DB, runner *Runner, interval time.Duration, logger *slog.Logger) *Scheduler {
-	return &Scheduler{db: db, runner: runner, interval: interval, logger: logger}
+func New(db *storage.DB, runner *Runner, interval, retention time.Duration, logger *slog.Logger) *Scheduler {
+	return &Scheduler{db: db, runner: runner, interval: interval, retention: retention, logger: logger}
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
-	ticker := time.NewTicker(s.interval)
-	defer ticker.Stop()
-	for {
+	var nextCleanup time.Time
+	for ctx.Err() == nil {
+		if s.retention > 0 && time.Now().After(nextCleanup) {
+			if err := s.db.PurgeHistory(ctx, time.Now().Add(-s.retention)); err != nil {
+				s.logger.Warn("clean up expired history", "err", err)
+			}
+			nextCleanup = time.Now().Add(24 * time.Hour)
+		}
 		s.tick(ctx)
+
+		timer := time.NewTimer(s.interval + jitter(s.interval/5))
 		select {
 		case <-ctx.Done():
+			timer.Stop()
 			return
-		case <-ticker.C:
+		case <-timer.C:
 		}
 	}
 }
 
 func (s *Scheduler) tick(ctx context.Context) {
-	watches, err := s.db.DueWatches(ctx, 20)
+	now := time.Now()
+	s.runner.mu.Lock()
+	for userID, account := range s.runner.accounts {
+		if !account.busy && now.After(account.next) && now.Sub(account.authenticatedAt) > 15*time.Minute {
+			delete(s.runner.accounts, userID)
+		}
+	}
+	s.runner.mu.Unlock()
+
+	watches, err := s.db.DueWatches(ctx, 0)
 	if err != nil {
-		s.logger.Warn("load due watches failed", "err", err)
+		s.logger.Warn("load due watches", "err", err)
 		return
 	}
+	var checks sync.WaitGroup
+	defer checks.Wait()
+	accounts := make(map[int64]bool, len(watches))
 	for _, watch := range watches {
-		if err := s.runner.CheckWatch(ctx, watch); err != nil {
-			s.logger.Warn("watch check failed", "watch_id", watch.ID, "err", err)
+		if ctx.Err() != nil {
+			return
 		}
+		if accounts[watch.UserID] {
+			continue
+		}
+		accounts[watch.UserID] = true
+		checks.Add(1)
+		go func() {
+			defer checks.Done()
+			err := s.runner.CheckWatch(ctx, watch)
+			if err != nil && !errors.Is(err, ErrRateLimited) && !errors.Is(err, ErrInactive) {
+				s.logger.Warn("watch check failed", "watch_id", watch.ID, "status", checkStatus(err), "err", err)
+			}
+		}()
 	}
 }
 
@@ -169,8 +376,9 @@ func filterAppointmentsByTimeWindows(apps []domain.Appointment, windows []domain
 }
 
 func appointmentMatchesTimeWindows(app domain.Appointment, windows []domain.TimeWindow) bool {
-	appMinutes := app.DateTime.Hour()*60 + app.DateTime.Minute()
-	appWeekday := int(app.DateTime.Weekday())
+	local := app.DateTime.In(luxmed.Location())
+	appMinutes := local.Hour()*60 + local.Minute()
+	appWeekday := (int(local.Weekday())+6)%7 + 1
 
 	for _, window := range windows {
 		if window.Weekday > 0 && window.Weekday != appWeekday {
