@@ -147,28 +147,31 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	msg := tgbotapi.NewMessage(user.TelegramChatID, b.appointmentNotification(user.Locale, watch, histories, total, 10))
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.DisableWebPagePreview = true
-	keyboard := [][]miniAppButton{
-		{{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), portalURL(histories[0].BookingURL))}},
-		{
-			{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.pause"), fmt.Sprintf("watch:pause:%d", watch.ID))},
-			{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.show_watch"), fmt.Sprintf("watch:show:%d", watch.ID))},
-		},
-		{{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID))}},
-	}
+	booking := miniAppButton{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonURL(
+		b.catalog.T(user.Locale, "button.book_portal"), portalURL(histories[0].BookingURL),
+	)}
+	details := b.actionButton(user, "button.show_watch", fmt.Sprintf("watch:show:%d", watch.ID))
+	keyboard := [][]miniAppButton{{booking}, {details}}
 	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
-		button := newMiniAppButton(b.catalog.T(user.Locale, "button.open_app"), b.cfg.MiniApp.DashboardURL()+"?tab=history")
-		button.WidgetAction = "app:history"
-		keyboard = append(keyboard, []miniAppButton{button})
+		results := newMiniAppButton(b.catalog.T(user.Locale, "button.slot_results"), b.cfg.MiniApp.DashboardURL()+"?tab=history")
+		results.WidgetAction = "app:history"
+		keyboard[1] = []miniAppButton{results}
+		keyboard = append(keyboard, []miniAppButton{details})
 	}
+	keyboard = append(keyboard, []miniAppButton{
+		b.actionButton(user, "button.pause", fmt.Sprintf("watch:pause:%d", watch.ID)),
+		b.actionButton(user, "button.check_again", fmt.Sprintf("watch:check:%d", watch.ID)),
+	})
 	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": keyboard}
 	title := b.catalog.T(user.Locale, "notification.title", max(total, len(histories)))
 	card := widgetCard{
-		Locale:  user.Locale,
-		Title:   title,
-		Body:    truncateMessage(strings.Join(strings.Fields(procedures.WatchTitle(user.Locale, watch)), " "), 150),
-		Slot:    newWidgetSlot(histories[0]),
-		Actions: keyboard,
-		Failure: b.catalog.T(user.Locale, "widget.error"),
+		Locale:      user.Locale,
+		Title:       title,
+		Body:        truncateMessage(strings.Join(strings.Fields(procedures.WatchTitle(user.Locale, watch)), " "), 150),
+		Slot:        newWidgetSlot(histories[0]),
+		Actions:     keyboard[:2],
+		BookingHint: b.catalog.T(user.Locale, "notification.booking_hint"),
+		Failure:     b.catalog.T(user.Locale, "widget.error"),
 	}
 	if remaining := max(total, len(histories)) - 1; remaining > 0 {
 		card.More = b.catalog.T(user.Locale, "notification.more", remaining)
@@ -205,6 +208,7 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 	if remaining := count - len(preview); remaining > 0 {
 		fmt.Fprintf(&text, "\n\n<i>%s</i>", html.EscapeString(b.catalog.T(locale, "notification.more", remaining)))
 	}
+	text.WriteString("\n\n" + html.EscapeString(b.catalog.T(locale, "notification.booking_hint")))
 	return text.String()
 }
 
@@ -326,6 +330,8 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 		b.showWatches(ctx, user)
 	case "history":
 		b.showHistory(ctx, user)
+	case "book":
+		b.showBooking(user)
 	case "settings":
 		b.send(user, b.catalog.T(user.Locale, "settings.title"), settingsKeyboard(b.catalog, user.Locale))
 	case "language":

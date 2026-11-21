@@ -76,13 +76,14 @@ func validWidgetAction(action string) bool {
 }
 
 type widgetCard struct {
-	Locale  string
-	Title   string
-	Body    string
-	Slot    *widgetSlot
-	More    string
-	Actions [][]miniAppButton
-	Failure string
+	Locale      string
+	Title       string
+	Body        string
+	Slot        *widgetSlot
+	More        string
+	BookingHint string
+	Actions     [][]miniAppButton
+	Failure     string
 }
 
 type widgetSlot struct {
@@ -104,19 +105,21 @@ func newWidgetSlot(item domain.AppointmentHistory) *widgetSlot {
 var chatWidget = template.Must(template.New("telegram-widget").Parse(`<!doctype html>
 <html lang="{{.Locale}}">
 <style>
-body{margin:10px 12px;color:var(--tg-theme-text-color)}
-article{padding:12px;border:1px solid var(--tg-theme-section-separator-color);border-radius:14px;overflow-wrap:anywhere}
-h2,p{margin:0} h2{font-size:1.15em;line-height:1.2} p{margin-top:6px}
-.body{white-space:pre-line} .slot{margin-top:10px;padding:9px;background:var(--tg-theme-secondary-bg-color);border-radius:9px}
-.slot p{margin-top:3px} .more{font-size:.9em;color:var(--tg-theme-subtitle-text-color)}
-.row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px} nav{margin-top:10px}
-button,a{box-sizing:border-box;flex:1 1 100px;min-height:42px;text-align:center;border:0;border-radius:8px;padding:7px 8px;background:var(--tg-theme-secondary-bg-color);color:var(--tg-theme-text-color);font:inherit}
+body{margin:8px 10px;color:var(--tg-theme-text-color,#162826)}
+article{padding:14px;border:1px solid var(--tg-theme-section-separator-color,#dfe7e3);border-radius:12px;overflow-wrap:anywhere}
+h2,p{margin:0}h2{font-size:1.05em;line-height:1.24}p{margin-top:5px}
+.body{white-space:pre-line}.slot{margin:8px 0;padding:10px 12px;background:var(--tg-theme-secondary-bg-color,#f2f6f4);border-radius:8px}
+.slot strong{font-size:1.24em;line-height:1.25}.slot p{margin-top:4px}
+.more,.booking-hint{font-size:.9em;color:var(--tg-theme-subtitle-text-color,#4e625e)}
+.row{display:flex;flex-wrap:wrap;gap:6px;margin-top:6px}nav{margin-top:10px}
+button,a{box-sizing:border-box;flex:1 1 112px;min-height:44px;text-align:center;border:0;border-radius:8px;padding:8px;background:var(--tg-theme-secondary-bg-color,#f2f6f4);color:var(--tg-theme-text-color,#162826);font:inherit}
 a{display:flex;align-items:center;justify-content:center;text-decoration:none}
-.row:first-child button,.row:first-child a{background:var(--tg-theme-button-color);color:var(--tg-theme-button-text-color)}
+.row:first-child button,.row:first-child a{background:var(--tg-theme-button-color,#00695c);color:var(--tg-theme-button-text-color,#fff)}
 </style>
-<article><h2>{{.Title}}</h2>{{if .Body}}<p class="body">{{.Body}}</p>{{end}}
+<article><h2>{{.Title}}</h2>
 {{with .Slot}}<section class="slot"><strong>{{.When}}</strong>{{if .Doctor}}<p>{{.Doctor}}</p>{{end}}{{if .Facility}}<p>{{.Facility}}</p>{{end}}{{if .Address}}<p>{{.Address}}</p>{{end}}</section>{{end}}
-{{if .More}}<p class="more">{{.More}}</p>{{end}}
+{{if .Body}}<p class="body">{{.Body}}</p>{{end}}{{if .More}}<p class="more">{{.More}}</p>{{end}}
+{{if .BookingHint}}<p class="booking-hint">{{.BookingHint}}</p>{{end}}
 <nav>{{range .Actions}}<div class="row">{{range .}}
 {{if .URL}}<a href="{{.URL}}">{{.Text}}</a>{{else if .WidgetAction}}<button data-callback="{{.WidgetAction}}">{{.Text}}</button>{{else if .CallbackData}}<button data-callback="{{.CallbackData}}">{{.Text}}</button>{{end}}
 {{end}}</div>{{end}}</nav>

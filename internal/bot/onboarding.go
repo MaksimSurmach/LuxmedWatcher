@@ -8,6 +8,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
 func (b *Bot) registerCommands() {
@@ -20,6 +21,7 @@ func (b *Bot) registerCommands() {
 			{Command: "new", Description: b.catalog.T(language, "button.new_watch")},
 			{Command: "watches", Description: b.catalog.T(language, "button.my_watches")},
 			{Command: "history", Description: b.catalog.T(language, "button.history")},
+			{Command: "book", Description: b.catalog.T(language, "button.book_portal")},
 			{Command: "settings", Description: b.catalog.T(language, "button.settings")},
 			{Command: "language", Description: b.catalog.T(language, "button.language")},
 			{Command: "menu", Description: b.catalog.T(language, "button.menu")},
@@ -95,6 +97,12 @@ func (b *Bot) showStart(user domain.User, invited bool) {
 		actions = [][]miniAppButton{{app}, {connect, language}, {newWatch, watches}, {history, settings}}
 	}
 	b.sendOnboarding(user, title, body, actions)
+}
+
+func (b *Bot) showBooking(user domain.User) {
+	button := tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.book_portal"), luxmed.ReservationPageURL)
+	b.sendOnboarding(user, b.catalog.T(user.Locale, "button.book_portal"), b.catalog.T(user.Locale, "notification.booking_hint"),
+		widgetKeyboard(tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(button))))
 }
 
 func (b *Bot) showLanguage(user domain.User) {

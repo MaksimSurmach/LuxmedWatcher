@@ -41,14 +41,14 @@ func TestAppointmentWidgetDelivery(t *testing.T) {
 				if err := r.ParseForm(); err != nil {
 					t.Error(err)
 				}
-				if r.Form.Get("parse_mode") != "HTML" || !strings.Contains(r.Form.Get("reply_markup"), "watch:pause:30") {
+				if r.Form.Get("parse_mode") != "HTML" || !strings.Contains(r.Form.Get("reply_markup"), "watch:pause:30") || !strings.Contains(r.Form.Get("reply_markup"), "watch:check:30") {
 					t.Errorf("missing HTML parse mode or pause control in %s", r.Form.Encode())
 				}
 				switch r.URL.Path {
 				case "/botfake/sendWidget":
 					widgetSends++
 					markup := r.Form.Get("html")
-					for _, part := range []string{"<style>", "--tg-theme-button-color", "TelegramWidget.request", "watch:check:30", "app:history", "A &lt; B", "&lt;script&gt;", luxmed.ReservationPageURL} {
+					for _, part := range []string{"<style>", "--tg-theme-button-color", "TelegramWidget.request", "booking-hint", "app:history", "A &lt; B", "&lt;script&gt;", luxmed.ReservationPageURL} {
 						if !strings.Contains(markup, part) {
 							t.Errorf("missing %q in widget HTML", part)
 						}
@@ -152,5 +152,30 @@ func TestPollWidgetQueriesAndReuseLanguageAction(t *testing.T) {
 	user, err := b.db.UserByTelegramID(t.Context(), 101)
 	if err != nil || user.Locale != "be" || user.IsActive() {
 		t.Fatalf("unexpected user after language selection: %+v, %v", user, err)
+	}
+}
+
+func TestBookCommandOpensOfficialReservationPage(t *testing.T) {
+	sent := make(chan struct{}, 1)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		if r.URL.Path != "/botfake/sendWidget" ||
+			!strings.Contains(r.Form.Get("html"), luxmed.ReservationPageURL) ||
+			!strings.Contains(r.Form.Get("reply_markup"), luxmed.ReservationPageURL) {
+			t.Errorf("booking entry must open the official portal from the widget and inline keyboard")
+		}
+		sent <- struct{}{}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":51}}`)
+	})
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	b.handleCommand(t.Context(), user, &tgbotapi.Message{
+		Text: "/book", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: 5}},
+	})
+	select {
+	case <-sent:
+	default:
+		t.Fatal("booking link was not sent")
 	}
 }
