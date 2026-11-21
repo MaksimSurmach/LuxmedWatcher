@@ -93,16 +93,17 @@ func (b *Bot) SetRunner(runner *scheduler.Runner) {
 
 func (b *Bot) Run(ctx context.Context) error {
 	defer b.manualWorkers.Wait()
+	b.registerCommands()
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = b.cfg.PollTimeout
-	config.AllowedUpdates = []string{"message", "callback_query"}
+	config.AllowedUpdates = []string{"message", "callback_query", "widget_query"}
 	var delay time.Duration
 	for ctx.Err() == nil {
-		updates, err := b.api.GetUpdates(config)
+		updates, err := b.getUpdates(config)
 		if err != nil {
 			b.logger.Warn("Telegram polling failed", "retrying", true)
 			delay = min(30*time.Second, max(time.Second, 2*delay))
-			if apiErr, ok := err.(*tgbotapi.Error); ok && apiErr.RetryAfter > 0 {
+			if apiErr, ok := errors.AsType[*tgbotapi.Error](err); ok && apiErr.RetryAfter > 0 {
 				delay = max(delay, time.Duration(apiErr.RetryAfter)*time.Second)
 			}
 			timer := time.NewTimer(delay + time.Duration(randv2.IntN(500))*time.Millisecond)
@@ -122,7 +123,11 @@ func (b *Bot) Run(ctx context.Context) error {
 			if update.UpdateID < config.Offset {
 				continue
 			}
-			b.handleUpdate(ctx, update)
+			if update.WidgetQuery != nil {
+				b.handleWidgetQuery(ctx, update.WidgetQuery)
+			} else {
+				b.handleUpdate(ctx, update.Update)
+			}
 			config.Offset = update.UpdateID + 1
 		}
 	}
@@ -139,7 +144,7 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	if len(histories) == 0 {
 		return 0, nil
 	}
-	msg := tgbotapi.NewMessage(user.TelegramChatID, b.appointmentNotification(user.Locale, watch, histories, total))
+	msg := tgbotapi.NewMessage(user.TelegramChatID, b.appointmentNotification(user.Locale, watch, histories, total, 10))
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.DisableWebPagePreview = true
 	keyboard := [][]miniAppButton{
@@ -152,22 +157,36 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	}
 	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
 		button := newMiniAppButton(b.catalog.T(user.Locale, "button.open_app"), b.cfg.MiniApp.DashboardURL()+"?tab=history")
+		button.WidgetAction = "app:history"
 		keyboard = append(keyboard, []miniAppButton{button})
 	}
 	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": keyboard}
-	sent, err := b.api.Send(msg)
+	title := b.catalog.T(user.Locale, "notification.title", max(total, len(histories)))
+	card := widgetCard{
+		Locale:  user.Locale,
+		Title:   title,
+		Body:    truncateMessage(strings.Join(strings.Fields(procedures.WatchTitle(user.Locale, watch)), " "), 150),
+		Slot:    newWidgetSlot(histories[0]),
+		Actions: keyboard,
+		Failure: b.catalog.T(user.Locale, "widget.error"),
+	}
+	if remaining := max(total, len(histories)) - 1; remaining > 0 {
+		card.More = b.catalog.T(user.Locale, "notification.more", remaining)
+	}
+	caption := b.appointmentNotification(user.Locale, watch, histories, total, 2)
+	messageID, err := b.sendWidget(card, caption, msg)
 	if err != nil {
 		return 0, fmt.Errorf("Telegram notification delivery failed")
 	}
-	return sent.MessageID, nil
+	return messageID, nil
 }
 
-func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histories []domain.AppointmentHistory, total int) string {
+func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histories []domain.AppointmentHistory, total, limit int) string {
 	var text strings.Builder
 	count := max(total, len(histories))
 	title := b.catalog.T(locale, "notification.title", count)
 	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(locale, watch), 240)))
-	preview := histories[:min(10, len(histories))]
+	preview := histories[:min(limit, len(histories))]
 	for _, item := range preview {
 		fmt.Fprintf(&text, "\n\n<b>%s</b>", item.DateTime.In(luxmed.Location()).Format("02.01.2006 · 15:04"))
 		var details []string
@@ -282,7 +301,7 @@ func (b *Bot) upsertUser(ctx context.Context, msg *tgbotapi.Message) (domain.Use
 
 func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi.Message) {
 	command := msg.Command()
-	if !user.IsActive() && command != "start" && command != "language" && command != "cancel" {
+	if !user.IsActive() && command != "start" && command != "language" && command != "menu" && command != "cancel" {
 		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
 		return
 	}
@@ -293,25 +312,16 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 			b.tryRedeemInvite(ctx, user, arg)
 			return
 		}
-		if !user.IsActive() {
-			b.setFlow(user.ID, &flow{Kind: flowInvite})
-			b.send(user, b.catalog.T(user.Locale, "flow.invite.enter"), languageKeyboard())
-			return
-		}
-		b.showMenu(user)
+		b.showStart(user, false)
 	case "menu":
 		b.clearFlow(user.ID)
-		b.showMenu(user)
+		b.showStart(user, false)
 	case "new":
 		b.startWatchFlow(ctx, user)
 	case "app":
-		if b.cfg.MiniApp == nil {
-			b.showMenu(user)
-			return
-		}
-		b.sendMiniApp(user, "flow.browser.dashboard", "button.open_app", b.cfg.MiniApp.DashboardURL())
+		b.showApp(user, "")
 	case "connect":
-		b.showAccount(ctx, user)
+		b.showConnect(ctx, user)
 	case "watches":
 		b.showWatches(ctx, user)
 	case "history":
@@ -319,7 +329,7 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 	case "settings":
 		b.send(user, b.catalog.T(user.Locale, "settings.title"), settingsKeyboard(b.catalog, user.Locale))
 	case "language":
-		b.send(user, b.catalog.T(user.Locale, "flow.language.choose"), languageKeyboard())
+		b.showLanguage(user)
 	case "help":
 		b.send(user, b.catalog.T(user.Locale, "help.text"), mainKeyboard(b.catalog, user.Locale))
 	case "cancel":
@@ -430,18 +440,21 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		(b.cfg.Browsers != nil && b.cfg.Browsers[cb.From.ID] == nil) {
 		return
 	}
-	user, err := b.db.UserByTelegramID(ctx, cb.From.ID)
+	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+	b.handleAction(ctx, cb.From.ID, cb.Data)
+}
+
+func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
+	user, err := b.db.UserByTelegramID(ctx, telegramID)
 	if err != nil {
 		return
 	}
-	data := cb.Data
-	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 	if user.Status == domain.UserStatusBlocked {
 		b.clearFlow(user.ID)
 		b.send(user, b.catalog.T(user.Locale, "errors.blocked"), nil)
 		return
 	}
-	if !user.IsActive() && !strings.HasPrefix(data, "lang:") && data != "cancel" {
+	if !user.IsActive() && !strings.HasPrefix(data, "lang:") && data != "settings:language" && data != "cancel" {
 		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
 		return
 	}
@@ -464,12 +477,19 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 			b.send(user, b.catalog.T(user.Locale, "flow.invite.enter"), nil)
 			return
 		}
+		b.setAppMenu(user)
 		b.send(user, b.catalog.T(user.Locale, "flow.language.saved"), mainKeyboard(b.catalog, user.Locale))
 	case data == "menu":
 		b.clearFlow(user.ID)
-		b.showMenu(user)
+		b.showStart(user, false)
 	case data == "account":
+		b.showConnect(ctx, user)
+	case data == "connect:open":
 		b.showAccount(ctx, user)
+	case data == "app":
+		b.showApp(user, "")
+	case data == "app:history":
+		b.showApp(user, "?tab=history")
 	case data == "new":
 		b.startWatchFlow(ctx, user)
 	case data == "watches":
@@ -479,7 +499,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	case data == "settings":
 		b.send(user, b.catalog.T(user.Locale, "settings.title"), settingsKeyboard(b.catalog, user.Locale))
 	case data == "settings:language":
-		b.send(user, b.catalog.T(user.Locale, "flow.language.choose"), languageKeyboard())
+		b.showLanguage(user)
 	case data == "settings:city":
 		b.setFlow(user.ID, &flow{Kind: flowWatchCity, CitySettings: true})
 		b.showCityPicker(ctx, user, true, 0)
@@ -1685,7 +1705,7 @@ func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string
 	}
 	b.clearFlow(user.ID)
 	user.Status = domain.UserStatusActive
-	b.send(user, b.catalog.T(user.Locale, "flow.invite.accepted"), mainKeyboard(b.catalog, user.Locale))
+	b.showStart(user, true)
 }
 
 func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {

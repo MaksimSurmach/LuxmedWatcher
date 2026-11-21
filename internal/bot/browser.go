@@ -70,7 +70,8 @@ func (b *Bot) showMiniApp(ctx context.Context, user domain.User) {
 // The pinned Bot API client predates the web_app field.
 type miniAppButton struct {
 	tgbotapi.InlineKeyboardButton
-	WebApp map[string]string `json:"web_app,omitempty"`
+	WebApp       map[string]string `json:"web_app,omitempty"`
+	WidgetAction string            `json:"-"`
 }
 
 func newMiniAppButton(label, link string) miniAppButton {

@@ -1,4 +1,5 @@
 {
+  "button.connect": "Підключити LuxMed",
   "button.account": "Акаунт LuxMed",
   "button.afternoon": "12:00–16:00",
   "button.all_places_in_city": "Усі клініки в місті",
@@ -121,5 +122,11 @@
   "watch.resumed": "Пошук відновлено.",
   "watch.status.active": "Активний",
   "watch.status.checked": "Статус: %s\nОстання перевірка: %s\nРезультатів в історії: %d",
-  "watch.status.paused": "На паузі"
+  "watch.status.paused": "На паузі",
+  "command.start": "Запустити Luxmed Watcher",
+  "command.help": "Показати довідку",
+  "widget.start": "Відстежуйте записи в LuxMed і отримуйте сповіщення в Telegram, коли з’явиться відповідний час.",
+  "widget.start_connect": "Підключіть акаунт і створіть перший пошук. Вводьте дані для входу лише у вікні входу LuxMed.",
+  "widget.connect": "Відкрийте LuxMed, увійдіть і за потреби підтвердьте вхід. Потім закрийте вікно входу. Не надсилайте логін і пароль LuxMed у цей чат.",
+  "widget.error": "Не вдалося виконати дію. Спробуйте ще раз або скористайтеся кнопками нижче."
 }

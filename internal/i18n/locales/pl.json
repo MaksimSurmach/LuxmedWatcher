@@ -1,4 +1,5 @@
 {
+  "button.connect": "Połącz konto LUX MED",
   "button.account": "Konto LuxMed",
   "button.afternoon": "12:00–16:00",
   "button.all_places_in_city": "Wszystkie placówki w mieście",
@@ -121,5 +122,11 @@
   "watch.resumed": "Obserwacja wznowiona.",
   "watch.status.active": "Aktywna",
   "watch.status.checked": "Status: %s\nOstatnie sprawdzenie: %s\nWyniki w historii: %d",
-  "watch.status.paused": "Wstrzymana"
+  "watch.status.paused": "Wstrzymana",
+  "command.start": "Uruchom Luxmed Watcher",
+  "command.help": "Wyświetl pomoc",
+  "widget.start": "Obserwuj terminy w LUX MED i otrzymuj powiadomienia w Telegramie, gdy pojawi się pasujący termin.",
+  "widget.start_connect": "Połącz konto, a następnie utwórz pierwszą obserwację. Dane logowania wpisuj tylko w oknie logowania LUX MED.",
+  "widget.connect": "Otwórz LUX MED, zaloguj się i w razie potrzeby potwierdź logowanie. Następnie zamknij okno logowania. Nie wysyłaj na tym czacie loginu ani hasła do LUX MED.",
+  "widget.error": "Nie udało się wykonać tej akcji. Spróbuj ponownie lub użyj przycisków poniżej."
 }

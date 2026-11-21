@@ -25,9 +25,20 @@ import (
 
 func testBot(t *testing.T) *Bot {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"ok":true,"result":{"id":99,"is_bot":true,"first_name":"Test Bot","message_id":99}}`)
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+}
+
+func testBotWithTelegram(t *testing.T, telegram http.HandlerFunc) *Bot {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getMe") {
+			fmt.Fprint(w, `{"ok":true,"result":{"id":99,"is_bot":true,"first_name":"Test Bot"}}`)
+			return
+		}
+		telegram(w, r)
 	}))
 	t.Cleanup(server.Close)
 	api, err := tgbotapi.NewBotAPIWithClient("fake", server.URL+"/bot%s/%s", server.Client())
@@ -242,7 +253,7 @@ func TestAppointmentNotificationEscapesHTMLAndShowsRemainingSlots(t *testing.T) 
 	b := testBot(t)
 	text := b.appointmentNotification("en", domain.Watch{Name: "A < B & C"}, []domain.AppointmentHistory{
 		{Appointment: domain.Appointment{DateTime: time.Unix(0, 0), DoctorName: "<b>Example</b>", FacilityName: "A & B", Address: "Street 12"}},
-	}, 3)
+	}, 3, 10)
 	for _, value := range []string{"<b>LuxMed appointments found: 3</b>", "A &lt; B &amp; C", "&lt;b&gt;Example&lt;/b&gt;", "A &amp; B", "Street 12", "<i>More in history: 2</i>"} {
 		if !strings.Contains(text, value) {
 			t.Errorf("notification missing %q in %q", value, text)
