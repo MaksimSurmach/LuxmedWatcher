@@ -246,6 +246,28 @@ func (db *DB) WatchesByUser(ctx context.Context, userID int64) ([]domain.Watch, 
 	return scanWatches(rows)
 }
 
+func (db *DB) ActiveWatchTelegramIDs(ctx context.Context) ([]int64, error) {
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT DISTINCT u.telegram_user_id
+		FROM users u JOIN watches w ON w.user_id=u.id
+		WHERE u.status=$1 AND u.role <> '' AND w.status=$2
+		ORDER BY u.telegram_user_id
+	`, domain.UserStatusActive, domain.WatchStatusActive)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error) {
 	due := db.dateTimeSQL("last_checked_at") + ` <= ` + db.dateTimeSQL("$2") + ` - check_interval_seconds / 86400.0`
 	if db.postgres {

@@ -253,6 +253,11 @@ func TestDueHistoryAndAccount(t *testing.T) {
 		if len(due) != 0 {
 			t.Fatalf("watch unexpectedly due before its interval: %+v", due)
 		}
+		owners, err := db.ActiveWatchTelegramIDs(ctx)
+		must(err)
+		if len(owners) != 1 || owners[0] != user.TelegramUserID {
+			t.Fatalf("active watch owners between searches = %v", owners)
+		}
 		past := time.Now().UTC().Add(-2 * time.Minute)
 		_, err = db.sql.ExecContext(ctx, `UPDATE watches SET last_checked_at=$1 WHERE id=$2`, past, watch.ID)
 		must(err)
@@ -332,6 +337,11 @@ func TestDueHistoryAndAccount(t *testing.T) {
 		must(err)
 		if updated.Status != domain.WatchStatusPaused {
 			t.Fatalf("watch status after account deletion = %v", updated.Status)
+		}
+		owners, err = db.ActiveWatchTelegramIDs(ctx)
+		must(err)
+		if len(owners) != 0 {
+			t.Fatalf("paused watch owners eligible for renewal = %v", owners)
 		}
 	})
 }
