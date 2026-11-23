@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -158,6 +159,51 @@ func TestSundayFilterUsesWarsawTime(t *testing.T) {
 	window := []domain.TimeWindow{{Weekday: 7, From: "00:00", To: "01:00"}}
 	if len(filterAppointmentsByTimeWindows([]domain.Appointment{slot}, window)) != 1 {
 		t.Fatal("midnight Warsaw time was not recognized as Sunday")
+	}
+}
+
+func TestSchedulerRenewsBrowserSessionBeforeHourlySearchIsDue(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+	defer cancel()
+	runner, db, watch := testRunner(t, nil)
+	watch.CheckIntervalSeconds = 3600
+	if err := db.UpdateWatch(ctx, watch); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkWatchChecked(ctx, watch.ID, true, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	renewed := make(chan struct{}, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/accounts/42/session" {
+			t.Errorf("requested %s before the hourly search was due", r.URL.Path)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		renewed <- struct{}{}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	browser, err := luxmed.NewRoutedBrowser(42, luxmed.BrowserRoute{
+		API: server.URL + "/accounts/42", Shared: true,
+	}, "http://localhost:18769", strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
+	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var workers sync.WaitGroup
+	workers.Go(func() { scheduler.Run(ctx) })
+	defer func() {
+		cancel()
+		workers.Wait()
+	}()
+
+	select {
+	case <-renewed:
+	case <-ctx.Done():
+		t.Fatal("hourly watch received no session check before its next search")
 	}
 }
 

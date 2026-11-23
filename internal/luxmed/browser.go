@@ -63,6 +63,10 @@ func (b *Browser) Check(ctx context.Context) error {
 	return err
 }
 
+func (b *Browser) SupportsBackgroundRenewal() bool {
+	return b.key != ""
+}
+
 func (b *Browser) ViewerLink(ctx context.Context) (string, error) {
 	body, err := b.Client().request(ctx, http.MethodPost, "/viewer", nil)
 	if err != nil {

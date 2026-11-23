@@ -344,6 +344,12 @@ func (s *Scheduler) Run(ctx context.Context) {
 	var nextCleanup time.Time
 	var checks sync.WaitGroup
 	defer checks.Wait()
+	for _, browser := range s.runner.browsers {
+		if browser != nil && browser.SupportsBackgroundRenewal() {
+			checks.Go(func() { s.maintainBrowserSessions(ctx) })
+			break
+		}
+	}
 	dispatched := make(chan struct{}, cap(s.runner.capacity))
 	for ctx.Err() == nil {
 		if s.retention > 0 && time.Now().After(nextCleanup) {
@@ -355,6 +361,36 @@ func (s *Scheduler) Run(ctx context.Context) {
 		s.tick(ctx, &checks, dispatched)
 
 		timer := time.NewTimer(s.interval + jitter(s.interval/5))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+// Search intervals can be longer than the portal's refresh cookie lifetime.
+func (s *Scheduler) maintainBrowserSessions(ctx context.Context) {
+	for ctx.Err() == nil {
+		ids, err := s.db.ActiveWatchTelegramIDs(ctx)
+		if err != nil && ctx.Err() == nil {
+			s.logger.Warn("load active accounts for LuxMed session renewal", "err", err)
+		}
+		for _, id := range ids {
+			browser := s.runner.browsers[id]
+			if browser == nil || !browser.SupportsBackgroundRenewal() {
+				continue
+			}
+			checkCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+			err := browser.Check(checkCtx)
+			cancel()
+			if err != nil && ctx.Err() == nil && !errors.Is(err, luxmed.ErrAuthentication) && !errors.Is(err, luxmed.ErrBrowserBusy) {
+				s.logger.Warn("renew LuxMed browser session", "status", checkStatus(err))
+			}
+		}
+
+		timer := time.NewTimer(10*time.Minute + jitter(30*time.Second))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
