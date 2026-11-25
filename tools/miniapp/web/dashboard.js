@@ -15,6 +15,17 @@ const localDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Warsaw' }
 const dateOnly = (date) => date ? localDate.format(new Date(date)) : '';
 const dateText = (date) => shortDate.format(new Date(date));
 const text = (key, values) => escape(t(key, values));
+
+class DashboardError extends Error {
+  constructor(key, fallback = '') {
+    super(t(key) || fallback);
+    this.key = key;
+  }
+}
+
+function errorText(error) {
+  return error instanceof DashboardError ? error.message : t('error.unavailable');
+}
 const tabs = ['home', 'watches', 'history', 'settings'];
 const titleFor = (tab) => t(`tabs.${tab}`);
 let shortDate;
@@ -64,15 +75,15 @@ async function api(action, data = {}) {
     if (response.status === 204) return;
     if (response.ok) return await response.json();
   } catch {
-    throw new Error(t('error.unavailable'));
+    throw new DashboardError('error.unavailable');
   }
-  if (response.status === 401) throw new Error(t('error.reopen'));
-  if (response.status === 403) throw new Error(t('error.access_denied'));
-  if (response.status === 429) throw new Error(t('error.browser_busy'));
-  if (response.status === 409) throw new Error(t('error.connect_first'));
-  if (response.status === 400) throw new Error(t('error.invalid_fields'));
-  if (response.status === 404) throw new Error(t('error.stale'));
-  throw new Error(t('error.unavailable'));
+  if (response.status === 401) throw new DashboardError('error.reopen');
+  if (response.status === 403) throw new DashboardError('error.access_denied');
+  if (response.status === 429) throw new DashboardError('error.browser_busy');
+  if (response.status === 409) throw new DashboardError('error.connect_first');
+  if (response.status === 400) throw new DashboardError('error.invalid_fields');
+  if (response.status === 404) throw new DashboardError('error.stale');
+  throw new DashboardError('error.unavailable');
 }
 
 async function run(button, action, errorTarget) {
@@ -81,8 +92,8 @@ async function run(button, action, errorTarget) {
   try {
     await action();
   } catch (error) {
-    if (errorTarget) errorTarget.textContent = error.message;
-    else flash(error.message);
+    if (errorTarget) errorTarget.textContent = errorText(error);
+    else flash(errorText(error));
   } finally {
     button.disabled = false;
   }
@@ -119,7 +130,7 @@ function bindAccount() {
   connect.onclick = () => void run(connect, async () => {
     const { url } = await api('connect');
     const target = new URL(url);
-    if (target.origin !== location.origin || target.pathname !== '/') throw new Error(t('error.link'));
+    if (target.origin !== location.origin || target.pathname !== '/') throw new DashboardError('error.link');
     target.searchParams.set('return', 'app');
     target.hash = location.hash;
     location.assign(target.href);
@@ -168,6 +179,13 @@ function hoursLabel(windows) {
   return windows.map(window => `${weekdays[window.weekday]} ${window.from}–${window.to}`).join(' · ');
 }
 
+const watchErrors = new Map([
+  ['luxmed_account_missing', 'error.no_account'],
+  ['luxmed_authentication', 'error.connect_first'],
+  ['luxmed_unavailable', 'error.luxmed_unavailable'],
+  ['luxmed_partial', 'watches.check_partial'],
+]);
+
 function watchCard(watch) {
   const active = watch.Status === 'active';
   const dates = watch.DateFrom && watch.DateTo
@@ -175,6 +193,8 @@ function watchCard(watch) {
     : text('watches.period_days', { days: watch.NextDays });
   const lastRun = watch.LastCheckedAt ? `${dateText(watch.LastCheckedAt)}, ${clock.format(new Date(watch.LastCheckedAt))}` : '';
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
+  const checkError = watch.LastError ? watchErrors.get(watch.LastError) ?? 'watches.check_error' : '';
+  const needsLogin = checkError === 'error.connect_first' || checkError === 'error.no_account';
   return `<article class="card watch" data-status="${active ? 'active' : 'paused'}">
     <div class="card-head"><h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
       <span class="badge ${active ? 'active' : ''}">${text(active ? 'watches.active' : 'watches.paused')}</span></div>
@@ -183,8 +203,10 @@ function watchCard(watch) {
     ${watch.DoctorName ? `<p class="meta">${escape(watch.DoctorName)}</p>` : ''}
     ${watch.TimeWindows?.length ? `<p class="meta">${escape(hoursLabel(watch.TimeWindows))}</p>` : ''}
     ${minutes ? `<p class="meta">${text('watches.interval_card', { minutes })}</p>` : ''}
-    ${lastRun ? `<p class="meta ${watch.LastError ? 'error' : ''}">${text(watch.LastError ? 'watches.check_error' : 'watches.checked')} · ${lastRun}</p>` : ''}
+    ${lastRun ? `<p class="meta">${text('watches.checked')} · ${lastRun}</p>` : ''}
+    ${checkError ? `<p class="meta error">${text(checkError)}</p>` : ''}
     <div class="actions">
+      ${needsLogin ? `<button type="button" class="secondary" data-account-settings>${text('account.settings')}</button>` : ''}
       <button type="button" class="secondary" data-edit="${watch.ID}" aria-describedby="watch-${watch.ID}">${text('watches.edit')}</button>
       <button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}" aria-describedby="watch-${watch.ID}">${text(active ? 'watches.pause' : 'watches.resume')}</button>
     </div>
@@ -202,6 +224,9 @@ function watches() {
     </section>` : ''}
   </div>`);
   main.querySelector('#new-watch').onclick = () => void editor();
+  for (const button of main.querySelectorAll('[data-account-settings]')) {
+    button.onclick = () => void switchTab('settings');
+  }
   for (const button of main.querySelectorAll('[data-edit]')) {
     button.onclick = () => void editor(items.find((item) => item.ID === Number(button.dataset.edit)));
   }
@@ -218,9 +243,13 @@ function watches() {
   };
 }
 
-function slotCard(slot) {
+function slotExpired(slot, now) {
+  return slot.Status === 'expired' || new Date(slot.DateTime) <= now;
+}
+
+function slotCard(slot, now) {
   const date = new Date(slot.DateTime);
-  const expired = slot.Status === 'expired' || date < new Date();
+  const expired = slotExpired(slot, now);
   const parts = shortDate.formatToParts(date);
   const part = (name) => parts.find((item) => item.type === name)?.value;
   return `<article class="card slot${expired ? ' expired' : ''}">
@@ -231,7 +260,7 @@ function slotCard(slot) {
       ${slot.Address ? `<p class="meta">${escape(slot.Address)}</p>` : ''}
       ${slot.Doctor ? `<p class="meta">${escape(slot.Doctor)}</p>` : ''}
       <p class="meta slot-service">${escape(slot.Service || t('history.appointment'))}</p>
-      ${expired ? `<p class="muted">${text('history.expired')}</p>` : ''}
+      ${expired ? `<p class="muted">${text(date <= now ? 'history.expired' : 'history.unavailable')}</p>` : ''}
     </div>
     ${expired ? '' : `<a class="primary" href="${portal}" target="_blank" rel="noopener">${text('history.open_portal')} ${icon('link')}</a>`}
   </article>`;
@@ -244,9 +273,12 @@ async function historyScreen(id) {
     const { Slots, More } = await api('history', { Offset: offset });
     if (id !== renderID) return;
     results.querySelector('button')?.remove();
-    const cards = Slots.map(slotCard).join('');
+    const now = new Date();
+    const cards = Slots.map((slot) => slotCard(slot, now)).join('');
     if (!offset) results.replaceChildren();
-    if (!offset && cards) results.insertAdjacentHTML('beforeend', `<p class="muted">${text('history.found_note')}</p>`);
+    if (!results.querySelector('[data-found-note]') && Slots.some((slot) => !slotExpired(slot, now))) {
+      results.insertAdjacentHTML('beforeend', `<p class="muted" data-found-note>${text('history.found_note')}</p>`);
+    }
     results.insertAdjacentHTML('beforeend', cards || `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`);
     if (More) {
       results.insertAdjacentHTML('beforeend', `<button class="secondary" type="button">${text('common.more')}</button>`);
@@ -497,7 +529,7 @@ async function editor(watch, focusPicks = false) {
       markSelection();
     } catch (error) {
       if (id !== renderID || request !== picksRequest) return;
-      picksStatus.textContent = error.message;
+      picksStatus.textContent = errorText(error);
       retryPicks.hidden = false;
     }
   }
@@ -531,7 +563,7 @@ async function editor(watch, focusPicks = false) {
   const search = form.querySelector('#search-services');
   async function findServices(append = false) {
     const cityID = Number(fields.city.value);
-    if (!cityID) throw new Error(t('error.city_first'));
+    if (!cityID) throw new DashboardError('error.city_first');
     if (!append) {
       serviceSearchOffset = 0;
       results.innerHTML = `<p class="muted">${text('editor.searching')}</p>`;
@@ -635,7 +667,7 @@ async function editor(watch, focusPicks = false) {
 }
 
 function screenError(title, error, retry) {
-  show(title, `<div class="card stack"><p class="error">${escape(error.message)}</p>${retry ? `<button type="button" class="secondary">${text('common.retry') || 'Spróbuj ponownie'}</button>` : ''}</div>`);
+  show(title, `<div class="card stack"><p class="error">${escape(errorText(error))}</p>${retry ? `<button type="button" class="secondary">${text('common.retry') || 'Spróbuj ponownie'}</button>` : ''}</div>`);
   if (retry) main.querySelector('button').onclick = retry;
 }
 
@@ -670,12 +702,12 @@ async function start() {
   try {
     await loadLanguage(initialLanguage(telegram));
   } catch {
-    screenError('Luxmed Watcher', new Error('Nie udało się wczytać aplikacji.'), start);
+    screenError('Luxmed Watcher', new DashboardError('error.unavailable', 'Nie udało się wczytać aplikacji. Spróbuj ponownie.'), start);
     return;
   }
   renderLanguage();
   if (!telegram?.initData) {
-    screenError('Luxmed Watcher', new Error(t('error.open_from_bot')));
+    screenError('Luxmed Watcher', new DashboardError('error.open_from_bot'));
     return;
   }
   show(titleFor('home'), `<p>${text('dashboard.loading')}</p>`, false);
@@ -684,7 +716,7 @@ async function start() {
     ({ token: apiToken } = await api('auth'));
     await update(tabs.includes(initial) ? initial : 'home');
   } catch (error) {
-    screenError('Luxmed Watcher', error, error.message === t('error.access_denied') ? undefined : start);
+    screenError('Luxmed Watcher', error, error?.key === 'error.access_denied' ? undefined : start);
   }
 }
 

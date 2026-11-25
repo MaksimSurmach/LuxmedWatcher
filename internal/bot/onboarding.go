@@ -116,7 +116,7 @@ func (b *Bot) showConnect(ctx context.Context, user domain.User) {
 	}
 	b.clearFlow(user.ID)
 	b.sendOnboarding(user, b.catalog.T(user.Locale, "button.connect"), b.catalog.T(user.Locale, "widget.connect"), [][]miniAppButton{
-		{b.actionButton(user, "button.open_luxmed", "connect:open")},
+		{b.actionButton(user, "button.sign_in", "connect:open")},
 		{b.actionButton(user, "button.menu", "menu")},
 	})
 }

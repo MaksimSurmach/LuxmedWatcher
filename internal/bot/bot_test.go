@@ -254,11 +254,44 @@ func TestAppointmentNotificationEscapesHTMLAndShowsRemainingSlots(t *testing.T) 
 	text := b.appointmentNotification("en", domain.Watch{Name: "A < B & C"}, []domain.AppointmentHistory{
 		{Appointment: domain.Appointment{DateTime: time.Unix(0, 0), DoctorName: "<b>Example</b>", FacilityName: "A & B", Address: "Street 12"}},
 	}, 3, 10)
-	for _, value := range []string{"<b>LuxMed appointments found: 3</b>", "A &lt; B &amp; C", "&lt;b&gt;Example&lt;/b&gt;", "A &amp; B", "Street 12", "<i>More in history: 2</i>"} {
+	for _, value := range []string{
+		"<b>Appointment times found · 3</b>", "A &lt; B &amp; C", "&lt;b&gt;Example&lt;/b&gt;", "A &amp; B",
+		"Street 12", "<i>More in history: 2</i>", "Check the time and book in the LUX MED portal.",
+	} {
 		if !strings.Contains(text, value) {
 			t.Errorf("notification missing %q in %q", value, text)
 		}
 	}
+}
+
+func TestWatchWithExpiredSessionOffersSignIn(t *testing.T) {
+	ctx := t.Context()
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+			return
+		}
+		text := r.Form.Get("text")
+		if !strings.Contains(text, "Sign-in required.") || strings.Contains(text, "luxmed_authentication") {
+			t.Errorf("unexpected message: %q", text)
+		}
+		markup := r.Form.Get("reply_markup")
+		if !strings.Contains(markup, "Sign in to LUX MED") || !strings.Contains(markup, "connect:open") {
+			t.Errorf("missing sign-in action: %s", markup)
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	id, err := b.db.CreateWatch(ctx, domain.Watch{
+		UserID: user.ID, Name: "Example", CityID: 1, ServiceID: 12, CheckIntervalSeconds: 300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.MarkWatchChecked(ctx, id, false, "luxmed_authentication"); err != nil {
+		t.Fatal(err)
+	}
+	b.showWatches(ctx, user)
 }
 
 func TestBrowserBotAdmitsOnlyInvitedUsersWithAnAssignedWorker(t *testing.T) {
