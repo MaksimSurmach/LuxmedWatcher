@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"net/url"
 	"strconv"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -45,7 +46,7 @@ func (b *Bot) setAppMenu(user domain.User) {
 	}{
 		Type:   "web_app",
 		Text:   b.catalog.T(user.Locale, "button.open_app"),
-		WebApp: map[string]string{"url": b.cfg.MiniApp.DashboardURL()},
+		WebApp: map[string]string{"url": b.dashboardURL(user, "")},
 	})
 	if err != nil {
 		b.logger.Warn("encode Telegram chat menu failed")
@@ -60,13 +61,21 @@ func (b *Bot) setAppMenu(user domain.User) {
 	}
 }
 
-func (b *Bot) showApp(user domain.User, query string) {
+func (b *Bot) dashboardURL(user domain.User, tab string) string {
+	query := url.Values{"lang": {i18n.Normalize(user.Locale, b.cfg.DefaultLocale)}}
+	if tab != "" {
+		query.Set("tab", tab)
+	}
+	return b.cfg.MiniApp.DashboardURL() + "?" + query.Encode()
+}
+
+func (b *Bot) showApp(user domain.User, tab string) {
 	if b.cfg.MiniApp == nil {
 		b.showMenu(user)
 		return
 	}
 	b.setAppMenu(user)
-	b.sendMiniApp(user, "flow.browser.dashboard", "button.open_app", b.cfg.MiniApp.DashboardURL()+query)
+	b.sendMiniApp(user, "flow.browser.dashboard", "button.open_app", b.dashboardURL(user, tab))
 }
 
 func (b *Bot) showStart(user domain.User, invited bool) {
@@ -92,7 +101,7 @@ func (b *Bot) showStart(user domain.User, invited bool) {
 	history := b.actionButton(user, "button.history", "history")
 	actions := [][]miniAppButton{{connect}, {newWatch, watches}, {history, settings}, {language}}
 	if b.cfg.MiniApp != nil {
-		app := newMiniAppButton(b.catalog.T(user.Locale, "button.open_app"), b.cfg.MiniApp.DashboardURL())
+		app := newMiniAppButton(b.catalog.T(user.Locale, "button.open_app"), b.dashboardURL(user, ""))
 		app.WidgetAction = "app"
 		actions = [][]miniAppButton{{app}, {connect, language}, {newWatch, watches}, {history, settings}}
 	}

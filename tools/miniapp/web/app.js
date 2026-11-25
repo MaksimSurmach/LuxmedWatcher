@@ -1,7 +1,7 @@
 import RFB from '/vendor/core/rfb.js';
 import keysyms from '/vendor/core/input/keysymdef.js';
 import { initLogging } from '/vendor/core/util/logging.js';
-import { initialLanguage, loadLanguage, t } from '/language.js';
+import { initialLanguage, language, setLanguage, t } from '/language.js';
 import { Screencast } from '/screencast.js';
 
 initLogging('none');
@@ -68,21 +68,13 @@ function close(message) {
   screen.hidden = true;
   typing.hidden = true;
   controls.hidden = true;
-  status.textContent = label(message) || 'Nie udało się wczytać okna logowania.';
+  status.textContent = label(message);
 }
 
-async function init() {
-  try {
-    await loadLanguage(initialLanguage(telegram, locationURL.searchParams.get('lang')));
-    renderLanguage();
-  } catch {
-    close('failed');
-    return;
-  }
-  if (closed) {
-    status.textContent = label('disconnected');
-    return;
-  }
+function init() {
+  setLanguage(initialLanguage(telegram, locationURL.searchParams.get('lang')));
+  renderLanguage();
+  element('close').hidden = false;
   if (!initData || !ticket) {
     status.textContent = label('missing');
     return;
@@ -187,7 +179,7 @@ function sendKey(key, code) {
 element('close').addEventListener('click', () => {
   close('disconnected');
   if (returnToApp) {
-    location.replace('/app?tab=settings' + location.hash);
+    location.replace(`/app?tab=settings&lang=${language}${location.hash}`);
   } else {
     telegram?.close();
   }
@@ -292,4 +284,4 @@ zoom.addEventListener('click', () => {
   status.textContent = label(zoomed ? 'zoomed' : 'connected');
 });
 
-void init();
+init();

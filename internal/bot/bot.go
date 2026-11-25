@@ -153,7 +153,7 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	details := b.actionButton(user, "button.show_watch", fmt.Sprintf("watch:show:%d", watch.ID))
 	keyboard := [][]miniAppButton{{booking}, {details}}
 	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
-		results := newMiniAppButton(b.catalog.T(user.Locale, "button.slot_results"), b.cfg.MiniApp.DashboardURL()+"?tab=history")
+		results := newMiniAppButton(b.catalog.T(user.Locale, "button.slot_results"), b.dashboardURL(user, "history"))
 		results.WidgetAction = "app:history"
 		keyboard[1] = []miniAppButton{results}
 		keyboard = append(keyboard, []miniAppButton{details})
@@ -167,8 +167,8 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	card := widgetCard{
 		Locale:      user.Locale,
 		Title:       title,
-		Body:        truncateMessage(strings.Join(strings.Fields(procedures.WatchTitle(user.Locale, watch)), " "), 150),
-		Slot:        newWidgetSlot(histories[0]),
+		Body:        truncateMessage(procedures.WatchTitle(watch), 150),
+		Slot:        newWidgetSlot(user.Locale, histories[0]),
 		Actions:     keyboard[:2],
 		BookingHint: b.catalog.T(user.Locale, "notification.booking_hint"),
 		Failure:     b.catalog.T(user.Locale, "widget.error"),
@@ -188,10 +188,10 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 	var text strings.Builder
 	count := max(total, len(histories))
 	title := b.catalog.T(locale, "notification.title", count)
-	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(locale, watch), 240)))
+	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(watch), 240)))
 	preview := histories[:min(limit, len(histories))]
 	for _, item := range preview {
-		fmt.Fprintf(&text, "\n\n<b>%s</b>", item.DateTime.In(luxmed.Location()).Format("02.01.2006 · 15:04"))
+		fmt.Fprintf(&text, "\n\n<b>%s</b>", appointmentDateTime(locale, item.DateTime))
 		var details []string
 		for _, value := range []string{truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120)} {
 			if value != "" {
@@ -495,7 +495,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 	case data == "app":
 		b.showApp(user, "")
 	case data == "app:history":
-		b.showApp(user, "?tab=history")
+		b.showApp(user, "history")
 	case data == "new":
 		b.startWatchFlow(ctx, user)
 	case data == "watches":
@@ -1500,7 +1500,7 @@ func (b *Bot) sendProcedureOptions(user domain.User, title string, items []domai
 	lines = append(lines, strings.TrimSpace(title))
 
 	for i, proc := range items {
-		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, procedures.Name(user.Locale, proc.Name), proc.ID))
+		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, proc.Name, proc.ID))
 	}
 
 	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)
@@ -1671,7 +1671,7 @@ func (b *Bot) showWatch(ctx context.Context, user domain.User, watch domain.Watc
 	}
 	last := "–"
 	if watch.LastCheckedAt != nil {
-		last = watch.LastCheckedAt.In(luxmed.Location()).Format("2006-01-02 15:04")
+		last = appointmentDateTime(user.Locale, *watch.LastCheckedAt)
 	}
 	text := b.watchSummary(user, watch) + "\n" + b.catalog.T(user.Locale, "watch.status.checked",
 		b.catalog.T(user.Locale, "watch.status."+string(watch.Status)), last, count)

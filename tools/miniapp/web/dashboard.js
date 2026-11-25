@@ -1,4 +1,4 @@
-import { initialLanguage, language, languages, loadLanguage, t } from '/language.js';
+import { initialLanguage, language, languages, setLanguage, t } from '/language.js';
 
 const telegram = window.Telegram?.WebApp;
 const main = document.querySelector('#main');
@@ -11,14 +11,32 @@ const icon = (name) => `<span class="icon" aria-hidden="true">${icons[name]}</sp
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 })[char]);
-const localDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Warsaw' });
-const dateOnly = (date) => date ? localDate.format(new Date(date)) : '';
-const dateText = (date) => shortDate.format(new Date(date));
+const timeZone = 'Europe/Warsaw';
+const localDate = new Intl.DateTimeFormat('en', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+const clock = new Intl.DateTimeFormat('en', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+
+function dateParts(value) {
+  const parts = localDate.formatToParts(new Date(value));
+  const part = (type) => parts.find((item) => item.type === type).value;
+  return { year: part('year'), month: part('month'), day: part('day') };
+}
+
+function dateOnly(value) {
+  if (!value) return '';
+  const { year, month, day } = dateParts(value);
+  return `${year}-${month}-${day}`;
+}
+
+function shortDate(value) {
+  const { month, day } = dateParts(value);
+  return { day: Number(day), month: months[Number(month) - 1] };
+}
+
+const dateText = (value) => t('calendar.short_date', shortDate(value));
 const text = (key, values) => escape(t(key, values));
 const tabs = ['home', 'watches', 'history', 'settings'];
 const titleFor = (tab) => t(`tabs.${tab}`);
-let shortDate;
-let clock;
+let months;
 let weekdays;
 let state;
 let apiToken;
@@ -31,13 +49,8 @@ let renderID = 0;
 for (const target of document.querySelectorAll('[data-icon]')) target.innerHTML = icon(target.dataset.icon);
 
 function renderLanguage() {
-  const timeZone = 'Europe/Warsaw';
-  shortDate = new Intl.DateTimeFormat(language, { timeZone, day: 'numeric', month: 'short' });
-  clock = new Intl.DateTimeFormat(language, { timeZone, hour: '2-digit', minute: '2-digit' });
-  const weekday = new Intl.DateTimeFormat(language, { timeZone, weekday: 'short' });
-  // 1 January 2024 was a Monday, matching the schedule’s weekday order.
-  weekdays = [t('editor.every_day'), ...Array.from({ length: 7 }, (_, index) =>
-    weekday.format(Date.UTC(2024, 0, index + 1)))];
+  months = t('calendar.months').split(',');
+  weekdays = [t('editor.every_day'), ...t('calendar.weekdays').split(',')];
   navigation.setAttribute('aria-label', t('dashboard.navigation'));
   for (const button of navigation.querySelectorAll('button')) {
     button.lastElementChild.textContent = titleFor(button.dataset.tab);
@@ -118,7 +131,12 @@ function bindAccount() {
   const connect = main.querySelector('#connect');
   connect.onclick = () => void run(connect, async () => {
     const { url } = await api('connect');
-    const target = new URL(url);
+    let target;
+    try {
+      target = new URL(url);
+    } catch {
+      throw new Error(t('error.link'));
+    }
     if (target.origin !== location.origin || target.pathname !== '/') throw new Error(t('error.link'));
     target.searchParams.set('return', 'app');
     target.hash = location.hash;
@@ -171,9 +189,9 @@ function hoursLabel(windows) {
 function watchCard(watch) {
   const active = watch.Status === 'active';
   const dates = watch.DateFrom && watch.DateTo
-    ? `${dateText(watch.DateFrom)} — ${dateText(watch.DateTo)}`
+    ? `${escape(dateText(watch.DateFrom))} — ${escape(dateText(watch.DateTo))}`
     : text('watches.period_days', { days: watch.NextDays });
-  const lastRun = watch.LastCheckedAt ? `${dateText(watch.LastCheckedAt)}, ${clock.format(new Date(watch.LastCheckedAt))}` : '';
+  const lastRun = watch.LastCheckedAt ? `${escape(dateText(watch.LastCheckedAt))}, ${clock.format(new Date(watch.LastCheckedAt))}` : '';
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
   return `<article class="card watch" data-status="${active ? 'active' : 'paused'}">
     <div class="card-head"><h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
@@ -221,10 +239,9 @@ function watches() {
 function slotCard(slot) {
   const date = new Date(slot.DateTime);
   const expired = slot.Status === 'expired' || date < new Date();
-  const parts = shortDate.formatToParts(date);
-  const part = (name) => parts.find((item) => item.type === name)?.value;
+  const { day, month } = shortDate(date);
   return `<article class="card slot${expired ? ' expired' : ''}">
-    <div class="date-tile"><strong>${escape(part('day'))}</strong>${escape(part('month'))}</div>
+    <div class="date-tile"><strong>${day}</strong>${escape(month)}</div>
     <div class="slot-body">
       <h2>${clock.format(date)}</h2>
       ${slot.Facility ? `<p class="slot-clinic">${escape(slot.Facility)}</p>` : ''}
@@ -330,7 +347,7 @@ async function editor(watch, focusPicks = false) {
   let facilities = new Set(watch?.FacilityIDs);
   const existingHours = new Map((watch?.TimeWindows ?? []).map((window) => [window.weekday, window]));
   const advancedOpen = Boolean(doctor || facilities.size);
-  show(title, `<form class="stack">
+  show(title, `<form class="stack" novalidate>
     <fieldset class="card stack"><legend>${text('editor.what')}</legend>
       <label class="field">${text('editor.city')}<select name="city" required>${cityOptions(options, city, t('editor.choose_city'))}</select></label>
       ${watch ? '' : `<section class="quick-services stack" tabindex="-1" aria-labelledby="recommendations-heading">
@@ -612,6 +629,13 @@ async function editor(watch, focusPicks = false) {
   form.onsubmit = (event) => {
     event.preventDefault();
     void run(form.querySelector('[type="submit"]'), async () => {
+      const invalid = Array.from(form.elements).find((field) => field.willValidate && !field.validity.valid);
+      if (invalid) {
+        const section = invalid.closest('details');
+        if (section) section.open = true;
+        invalid.focus();
+        throw new Error(t('error.invalid_fields'));
+      }
       if (!service) throw new Error(t('editor.choose_service'));
       const windows = selectedHours();
       const range = fields.dateMode.value === 'range';
@@ -635,7 +659,7 @@ async function editor(watch, focusPicks = false) {
 }
 
 function screenError(title, error, retry) {
-  show(title, `<div class="card stack"><p class="error">${escape(error.message)}</p>${retry ? `<button type="button" class="secondary">${text('common.retry') || 'Spróbuj ponownie'}</button>` : ''}</div>`);
+  show(title, `<div class="card stack"><p class="error">${escape(error.message)}</p>${retry ? `<button type="button" class="secondary">${text('common.retry')}</button>` : ''}</div>`);
   if (retry) main.querySelector('button').onclick = retry;
 }
 
@@ -660,26 +684,22 @@ async function switchTab(next) {
 
 async function update(next) {
   state = await api('load');
-  await loadLanguage(state.Locale);
+  setLanguage(state.Locale);
   renderLanguage();
   navigation.hidden = false;
   await switchTab(next);
 }
 
 async function start() {
-  try {
-    await loadLanguage(initialLanguage(telegram));
-  } catch {
-    screenError('Luxmed Watcher', new Error('Nie udało się wczytać aplikacji.'), start);
-    return;
-  }
+  const params = new URLSearchParams(location.search);
+  setLanguage(initialLanguage(telegram, params.get('lang')));
   renderLanguage();
   if (!telegram?.initData) {
     screenError('Luxmed Watcher', new Error(t('error.open_from_bot')));
     return;
   }
   show(titleFor('home'), `<p>${text('dashboard.loading')}</p>`, false);
-  const initial = new URLSearchParams(location.search).get('tab');
+  const initial = params.get('tab');
   try {
     ({ token: apiToken } = await api('auth'));
     await update(tabs.includes(initial) ? initial : 'home');

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
@@ -126,18 +127,23 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if !strings.Contains(history, "Konsultacja okulistyczna") || strings.Contains(history, "private record") {
 		t.Fatalf("unexpected history response: %s", history)
 	}
-	request("settings", `{"Locale":"uk","CityID":1}`, origin, token, http.StatusNoContent)
+	for _, locale := range i18n.SupportedLocales {
+		request("settings", fmt.Sprintf(`{"Locale":%q,"CityID":1}`, locale), origin, token, http.StatusNoContent)
+		res = request("load", "{}", origin, token, http.StatusOK)
+		if err := json.Unmarshal(res.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		if view.Locale != locale || len(view.Watches) != 1 || view.Watches[0].ServiceName != "Konsultacja dermatologiczna" {
+			t.Fatalf("locale %s or provider service missing: %s", locale, res.Body)
+		}
+		history = request("history", "{}", origin, token, http.StatusOK).Body.String()
+		if !strings.Contains(history, item.ServiceName) {
+			t.Fatalf("locale %s changed the provider service in history: %s", locale, history)
+		}
+	}
 	res = request("procedures", `{"CityID":1,"Query":"дерматолога"}`, origin, token, http.StatusOK)
-	if !strings.Contains(res.Body.String(), "Консультація дерматолога") {
-		t.Fatalf("unexpected translated procedure response: %s", res.Body)
-	}
-	res = request("load", "{}", origin, token, http.StatusOK)
-	if !strings.Contains(res.Body.String(), "Консультація дерматолога") {
-		t.Fatalf("stored watch label was not localized: %s", res.Body)
-	}
-	history = request("history", "{}", origin, token, http.StatusOK).Body.String()
-	if !strings.Contains(history, "Консультація офтальмолога без огляду очного дна") {
-		t.Fatalf("stored history label was not localized: %s", history)
+	if !strings.Contains(res.Body.String(), "Konsultacja dermatologiczna") {
+		t.Fatalf("localized search did not return the provider name: %s", res.Body)
 	}
 	watch, err = db.Watch(ctx, id)
 	if err != nil || watch.ServiceName != "Konsultacja dermatologiczna" {

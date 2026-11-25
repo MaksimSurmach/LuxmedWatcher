@@ -122,9 +122,6 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
-	for i := range watches {
-		watches[i].ServiceName = procedures.Name(user.Locale, watches[i].ServiceName)
-	}
 	reply(w, http.StatusOK, struct {
 		Watches        []domain.Watch
 		Locale         string
@@ -154,7 +151,7 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 	}
 	slots := make([]dashboardHistory, 0, min(pageSize, len(items)))
 	for _, item := range items[:min(pageSize, len(items))] {
-		slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, procedures.Name(user.Locale, item.ServiceName),
+		slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, item.ServiceName,
 			item.DoctorName, item.FacilityName, item.Address, item.Status})
 	}
 	reply(w, http.StatusOK, struct {
@@ -202,9 +199,6 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 	}
 	const pageSize = 24
 	items, err := procedures.Search(ctx, d.db, city.ID, user.Locale, input.Query, pageSize+1, input.Offset)
-	for i := range items {
-		items[i].Name = procedures.Name(user.Locale, items[i].Name)
-	}
 	dashboardResult(w, struct {
 		Items []domain.Procedure
 		More  bool
@@ -283,7 +277,7 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 				return
 			}
 			seen[item.ID] = true
-			*group.target = append(*group.target, domain.Service{ID: item.ID, Name: procedures.Name(user.Locale, service.Name)})
+			*group.target = append(*group.target, domain.Service{ID: item.ID, Name: service.Name})
 			if len(*group.target) == limit {
 				break
 			}

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
@@ -251,5 +253,45 @@ func TestSharedViewerAnnouncesCDPAndUsesPrivateWorkerScope(t *testing.T) {
 	defer conn.CloseNow()
 	if _, frame, err := conn.Read(t.Context()); err != nil || string(frame) != "frame" {
 		t.Fatalf("scoped websocket did not receive its frame: %q, %v", frame, err)
+	}
+}
+
+func TestGatewayServesLocalizedPagesAndBundledDictionaries(t *testing.T) {
+	t.Parallel()
+
+	handler := (&app{}).public(os.DirFS("../../tools/miniapp/web"), fstest.MapFS{})
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/i18n.js", nil))
+	const prefix = "export default "
+	if res.Code != http.StatusOK || !strings.HasPrefix(res.Body.String(), prefix) ||
+		!strings.HasPrefix(res.Header().Get("Content-Type"), "text/javascript") {
+		t.Fatalf("dictionary module: status %d, type %s", res.Code, res.Header().Get("Content-Type"))
+	}
+	var dictionaries map[string]map[string]string
+	if err := json.Unmarshal(res.Body.Bytes()[len(prefix):], &dictionaries); err != nil {
+		t.Fatal(err)
+	}
+	for _, locale := range i18n.SupportedLocales {
+		t.Run(locale, func(t *testing.T) {
+			for _, path := range []string{"/", "/app"} {
+				req := httptest.NewRequest(http.MethodGet, path+"?lang="+locale, nil)
+				req.Header.Set("Accept-Language", "en-US")
+				res := httptest.NewRecorder()
+				handler.ServeHTTP(res, req)
+				label := dictionaries[locale]["common.javascript_required"]
+				if res.Code != http.StatusOK || label == "" ||
+					!strings.Contains(res.Body.String(), `<html lang="`+locale+`">`) ||
+					!strings.Contains(res.Body.String(), "<noscript>"+label+"</noscript>") {
+					t.Errorf("%s: incorrect locale or missing JavaScript notice", path)
+				}
+			}
+		})
+	}
+	req := httptest.NewRequest(http.MethodGet, "/app", nil)
+	req.Header.Set("Accept-Language", "fr-FR, en-US;q=0.5, uk-UA;q=0.7, be;q=0")
+	res = httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if !strings.Contains(res.Body.String(), `<html lang="uk">`) {
+		t.Error("expected the highest-ranked supported browser locale")
 	}
 }
