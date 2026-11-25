@@ -1,4 +1,6 @@
 {
+  "button.connect_luxmed": "Połącz LUX MED",
+  "notification.search_paused": "Wyszukiwanie zostało wstrzymane. Zaloguj się do LUX MED, aby wznowić sprawdzanie wolnych terminów.",
   "button.connect": "Połącz konto LUX MED",
   "button.account": "Konto LuxMed",
   "button.afternoon": "12:00–16:00",

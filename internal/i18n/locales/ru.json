@@ -1,4 +1,6 @@
 {
+  "button.connect_luxmed": "Подключить LUX MED",
+  "notification.search_paused": "Поиск приостановлен. Войдите в LUX MED, чтобы мы снова проверяли свободное время.",
   "button.connect": "Подключить LuxMed",
   "button.account": "Аккаунт LuxMed",
   "button.afternoon": "12:00–16:00",

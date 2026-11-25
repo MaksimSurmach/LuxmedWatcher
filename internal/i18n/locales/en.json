@@ -1,4 +1,6 @@
 {
+  "button.connect_luxmed": "Connect LUX MED",
+  "notification.search_paused": "Search paused. Sign in to LUX MED so we can check for available appointments again.",
   "button.connect": "Connect LuxMed",
   "button.account": "LuxMed account",
   "button.afternoon": "12:00–16:00",

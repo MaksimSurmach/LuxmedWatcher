@@ -1,4 +1,6 @@
 {
+  "account.connect_luxmed": "Połącz LUX MED",
+  "account.search_paused": "Wyszukiwanie zostało wstrzymane. Zaloguj się do LUX MED, aby wznowić sprawdzanie wolnych terminów.",
   "account.connected": "Konto LUX MED połączone",
   "account.instructions": "Zaloguj się w oknie zdalnej przeglądarki. Jeśli LUX MED poprosi o kod, wpisz go tam, a po powrocie sprawdź połączenie.",
   "account.needs_login": "Wymagane logowanie",

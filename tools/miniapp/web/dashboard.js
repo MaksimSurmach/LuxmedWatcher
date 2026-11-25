@@ -105,7 +105,7 @@ function accountSection(compact = false) {
       <p class="account-status" data-state="${account}" role="status">${text(`account.${account}`)}</p>
     </div>
     <div class="account-actions">
-      <button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text('account.sign_in')} ${icon('link')}</button>
+      <button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>
       <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
     </div>
     <p class="muted error" data-account-error role="status"></p>
@@ -127,6 +127,8 @@ function bindAccount() {
   const check = main.querySelector('#account-check');
   check.onclick = () => void run(check, async () => {
     account = (await api('account')).state;
+    if (account === 'needs_login' && state.ReconnectRequired) account = 'search_paused';
+    connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
     const section = main.querySelector('.account');
     const status = main.querySelector('.account-status');
     if (section) section.dataset.state = account;
@@ -195,12 +197,14 @@ function watches() {
   const items = state.Watches ?? [];
   show(titleFor('watches'), `<div class="stack">
     <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
+    ${account === 'search_paused' ? accountSection(true) : ''}
     ${items.length ? items.map(watchCard).join('') : `<div class="card empty"><h2>${text('watches.empty')}</h2><p>${text('watches.empty_hint')}</p></div>`}
     ${items.length ? `<section class="stack">
       <p class="muted" id="check-hint">${text('watches.check_chat_hint')}</p>
       <button type="button" class="secondary" id="check-in-chat" aria-describedby="check-hint">${text('watches.check_chat')}</button>
     </section>` : ''}
   </div>`);
+  if (account === 'search_paused') bindAccount();
   main.querySelector('#new-watch').onclick = () => void editor();
   for (const button of main.querySelectorAll('[data-edit]')) {
     button.onclick = () => void editor(items.find((item) => item.ID === Number(button.dataset.edit)));
@@ -660,6 +664,8 @@ async function switchTab(next) {
 
 async function update(next) {
   state = await api('load');
+  if (state.ReconnectRequired) account = 'search_paused';
+  else if (account === 'search_paused') account = 'unchecked';
   await loadLanguage(state.Locale);
   renderLanguage();
   navigation.hidden = false;

@@ -1,4 +1,6 @@
 {
+  "account.connect_luxmed": "Підключити LUX MED",
+  "account.search_paused": "Пошук призупинено. Увійдіть до LUX MED, щоб ми знову перевіряли вільні записи.",
   "account.connected": "LuxMed підключено",
   "account.instructions": "Увійдіть через вікно віддаленого браузера. Якщо LUX MED попросить код, введіть його там, а потім поверніться й перевірте підключення.",
   "account.needs_login": "Потрібно увійти",

@@ -122,19 +122,25 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
+	reconnect, err := d.db.LuxMedReconnectRequired(r.Context(), user.ID)
+	if err != nil {
+		reply(w, http.StatusServiceUnavailable, nil)
+		return
+	}
 	for i := range watches {
 		watches[i].ServiceName = procedures.Name(user.Locale, watches[i].ServiceName)
 	}
 	reply(w, http.StatusOK, struct {
-		Watches        []domain.Watch
-		Locale         string
-		CityID         *int
-		CityName       string
-		MinimumMinutes int
-		DefaultMinutes int
+		Watches           []domain.Watch
+		Locale            string
+		CityID            *int
+		CityName          string
+		MinimumMinutes    int
+		DefaultMinutes    int
+		ReconnectRequired bool
 	}{watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
-		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute)})
+		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), reconnect})
 }
 
 func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.User) {

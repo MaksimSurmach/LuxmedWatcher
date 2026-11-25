@@ -93,6 +93,15 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), "Other") {
 		t.Fatalf("other user's search missing: %s", res.Body)
 	}
+	if _, err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), `"ReconnectRequired":true`) {
+		t.Fatalf("owner's reconnect state missing: %s", res.Body)
+	}
+	if res := request("load", "{}", origin, token, http.StatusOK); !strings.Contains(res.Body.String(), `"ReconnectRequired":false`) {
+		t.Fatalf("reconnect state leaked across users: %s", res.Body)
+	}
 	request("load", "{}", origin, d.sessions.issue(owner.TelegramUserID, time.Now().Add(-2*time.Hour)), http.StatusUnauthorized)
 	request("load", "{}", origin, "", http.StatusUnauthorized)
 	request("settings", `{"Locale":"pl","CityID":1}`, origin, token, http.StatusNoContent)

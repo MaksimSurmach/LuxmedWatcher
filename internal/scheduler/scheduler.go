@@ -28,6 +28,10 @@ type Notifier interface {
 	NotifyAppointments(context.Context, domain.User, domain.Watch, []domain.AppointmentHistory, int) (int, error)
 }
 
+type reconnectNotifier interface {
+	NotifyLuxMedReconnect(context.Context, domain.User) error
+}
+
 type accountCheck struct {
 	busy                     bool
 	next, lastCheck          time.Time
@@ -73,26 +77,35 @@ func (r *Runner) ManualCheck(ctx context.Context, watch domain.Watch) (int, erro
 	return r.check(ctx, watch, true)
 }
 
-func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool) (count int, err error) {
+func (r *Runner) acquireAccount(userID int64, respectCooldown bool) *accountCheck {
 	r.mu.Lock()
-	state := r.accounts[requested.UserID]
+	defer r.mu.Unlock()
+
+	state := r.accounts[userID]
 	if state == nil {
 		state = &accountCheck{}
-		r.accounts[requested.UserID] = state
+		r.accounts[userID] = state
 	}
-	if state.busy || time.Now().Before(state.next) {
-		r.mu.Unlock()
-		return 0, ErrRateLimited
+	if state.busy || respectCooldown && time.Now().Before(state.next) {
+		return nil
 	}
 	state.busy = true
 	state.lastCheck = time.Now()
-	r.mu.Unlock()
+	return state
+}
 
-	defer func() {
-		r.mu.Lock()
-		state.busy = false
-		r.mu.Unlock()
-	}()
+func (r *Runner) releaseAccount(state *accountCheck) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	state.busy = false
+}
+
+func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool) (count int, err error) {
+	state := r.acquireAccount(requested.UserID, true)
+	if state == nil {
+		return 0, ErrRateLimited
+	}
+	defer r.releaseAccount(state)
 
 	select {
 	case r.capacity <- struct{}{}:
@@ -115,6 +128,13 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 	interval := max(time.Duration(watch.CheckIntervalSeconds)*time.Second, r.minimumInterval)
 	if manual {
 		interval = r.minimumInterval
+	}
+	reconnect, err := r.db.LuxMedReconnectRequired(ctx, watch.UserID)
+	if err != nil {
+		return 0, fmt.Errorf("load LuxMed reconnect status: %w", err)
+	}
+	if reconnect && !manual {
+		interval = min(interval, time.Minute)
 	}
 	if watch.LastCheckedAt != nil && time.Since(*watch.LastCheckedAt) < interval {
 		return 0, ErrRateLimited
@@ -162,6 +182,12 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 	if errors.Is(err, ErrInactive) {
 		return count, err
 	}
+	authFailed := errors.Is(err, luxmed.ErrAuthentication) && !errors.Is(err, luxmed.ErrUnavailable)
+	if authFailed || reconnect && errors.Is(err, luxmed.ErrUnavailable) {
+		notifyCtx, cancel := context.WithTimeout(parent, 10*time.Second)
+		err = errors.Join(err, r.requireReconnect(notifyCtx, user))
+		cancel()
+	}
 	recordCtx, stop := context.WithTimeout(parent, 5*time.Second)
 	defer stop()
 	if writeErr := r.db.MarkWatchChecked(recordCtx, watch.ID, err == nil, status); writeErr != nil {
@@ -195,6 +221,12 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 	}
 	if err := r.checkWatchUnchanged(ctx, watch); err != nil {
 		return 0, errors.Join(searchErr, err)
+	}
+
+	if searchErr == nil {
+		if err := r.resolveReconnect(ctx, user.ID); err != nil {
+			return 0, errors.Join(searchErr, err)
+		}
 	}
 
 	slices.SortFunc(appointments, func(a, b domain.Appointment) int {
@@ -245,6 +277,66 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		recordErr = fmt.Errorf("record notification delivery: %w", recordErr)
 	}
 	return len(seen), errors.Join(searchErr, notifyErr, recordErr)
+}
+
+func (r *Runner) requireReconnect(ctx context.Context, user domain.User) error {
+	notified, err := r.db.BeginLuxMedReconnect(ctx, user.ID)
+	if err != nil {
+		return fmt.Errorf("save LuxMed reconnect status: %w", err)
+	}
+	notifier, ok := r.notifier.(reconnectNotifier)
+	if notified || !ok {
+		return nil
+	}
+	if err := notifier.NotifyLuxMedReconnect(ctx, user); err != nil {
+		return fmt.Errorf("send LuxMed reconnect warning: %w", err)
+	}
+	deliveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := r.db.MarkLuxMedReconnectNotified(deliveryCtx, user.ID); err != nil {
+		return fmt.Errorf("record LuxMed reconnect warning delivery: %w", err)
+	}
+	return nil
+}
+
+func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
+	required, err := r.db.LuxMedReconnectRequired(ctx, userID)
+	if err == nil && required {
+		err = r.db.ResolveLuxMedReconnect(ctx, userID)
+	}
+	if err != nil {
+		return fmt.Errorf("resolve LuxMed reconnect status: %w", err)
+	}
+	return nil
+}
+
+func (r *Runner) renewBrowserSession(ctx context.Context, telegramID int64, browser *luxmed.Browser) error {
+	user, err := r.db.UserByTelegramID(ctx, telegramID)
+	if err != nil {
+		return fmt.Errorf("load LuxMed browser session owner: %w", err)
+	}
+	if !user.IsActive() {
+		return nil
+	}
+	state := r.acquireAccount(user.ID, false)
+	if state == nil {
+		return nil
+	}
+	defer r.releaseAccount(state)
+
+	probeCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	err = browser.Check(probeCtx)
+	cancel()
+	switch {
+	case err == nil:
+		return r.resolveReconnect(ctx, user.ID)
+	case errors.Is(err, luxmed.ErrAuthentication):
+		recordCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		return r.requireReconnect(recordCtx, user)
+	default:
+		return err
+	}
 }
 
 func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accountCheck) (luxmed.Client, error) {
@@ -382,11 +474,9 @@ func (s *Scheduler) maintainBrowserSessions(ctx context.Context) {
 			if browser == nil || !browser.SupportsBackgroundRenewal() {
 				continue
 			}
-			checkCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-			err := browser.Check(checkCtx)
-			cancel()
-			if err != nil && ctx.Err() == nil && !errors.Is(err, luxmed.ErrAuthentication) && !errors.Is(err, luxmed.ErrBrowserBusy) {
-				s.logger.Warn("renew LuxMed browser session", "status", checkStatus(err))
+			err := s.runner.renewBrowserSession(ctx, id, browser)
+			if err != nil && ctx.Err() == nil && !errors.Is(err, luxmed.ErrBrowserBusy) {
+				s.logger.Warn("renew LuxMed browser session", "status", checkStatus(err), "err", err)
 			}
 		}
 

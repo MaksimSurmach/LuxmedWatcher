@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -317,5 +318,137 @@ func TestBrowserChecksUseIndependentWorkers(t *testing.T) {
 		if err != nil || watch.LastSuccessAt == nil {
 			t.Fatalf("scheduled watch %d did not finish: %+v, %v", id, watch, err)
 		}
+	}
+}
+
+type reconnectRecorder struct {
+	Notifier
+	attempts  int
+	delivered int
+}
+
+func (n *reconnectRecorder) NotifyLuxMedReconnect(_ context.Context, _ domain.User) error {
+	n.attempts++
+	if n.attempts == 1 {
+		return errors.New("telegram rejected message")
+	}
+	n.delivered++
+	return nil
+}
+
+func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
+	ctx := t.Context()
+	notifier := &reconnectRecorder{}
+	runner, db, watch := testRunner(t, notifier)
+	watch.CityID, watch.ServiceID, watch.CheckIntervalSeconds = 1, 2, 3600
+	watch.NextDays = 1
+	if err := db.UpdateWatch(ctx, watch); err != nil {
+		t.Fatal(err)
+	}
+	other := watch
+	other.ServiceID = 3
+	other.ID = 0
+	otherID, err := db.CreateWatch(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pausedID, err := db.CreateWatch(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetWatchStatus(ctx, pausedID, domain.WatchStatusPaused); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []int64{otherID, pausedID} {
+		if err := db.MarkWatchChecked(ctx, id, true, ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	other.ID = otherID
+
+	var status atomic.Int32
+	status.Store(http.StatusTooManyRequests)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		code := int(status.Load())
+		if code != http.StatusOK {
+			w.WriteHeader(code)
+			return
+		}
+		if r.URL.Path == "/session" {
+			return
+		}
+		if r.URL.Path != luxmed.TermsURL || r.URL.Query().Get("searchPlace.id") != "1" ||
+			!slices.Contains([]string{"2", "3"}, r.URL.Query().Get("serviceVariantId")) {
+			t.Errorf("unexpected search filters: %s", r.URL.RequestURI())
+		}
+		fmt.Fprint(w, `{"termsForService":{"termsForDays":[],"termsInfoForDays":[]}}`)
+	}))
+	t.Cleanup(server.Close)
+	browser, err := luxmed.NewBrowser(server.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	browsers := map[int64]*luxmed.Browser{42: browser}
+	runner.UseBrowsers(browsers)
+
+	assertReconnect := func(want bool) {
+		t.Helper()
+		got, err := db.LuxMedReconnectRequired(ctx, watch.UserID)
+		if err != nil || got != want {
+			t.Fatalf("reconnect required = %v, want %v, error = %v", got, want, err)
+		}
+	}
+	if err := runner.renewBrowserSession(ctx, 42, browser); !errors.Is(err, luxmed.ErrUnavailable) {
+		t.Fatalf("renewal during throttling: %v", err)
+	}
+	assertReconnect(false)
+
+	status.Store(http.StatusUnauthorized)
+	if err := runner.renewBrowserSession(ctx, 42, browser); err == nil {
+		t.Fatal("renewal did not report rejected Telegram delivery")
+	}
+	assertReconnect(true)
+	if notifier.attempts != 1 || notifier.delivered != 0 {
+		t.Fatalf("rejected delivery had unexpected result: %+v", notifier)
+	}
+
+	restart := func() *Runner {
+		started := NewRunner(db, nil, notifier, 0, time.Hour, false)
+		started.UseBrowsers(browsers)
+		return started
+	}
+	runner = restart()
+	if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
+		t.Fatalf("expired session: %v", err)
+	}
+	runner = restart()
+	if _, err := runner.ManualCheck(ctx, other); !errors.Is(err, luxmed.ErrAuthentication) {
+		t.Fatalf("second search with expired session: %v", err)
+	}
+	if notifier.attempts != 2 || notifier.delivered != 1 {
+		t.Fatalf("warning should be accepted once across searches and restarts: %+v", notifier)
+	}
+
+	status.Store(http.StatusOK)
+	if count, err := runner.ManualCheck(ctx, watch); count != 0 || err != nil {
+		t.Fatalf("search after reconnect: count=%d, error=%v", count, err)
+	}
+	assertReconnect(false)
+	due, err := db.DueWatches(ctx, 0)
+	if err != nil || len(due) != 1 || due[0].ID != otherID || due[0].ServiceID != other.ServiceID ||
+		due[0].CityID != other.CityID || due[0].CheckIntervalSeconds != other.CheckIntervalSeconds {
+		t.Fatalf("expected the other active search to resume with saved filters, got %+v, %v", due, err)
+	}
+	if err := runner.CheckWatch(ctx, due[0]); err != nil {
+		t.Fatalf("resumed scheduled search: %v", err)
+	}
+
+	status.Store(http.StatusUnauthorized)
+	if err := runner.renewBrowserSession(ctx, 42, browser); err != nil {
+		t.Fatalf("second expiry: %v", err)
+	}
+	assertReconnect(true)
+	if notifier.attempts != 3 || notifier.delivered != 2 {
+		t.Fatalf("expected a warning for the new episode: %+v", notifier)
 	}
 }

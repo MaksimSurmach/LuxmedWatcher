@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 
@@ -11,6 +12,25 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
+
+func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !user.IsActive() || user.TelegramChatID <= 0 || user.TelegramChatID != user.TelegramUserID {
+		return errors.New("reconnect recipient has no private chat")
+	}
+	button := b.actionButton(user, "button.connect_luxmed", "account")
+	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
+		button = newMiniAppButton(button.Text, b.cfg.MiniApp.DashboardURL()+"?tab=settings")
+	}
+	msg := tgbotapi.NewMessage(user.TelegramChatID, b.catalog.T(user.Locale, "notification.search_paused"))
+	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": {{button}}}
+	if _, err := b.api.Send(msg); err != nil {
+		return errors.New("telegram reconnect delivery failed")
+	}
+	return nil
+}
 
 func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
 	if b.cfg.Browsers != nil {

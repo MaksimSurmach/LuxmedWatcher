@@ -273,8 +273,13 @@ func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error)
 	if db.postgres {
 		due = `last_checked_at + check_interval_seconds * interval '1 second' <= $2`
 	}
+	retry := db.dateTimeSQL("last_checked_at") + ` <= ` + db.dateTimeSQL("$2") + ` - 60 / 86400.0`
+	if db.postgres {
+		retry = `last_checked_at + interval '1 minute' <= $2`
+	}
 	query := watchSelect() + `
-		WHERE status=$1 AND (last_checked_at IS NULL OR ` + due + `)
+		WHERE status=$1 AND (last_checked_at IS NULL OR ` + due + `
+			OR ((` + retry + `) AND user_id IN (SELECT user_id FROM luxmed_reconnect)))
 		AND user_id IN (SELECT id FROM users WHERE status=$3)
 		ORDER BY COALESCE(last_checked_at, created_at), id`
 	args := []any{domain.WatchStatusActive, time.Now().UTC(), domain.UserStatusActive}

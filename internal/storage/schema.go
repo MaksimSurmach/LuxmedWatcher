@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS luxmed_accounts (
 	status TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS luxmed_reconnect (
+	user_id %[5]s PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+	notified BOOLEAN NOT NULL DEFAULT FALSE
+);
+
 CREATE TABLE IF NOT EXISTS watches (
 	id %[4]s,
 	user_id %[5]s NOT NULL REFERENCES users(id) ON DELETE CASCADE,
