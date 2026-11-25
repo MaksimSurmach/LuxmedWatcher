@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -166,7 +167,18 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		b.actionButton(user, "button.check_again", fmt.Sprintf("watch:check:%d", watch.ID)),
 	})
 	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": keyboard}
-	title := b.catalog.T(user.Locale, "notification.title", max(total, len(histories)))
+	if max(total, len(histories)) > 1 {
+		// The widget card has room for one slot; grouped lists go in the text message.
+		res, err := b.api.Request(msg)
+		var sent struct {
+			MessageID int `json:"message_id"`
+		}
+		if err != nil || json.Unmarshal(res.Result, &sent) != nil || sent.MessageID <= 0 {
+			return 0, fmt.Errorf("Telegram notification delivery failed")
+		}
+		return sent.MessageID, nil
+	}
+	title := b.catalog.T(user.Locale, "notification.title", 1)
 	card := widgetCard{
 		Locale:      user.Locale,
 		Title:       title,
@@ -175,9 +187,6 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		Actions:     keyboard[:2],
 		BookingHint: b.catalog.T(user.Locale, "notification.booking_hint"),
 		Failure:     b.catalog.T(user.Locale, "widget.error"),
-	}
-	if remaining := max(total, len(histories)) - 1; remaining > 0 {
-		card.More = b.catalog.T(user.Locale, "notification.more", remaining)
 	}
 	caption, _ := b.appointmentNotification(user.Locale, watch, histories, total, 2)
 	messageID, err := b.sendWidget(card, caption, msg)

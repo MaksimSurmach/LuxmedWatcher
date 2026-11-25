@@ -90,7 +90,7 @@ func TestAppointmentWidgetDelivery(t *testing.T) {
 			history := []domain.AppointmentHistory{{Appointment: domain.Appointment{
 				DateTime: time.Unix(0, 0), DoctorName: "<script>", FacilityName: "A & B", Address: "Street 12", BookingURL: "https://other.example",
 			}}}
-			gotID, err := b.NotifyAppointments(t.Context(), user, watch, history, 2)
+			gotID, err := b.NotifyAppointments(t.Context(), user, watch, history, 1)
 			if gotID != tc.messageID || (err != nil) != (tc.messageID == 0) {
 				t.Fatalf("got ID %d and err %v, want ID %d", gotID, err, tc.messageID)
 			}

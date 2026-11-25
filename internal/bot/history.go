@@ -77,6 +77,9 @@ func (b *Bot) showHistoryPage(ctx context.Context, user domain.User, watchID int
 		line := fmt.Sprintf("%d. %s\n%s\n%s · %s", i+1,
 			item.DateTime.In(luxmed.Location()).Format("2006-01-02 15:04"),
 			truncateMessage(procedures.Name(user.Locale, item.ServiceName), 160), truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120))
+		if item.Address != "" {
+			line += "\n" + truncateMessage(item.Address, 100)
+		}
 		if item.LastNotifiedAt != nil {
 			line += "\n" + b.catalog.T(user.Locale, "history.notified")
 		}

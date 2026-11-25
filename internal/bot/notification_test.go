@@ -1,6 +1,8 @@
 package bot
 
 import (
+	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -85,5 +87,52 @@ func TestNotificationLongListShowsCountPreviewAndFitsTelegram(t *testing.T) {
 	text, shown = b.appointmentNotification("en", domain.Watch{Name: strings.Repeat("N", 300)}, items, 10, 10)
 	if utf8.RuneCountInString(text) > 4096 || shown == 0 || !strings.Contains(text, "More in history") && shown < 10 {
 		t.Errorf("shown=%d length=%d", shown, utf8.RuneCountInString(text))
+	}
+}
+
+func TestMultiSlotNotificationUsesTextAndAllOptionsListsAddresses(t *testing.T) {
+	ctx := t.Context()
+	var sent []string
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		switch r.URL.Path {
+		case "/botfake/sendWidget":
+			t.Error("grouped list sent through widget")
+		case "/botfake/sendMessage":
+			sent = append(sent, r.Form.Get("text"))
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":7}}`)
+	})
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	b.cfg.Browsers = map[int64]*luxmed.Browser{101: {}}
+	var err error
+	if b.cfg.MiniApp, err = luxmed.NewMiniApp("http://localhost", "https://app.example", ""); err != nil {
+		t.Fatal(err)
+	}
+	watchID, err := b.db.CreateWatch(ctx, domain.Watch{UserID: user.ID, Name: "W", CityID: 1, ServiceID: 12, CheckIntervalSeconds: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items := []domain.AppointmentHistory{
+		slot("Krakow", "Clinic", "Main 1", "Dr A", 5, 9, 0),
+		slot("Krakow", "Clinic", "Main 1", "Dr A", 5, 11, 0),
+		slot("Krakow", "Clinic", "Side 2", "Dr A", 5, 9, 0),
+	}
+	for i := range items {
+		items[i].Fingerprint = fmt.Sprint("f", i)
+		items[i].Appointment.Fingerprint = items[i].Fingerprint
+		if _, _, err := b.db.UpsertAppointmentHistory(ctx, watchID, items[i].Appointment); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if id, err := b.NotifyAppointments(ctx, user, domain.Watch{ID: watchID, UserID: user.ID, Name: "W"}, items, 3); err != nil || id != 7 {
+		t.Fatalf("id=%d err=%v", id, err)
+	}
+	if len(sent) != 1 || !strings.Contains(sent[0], "11:00") {
+		t.Fatalf("short list lost slots: %q", sent)
+	}
+	b.handleHistoryPage(ctx, user, fmt.Sprintf("history:%d:0", watchID))
+	if len(sent) != 2 || !strings.Contains(sent[1], "Main 1") || !strings.Contains(sent[1], "Side 2") {
+		t.Fatalf("history lacks addresses: %q", sent)
 	}
 }
