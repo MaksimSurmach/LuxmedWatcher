@@ -130,5 +130,18 @@
   "watches.check_chat": "Open chat",
   "watches.check_chat_hint": "To run a manual check, send /watches in the bot chat and choose a search.",
   "watches.interval_card": "Every {minutes} min",
-  "watches.saved": "Search saved"
+  "watches.saved": "Search saved",
+  "history.confirm_note": "You confirm the booking in LUX MED. The time may already be taken.",
+  "history.confirm_open": "Open LUX MED",
+  "history.confirm_title": "Go to booking?",
+  "history.no_doctor": "Doctor not specified",
+  "history.row_label": "{time}, {doctor}, {address}. Open booking",
+  "history.unavailable_row": "{time}, {doctor}. No longer available",
+  "watches.last_success": "Last successful check",
+  "watches.monitoring": "Monitoring",
+  "watches.never_succeeded": "No successful check yet",
+  "watches.problem_auth": "Sign in to LUX MED. Until you do, this search is not being checked.",
+  "watches.problem_generic": "The last check failed.",
+  "watches.problem_partial": "Only part of the results could be checked.",
+  "watches.problem_unavailable": "LUX MED is temporarily unavailable. We will check again."
 }

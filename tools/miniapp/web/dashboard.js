@@ -113,17 +113,19 @@ function accountSection(compact = false) {
   </section>`;
 }
 
+async function signIn() {
+  const { url } = await api('connect');
+  const target = new URL(url);
+  if (target.origin !== location.origin || target.pathname !== '/') throw new Error(t('error.link'));
+  target.searchParams.set('return', 'app');
+  target.hash = location.hash;
+  location.assign(target.href);
+}
+
 function bindAccount() {
   const failure = main.querySelector('[data-account-error]');
   const connect = main.querySelector('#connect');
-  connect.onclick = () => void run(connect, async () => {
-    const { url } = await api('connect');
-    const target = new URL(url);
-    if (target.origin !== location.origin || target.pathname !== '/') throw new Error(t('error.link'));
-    target.searchParams.set('return', 'app');
-    target.hash = location.hash;
-    location.assign(target.href);
-  }, failure);
+  connect.onclick = () => void run(connect, signIn, failure);
   const check = main.querySelector('#account-check');
   check.onclick = () => void run(check, async () => {
     account = (await api('account')).state;
@@ -168,23 +170,33 @@ function hoursLabel(windows) {
   return windows.map(window => `${weekdays[window.weekday]} ${window.from}–${window.to}`).join(' · ');
 }
 
+const problemKey = { luxmed_account_missing: 'problem_auth', luxmed_authentication: 'problem_auth',
+  luxmed_unavailable: 'problem_unavailable', luxmed_partial: 'problem_partial' };
+const timeOf = (date) => `${dateText(date)}, ${clock.format(new Date(date))}`;
+
+// Monitoring state and the last successful check are separate facts: a search can be
+// active and still be failing, and the user needs to see when it last worked.
 function watchCard(watch) {
   const active = watch.Status === 'active';
   const dates = watch.DateFrom && watch.DateTo
     ? `${dateText(watch.DateFrom)} — ${dateText(watch.DateTo)}`
     : text('watches.period_days', { days: watch.NextDays });
-  const lastRun = watch.LastCheckedAt ? `${dateText(watch.LastCheckedAt)}, ${clock.format(new Date(watch.LastCheckedAt))}` : '';
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
+  const failing = Boolean(watch.LastError);
+  const problem = failing ? t(`watches.${problemKey[watch.LastError] ?? 'problem_generic'}`) : '';
+  const needsLogin = problemKey[watch.LastError] === 'problem_auth';
+  const success = watch.LastSuccessAt ? timeOf(watch.LastSuccessAt) : t('watches.never_succeeded');
   return `<article class="card watch" data-status="${active ? 'active' : 'paused'}">
-    <div class="card-head"><h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
-      <span class="badge ${active ? 'active' : ''}">${text(active ? 'watches.active' : 'watches.paused')}</span></div>
-    <p class="meta">${icon('pin')}${escape(watch.CityName)}</p>
-    <p class="meta">${icon('calendar')}${dates}</p>
-    ${watch.DoctorName ? `<p class="meta">${escape(watch.DoctorName)}</p>` : ''}
-    ${watch.TimeWindows?.length ? `<p class="meta">${escape(hoursLabel(watch.TimeWindows))}</p>` : ''}
-    ${minutes ? `<p class="meta">${text('watches.interval_card', { minutes })}</p>` : ''}
-    ${lastRun ? `<p class="meta ${watch.LastError ? 'error' : ''}">${text(watch.LastError ? 'watches.check_error' : 'watches.checked')} · ${lastRun}</p>` : ''}
+    <h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
+    <p class="meta">${escape(watch.CityName)}${watch.DoctorName ? ` · ${escape(watch.DoctorName)}` : ''}</p>
+    <p class="meta">${dates}${watch.TimeWindows?.length ? ` · ${escape(hoursLabel(watch.TimeWindows))}` : ''}${minutes ? ` · ${text('watches.interval_card', { minutes })}` : ''}</p>
+    <dl class="health">
+      <div><dt>${text('watches.monitoring')}</dt><dd><span class="badge ${active ? 'active' : ''}">${text(active ? 'watches.active' : 'watches.paused')}</span></dd></div>
+      <div><dt>${text('watches.last_success')}</dt><dd>${escape(success)}</dd></div>
+    </dl>
+    ${failing ? `<p class="notice" role="status">${escape(problem)}</p>` : ''}
     <div class="actions">
+      ${needsLogin ? `<button type="button" class="primary" data-sign-in>${text('account.sign_in')} ${icon('link')}</button>` : ''}
       <button type="button" class="secondary" data-edit="${watch.ID}" aria-describedby="watch-${watch.ID}">${text('watches.edit')}</button>
       <button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}" aria-describedby="watch-${watch.ID}">${text(active ? 'watches.pause' : 'watches.resume')}</button>
     </div>
@@ -211,6 +223,7 @@ function watches() {
       await update('watches');
     });
   }
+  for (const button of main.querySelectorAll('[data-sign-in]')) button.onclick = () => void run(button, signIn);
   const chat = main.querySelector('#check-in-chat');
   if (chat) chat.onclick = () => {
     if (telegram?.close) telegram.close();
@@ -218,41 +231,84 @@ function watches() {
   };
 }
 
-function slotCard(slot) {
+const dayKey = (date) => localDate.format(new Date(date));
+const longDay = () => new Intl.DateTimeFormat(language, { timeZone: 'Europe/Warsaw', weekday: 'short', day: 'numeric', month: 'long' });
+const isExpired = (slot) => slot.Status === 'expired' || new Date(slot.DateTime) < new Date();
+
+function timeRow(slot, index) {
+  const when = clock.format(new Date(slot.DateTime));
+  const doctor = slot.Doctor || t('history.no_doctor');
+  if (isExpired(slot)) {
+    return `<li><div class="slot-row expired" aria-label="${escape(t('history.unavailable_row', { time: when, doctor }))}">
+      <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}<small>${text('history.expired')}</small></span></div></li>`;
+  }
+  return `<li><button type="button" class="slot-row" data-slot="${index}" aria-label="${escape(t('history.row_label', { time: when, doctor, address: slot.Address || slot.Facility }))}">
+    <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}</span><span class="arrow" aria-hidden="true">›</span></button></li>`;
+}
+
+// Date first, then one block per clinic address, then the times with their doctors.
+function slotGroups(slots) {
+  const format = longDay();
+  const days = new Map();
+  slots.forEach((slot, index) => {
+    const day = dayKey(slot.DateTime);
+    if (!days.has(day)) days.set(day, { label: format.format(new Date(slot.DateTime)), places: new Map() });
+    const places = days.get(day).places;
+    const place = `${slot.Facility}\n${slot.Address}`;
+    if (!places.has(place)) places.set(place, []);
+    places.get(place).push([slot, index]);
+  });
+  return [...days.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, day]) => `<section class="day">
+    <h2 class="day-title">${escape(day.label)}</h2>
+    ${[...day.places.values()].map((rows) => {
+      rows.sort(([a], [b]) => new Date(a.DateTime) - new Date(b.DateTime));
+      const { Facility, Address, Service } = rows[0][0];
+      return `<div class="place">
+        <h3>${escape(Address || Facility)}</h3>
+        <p class="meta">${escape([Facility !== Address ? Facility : '', Service].filter(Boolean).join(' · '))}</p>
+        <ul class="times">${rows.map(([slot, index]) => timeRow(slot, index)).join('')}</ul></div>`;
+    }).join('')}</section>`).join('');
+}
+
+function bookingDialog(slot) {
+  const dialog = document.querySelector('#booking');
   const date = new Date(slot.DateTime);
-  const expired = slot.Status === 'expired' || date < new Date();
-  const parts = shortDate.formatToParts(date);
-  const part = (name) => parts.find((item) => item.type === name)?.value;
-  return `<article class="card slot${expired ? ' expired' : ''}">
-    <div class="date-tile"><strong>${escape(part('day'))}</strong>${escape(part('month'))}</div>
-    <div class="slot-body">
-      <h2>${clock.format(date)}</h2>
-      ${slot.Facility ? `<p class="slot-clinic">${escape(slot.Facility)}</p>` : ''}
-      ${slot.Address ? `<p class="meta">${escape(slot.Address)}</p>` : ''}
-      ${slot.Doctor ? `<p class="meta">${escape(slot.Doctor)}</p>` : ''}
-      <p class="meta slot-service">${escape(slot.Service || t('history.appointment'))}</p>
-      ${expired ? `<p class="muted">${text('history.expired')}</p>` : ''}
-    </div>
-    ${expired ? '' : `<a class="primary" href="${portal}" target="_blank" rel="noopener">${text('history.open_portal')} ${icon('link')}</a>`}
-  </article>`;
+  dialog.querySelector('h2').textContent = t('history.confirm_title');
+  dialog.querySelector('dl').innerHTML = [
+    [t('history.appointment'), slot.Service || t('history.appointment')],
+    [longDay().format(date), clock.format(date)],
+    [slot.Doctor || t('history.no_doctor'), slot.Facility],
+    [slot.Address, ''],
+  ].filter(([a]) => a).map(([a, b]) => `<div><dt>${escape(a)}</dt>${b ? `<dd>${escape(b)}</dd>` : ''}</div>`).join('');
+  dialog.querySelector('.note').textContent = t('history.confirm_note');
+  const open = dialog.querySelector('#booking-open');
+  open.firstChild.textContent = `${t('history.confirm_open')} `;
+  open.onclick = () => {
+    dialog.close();
+    if (telegram?.openLink) telegram.openLink(portal);
+    else window.open(portal, '_blank', 'noopener');
+  };
+  dialog.querySelector('#booking-cancel').textContent = t('common.cancel');
+  dialog.querySelector('#booking-cancel').onclick = () => dialog.close();
+  dialog.showModal();
 }
 
 async function historyScreen(id) {
   show(titleFor('history'), `<div class="stack" id="slots"><p class="muted">${text('history.loading')}</p></div>`);
   const results = main.querySelector('#slots');
+  const loaded = [];
   async function append(offset) {
     const { Slots, More } = await api('history', { Offset: offset });
     if (id !== renderID) return;
-    results.querySelector('button')?.remove();
-    const cards = Slots.map(slotCard).join('');
-    if (!offset) results.replaceChildren();
-    if (!offset && cards) results.insertAdjacentHTML('beforeend', `<p class="muted">${text('history.found_note')}</p>`);
-    results.insertAdjacentHTML('beforeend', cards || `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`);
-    if (More) {
-      results.insertAdjacentHTML('beforeend', `<button class="secondary" type="button">${text('common.more')}</button>`);
-      const next = results.lastElementChild;
-      next.onclick = () => void run(next, () => append(offset + Slots.length));
+    loaded.push(...Slots);
+    if (!loaded.length) {
+      results.innerHTML = `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`;
+      return;
     }
+    results.innerHTML = `<p class="muted">${text('history.found_note')}</p>${slotGroups(loaded)}${More ? `<button class="secondary" type="button" data-more>${text('common.more')}</button>` : ''}`;
+    for (const button of results.querySelectorAll('[data-slot]')) button.onclick = () => bookingDialog(loaded[Number(button.dataset.slot)]);
+    const next = results.querySelector('[data-more]');
+    if (next) next.onclick = () => void run(next, () => append(offset + Slots.length));
   }
   await append(0);
 }

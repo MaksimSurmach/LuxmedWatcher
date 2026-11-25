@@ -130,5 +130,18 @@
   "watches.check_chat": "Czat z botem",
   "watches.check_chat_hint": "Aby sprawdzić terminy ręcznie, wyślij /watches w czacie i wybierz wyszukiwanie.",
   "watches.interval_card": "Co {minutes} min",
-  "watches.saved": "Wyszukiwanie zapisane"
+  "watches.saved": "Wyszukiwanie zapisane",
+  "history.confirm_note": "Rezerwację potwierdzasz w LUX MED. Termin mógł już zostać zajęty.",
+  "history.confirm_open": "Otwórz LUX MED",
+  "history.confirm_title": "Przejść do rezerwacji?",
+  "history.no_doctor": "Lekarz nie jest podany",
+  "history.row_label": "{time}, {doctor}, {address}. Otwórz rezerwację",
+  "history.unavailable_row": "{time}, {doctor}. Termin niedostępny",
+  "watches.last_success": "Ostatnie udane sprawdzenie",
+  "watches.monitoring": "Monitoring",
+  "watches.never_succeeded": "Jeszcze nie było udanego sprawdzenia",
+  "watches.problem_auth": "Zaloguj się do LUX MED. Bez tego wyszukiwanie nie jest sprawdzane.",
+  "watches.problem_generic": "Ostatnie sprawdzenie nie powiodło się.",
+  "watches.problem_partial": "Sprawdzono tylko część wyników.",
+  "watches.problem_unavailable": "LUX MED jest chwilowo niedostępny. Sprawdzimy ponownie."
 }

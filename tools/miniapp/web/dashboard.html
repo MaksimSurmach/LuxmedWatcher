@@ -4,8 +4,9 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <meta name="referrer" content="no-referrer">
-  <meta name="color-scheme" content="light">
-  <meta name="theme-color" content="#faf8f4">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#faf8f4" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#141a18" media="(prefers-color-scheme: dark)">
   <title>Luxmed Watcher</title>
   <link rel="stylesheet" href="/dashboard.css">
   <script src="https://telegram.org/js/telegram-web-app.js?65"></script>
@@ -23,6 +24,15 @@
     </nav>
     <div id="announcement" role="status" aria-live="polite"></div>
   </div>
+  <dialog id="booking" aria-labelledby="booking-title">
+    <h2 id="booking-title"></h2>
+    <dl class="booking-facts"></dl>
+    <p class="muted note"></p>
+    <div class="stack">
+      <button type="button" class="primary" id="booking-open">x <span class="icon" aria-hidden="true">↗</span></button>
+      <button type="button" class="secondary" id="booking-cancel"></button>
+    </div>
+  </dialog>
   <noscript>Aplikacja wymaga JavaScriptu.</noscript>
 </body>
 </html>

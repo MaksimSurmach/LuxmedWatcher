@@ -130,5 +130,18 @@
   "watches.check_chat": "Да чата",
   "watches.check_chat_hint": "Каб праверыць тэрміны ўручную, дашліце /watches у чаце і выберыце пошук.",
   "watches.interval_card": "Кожныя {minutes} хв",
-  "watches.saved": "Пошук захаваны"
+  "watches.saved": "Пошук захаваны",
+  "history.confirm_note": "Запіс пацвярджаецца ў LUX MED. Час мог ужо заняць.",
+  "history.confirm_open": "Адкрыць LUX MED",
+  "history.confirm_title": "Перайсці да запісу?",
+  "history.no_doctor": "Урач не названы",
+  "history.row_label": "{time}, {doctor}, {address}. Адкрыць запіс",
+  "history.unavailable_row": "{time}, {doctor}. Час недаступны",
+  "watches.last_success": "Апошняя паспяховая праверка",
+  "watches.monitoring": "Маніторынг",
+  "watches.never_succeeded": "Паспяховых праверак яшчэ не было",
+  "watches.problem_auth": "Увайдзіце ў LUX MED. Пакуль вы не ўвайшлі, пошук не правяраецца.",
+  "watches.problem_generic": "Апошняя праверка не ўдалася.",
+  "watches.problem_partial": "Атрымалася праверыць толькі частку вынікаў.",
+  "watches.problem_unavailable": "LUX MED часова недаступны. Праверым яшчэ раз."
 }
