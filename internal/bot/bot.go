@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
 	randv2 "math/rand/v2"
 	"net/url"
@@ -144,7 +143,8 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	if len(histories) == 0 {
 		return 0, nil
 	}
-	msg := tgbotapi.NewMessage(user.TelegramChatID, b.appointmentNotification(user.Locale, watch, histories, total, 10))
+	text, shown := b.appointmentNotification(user.Locale, watch, histories, total, maxNotificationSlots)
+	msg := tgbotapi.NewMessage(user.TelegramChatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.DisableWebPagePreview = true
 	booking := miniAppButton{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonURL(
@@ -157,6 +157,9 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		results.WidgetAction = "app:history"
 		keyboard[1] = []miniAppButton{results}
 		keyboard = append(keyboard, []miniAppButton{details})
+	}
+	if max(total, len(histories)) > shown {
+		keyboard[1] = append(keyboard[1], b.actionButton(user, "button.all_options", fmt.Sprintf("watch:history:%d", watch.ID)))
 	}
 	keyboard = append(keyboard, []miniAppButton{
 		b.actionButton(user, "button.pause", fmt.Sprintf("watch:pause:%d", watch.ID)),
@@ -176,40 +179,12 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	if remaining := max(total, len(histories)) - 1; remaining > 0 {
 		card.More = b.catalog.T(user.Locale, "notification.more", remaining)
 	}
-	caption := b.appointmentNotification(user.Locale, watch, histories, total, 2)
+	caption, _ := b.appointmentNotification(user.Locale, watch, histories, total, 2)
 	messageID, err := b.sendWidget(card, caption, msg)
 	if err != nil {
 		return 0, fmt.Errorf("Telegram notification delivery failed")
 	}
 	return messageID, nil
-}
-
-func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histories []domain.AppointmentHistory, total, limit int) string {
-	var text strings.Builder
-	count := max(total, len(histories))
-	title := b.catalog.T(locale, "notification.title", count)
-	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(locale, watch), 240)))
-	preview := histories[:min(limit, len(histories))]
-	for _, item := range preview {
-		fmt.Fprintf(&text, "\n\n<b>%s</b>", item.DateTime.In(luxmed.Location()).Format("02.01.2006 · 15:04"))
-		var details []string
-		for _, value := range []string{truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120)} {
-			if value != "" {
-				details = append(details, html.EscapeString(value))
-			}
-		}
-		if len(details) > 0 {
-			text.WriteString("\n" + strings.Join(details, " · "))
-		}
-		if item.Address != "" {
-			text.WriteString("\n" + html.EscapeString(truncateMessage(item.Address, 100)))
-		}
-	}
-	if remaining := count - len(preview); remaining > 0 {
-		fmt.Fprintf(&text, "\n\n<i>%s</i>", html.EscapeString(b.catalog.T(locale, "notification.more", remaining)))
-	}
-	text.WriteString("\n\n" + html.EscapeString(b.catalog.T(locale, "notification.booking_hint")))
-	return text.String()
 }
 
 func portalURL(raw string) string {

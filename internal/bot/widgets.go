@@ -66,7 +66,7 @@ func validWidgetAction(action string) bool {
 	if locale, ok := strings.CutPrefix(action, "lang:"); ok {
 		return slices.Contains(i18n.SupportedLocales, locale)
 	}
-	for _, prefix := range []string{"watch:pause:", "watch:show:", "watch:check:"} {
+	for _, prefix := range []string{"watch:pause:", "watch:show:", "watch:check:", "watch:history:"} {
 		if value, ok := strings.CutPrefix(action, prefix); ok {
 			id, err := strconv.ParseInt(value, 10, 64)
 			return err == nil && id > 0
