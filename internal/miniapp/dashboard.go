@@ -28,16 +28,26 @@ type DashboardConfig struct {
 }
 
 type dashboard struct {
-	cfg      DashboardConfig
-	key      ed25519.PublicKey
-	sessions sessions
-	db       *storage.DB
-	browsers map[int64]*luxmed.Browser
-	connect  func(context.Context, int64) (string, error)
+	cfg          DashboardConfig
+	key          ed25519.PublicKey
+	sessions     sessions
+	db           *storage.DB
+	browsers     map[int64]*luxmed.Browser
+	connect      func(context.Context, int64) (string, error)
+	checkAccount func(context.Context, domain.User) error
 }
 
-func Dashboard(cfg DashboardConfig, db *storage.DB, browsers map[int64]*luxmed.Browser, app *luxmed.MiniApp) http.Handler {
-	d := &dashboard{cfg: cfg, key: productionKey(), sessions: newSessions(), db: db, browsers: browsers, connect: app.Link}
+func Dashboard(
+	cfg DashboardConfig,
+	db *storage.DB,
+	browsers map[int64]*luxmed.Browser,
+	app *luxmed.MiniApp,
+	checkAccount func(context.Context, domain.User) error,
+) http.Handler {
+	d := &dashboard{
+		cfg: cfg, key: productionKey(), sessions: newSessions(), db: db, browsers: browsers,
+		connect: app.Link, checkAccount: checkAccount,
+	}
 	return d.handler()
 }
 
@@ -371,17 +381,26 @@ func (d *dashboard) setStatus(w http.ResponseWriter, r *http.Request, user domai
 }
 
 func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {
-	err := d.browsers[user.TelegramUserID].Check(r.Context())
+	ctx := r.Context()
+	err := d.checkAccount(ctx, user)
+	result := struct {
+		State             string `json:"state"`
+		ReconnectRequired bool
+	}{State: "connected"}
+
 	switch {
 	case err == nil:
-		reply(w, http.StatusOK, map[string]string{"state": "connected"})
 	case errors.Is(err, luxmed.ErrAuthentication):
-		reply(w, http.StatusOK, map[string]string{"state": "needs_login"})
+		result.State = "needs_login"
+		result.ReconnectRequired, err = d.db.LuxMedReconnectRequired(ctx, user.ID)
 	case errors.Is(err, luxmed.ErrBrowserBusy):
 		reply(w, http.StatusTooManyRequests, nil)
+		return
 	default:
 		reply(w, http.StatusServiceUnavailable, nil)
+		return
 	}
+	dashboardResult(w, result, err)
 }
 
 func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User) {

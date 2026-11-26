@@ -14,6 +14,7 @@ import (
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
@@ -53,9 +54,23 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		t.Fatal(err)
 	}
 	const origin = "https://app.example"
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session" {
+			t.Errorf("unexpected browser route: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	browsers := map[int64]*luxmed.Browser{owner.TelegramUserID: {}, other.TelegramUserID: browser}
+	runner := scheduler.NewRunner(db, nil, nil, 2*time.Minute, time.Hour, false)
+	runner.UseBrowsers(browsers)
 	d := &dashboard{db: db, key: pub, sessions: newSessions(),
-		browsers: map[int64]*luxmed.Browser{owner.TelegramUserID: {}, other.TelegramUserID: {}},
-		cfg:      DashboardConfig{Origin: origin, BotID: 12, MinimumInterval: 2 * time.Minute}}
+		browsers: browsers, checkAccount: runner.CheckBrowserSession,
+		cfg: DashboardConfig{Origin: origin, BotID: 12, MinimumInterval: 2 * time.Minute}}
 	handler := d.handler()
 	request := func(action, body, requestOrigin, identity string, want int) *httptest.ResponseRecorder {
 		t.Helper()
@@ -93,7 +108,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), "Other") {
 		t.Fatalf("other user's search missing: %s", res.Body)
 	}
-	if _, err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+	if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
 		t.Fatal(err)
 	}
 	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), `"ReconnectRequired":true`) {
@@ -101,6 +116,30 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	}
 	if res := request("load", "{}", origin, token, http.StatusOK); !strings.Contains(res.Body.String(), `"ReconnectRequired":false`) {
 		t.Fatalf("reconnect state leaked across users: %s", res.Body)
+	}
+	for _, status := range []domain.WatchStatus{domain.WatchStatusActive, domain.WatchStatusPaused} {
+		if err := db.SetWatchStatus(ctx, otherWatch, status); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.MarkWatchChecked(ctx, otherWatch, false, "luxmed_authentication"); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+			t.Fatal(err)
+		}
+		result := request("account", "{}", origin, otherToken, http.StatusOK)
+		if !strings.Contains(result.Body.String(), `"state":"connected","ReconnectRequired":false`) {
+			t.Fatalf("account check with a %s watch did not resolve the episode: %s", status, result.Body)
+		}
+		result = request("load", "{}", origin, otherToken, http.StatusOK)
+		if !strings.Contains(result.Body.String(), `"ReconnectRequired":false`) {
+			t.Fatalf("reload with a %s watch still requires sign-in: %s", status, result.Body)
+		}
+		saved, err := db.Watch(ctx, otherWatch)
+		if err != nil || saved.Status != status || saved.CityID != 1 || saved.ServiceID != 2 ||
+			(saved.LastCheckedAt == nil) != (status == domain.WatchStatusActive) {
+			t.Fatalf("unexpected watch after reconnect: %+v, %v", saved, err)
+		}
 	}
 	request("load", "{}", origin, d.sessions.issue(owner.TelegramUserID, time.Now().Add(-2*time.Hour)), http.StatusUnauthorized)
 	request("load", "{}", origin, "", http.StatusUnauthorized)

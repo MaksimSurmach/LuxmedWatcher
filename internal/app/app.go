@@ -113,7 +113,7 @@ func (a *App) Run(ctx context.Context) error {
 	var dashboard http.Handler
 	if miniApp != nil {
 		dashboardCfg.Origin, dashboardCfg.BotID = miniApp.Origin(), api.Self.ID
-		dashboard = miniapp.Dashboard(dashboardCfg, db, browsers, miniApp)
+		dashboard = miniapp.Dashboard(dashboardCfg, db, browsers, miniApp, runner.CheckBrowserSession)
 	}
 	var workers sync.WaitGroup
 	if a.cfg.ControlKey != "" {

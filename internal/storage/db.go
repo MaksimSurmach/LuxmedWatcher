@@ -247,12 +247,21 @@ func (db *DB) WatchesByUser(ctx context.Context, userID int64) ([]domain.Watch, 
 }
 
 func (db *DB) ActiveWatchTelegramIDs(ctx context.Context) ([]int64, error) {
+	return db.activeWatchTelegramIDs(ctx, false)
+}
+
+func (db *DB) ReconnectWatchTelegramIDs(ctx context.Context) ([]int64, error) {
+	return db.activeWatchTelegramIDs(ctx, true)
+}
+
+func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool) ([]int64, error) {
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT DISTINCT u.telegram_user_id
 		FROM users u JOIN watches w ON w.user_id=u.id
 		WHERE u.status=$1 AND u.role <> '' AND w.status=$2
+			AND (NOT $3 OR EXISTS (SELECT 1 FROM luxmed_reconnect r WHERE r.user_id=u.id))
 		ORDER BY u.telegram_user_id
-	`, domain.UserStatusActive, domain.WatchStatusActive)
+	`, domain.UserStatusActive, domain.WatchStatusActive, reconnectOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -273,13 +282,8 @@ func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error)
 	if db.postgres {
 		due = `last_checked_at + check_interval_seconds * interval '1 second' <= $2`
 	}
-	retry := db.dateTimeSQL("last_checked_at") + ` <= ` + db.dateTimeSQL("$2") + ` - 60 / 86400.0`
-	if db.postgres {
-		retry = `last_checked_at + interval '1 minute' <= $2`
-	}
 	query := watchSelect() + `
-		WHERE status=$1 AND (last_checked_at IS NULL OR ` + due + `
-			OR ((` + retry + `) AND user_id IN (SELECT user_id FROM luxmed_reconnect)))
+		WHERE status=$1 AND (last_checked_at IS NULL OR ` + due + `)
 		AND user_id IN (SELECT id FROM users WHERE status=$3)
 		ORDER BY COALESCE(last_checked_at, created_at), id`
 	args := []any{domain.WatchStatusActive, time.Now().UTC(), domain.UserStatusActive}

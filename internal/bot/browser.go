@@ -4,13 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 )
 
 func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error {
@@ -26,10 +29,19 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 	}
 	msg := tgbotapi.NewMessage(user.TelegramChatID, b.catalog.T(user.Locale, "notification.search_paused"))
 	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": {{button}}}
-	if _, err := b.api.Send(msg); err != nil {
-		return errors.New("telegram reconnect delivery failed")
+	_, err := b.api.Request(msg)
+	if err == nil {
+		return nil
 	}
-	return nil
+	if rejected, ok := errors.AsType[*tgbotapi.Error](err); ok {
+		switch {
+		case rejected.Code == http.StatusTooManyRequests || rejected.Code >= http.StatusInternalServerError:
+			return &scheduler.ReconnectDeliveryRejected{RetryAfter: time.Duration(rejected.RetryAfter) * time.Second}
+		case rejected.Code >= http.StatusBadRequest:
+			return errors.New("telegram permanently rejected reconnect warning")
+		}
+	}
+	return errors.New("telegram reconnect delivery outcome unknown")
 }
 
 func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {

@@ -45,6 +45,17 @@ CREATE TABLE IF NOT EXISTS luxmed_reconnect (
 	notified BOOLEAN NOT NULL DEFAULT FALSE
 );
 
+CREATE TABLE IF NOT EXISTS luxmed_reconnect_delivery (
+	user_id %[5]s PRIMARY KEY REFERENCES luxmed_reconnect(user_id) ON DELETE CASCADE,
+	attempts INTEGER NOT NULL,
+	retry_at %[6]s
+);
+
+CREATE TABLE IF NOT EXISTS luxmed_search_cooldown (
+	user_id %[5]s PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+	started_at %[6]s NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS watches (
 	id %[4]s,
 	user_id %[5]s NOT NULL REFERENCES users(id) ON DELETE CASCADE,

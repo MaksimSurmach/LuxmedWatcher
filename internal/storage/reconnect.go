@@ -2,6 +2,9 @@ package storage
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 )
@@ -14,13 +17,48 @@ func (db *DB) LuxMedReconnectRequired(ctx context.Context, userID int64) (bool, 
 	return required, err
 }
 
-func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) (notified bool, err error) {
-	err = db.sql.QueryRowContext(ctx, `
+func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) error {
+	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO luxmed_reconnect (user_id) VALUES ($1)
-		ON CONFLICT (user_id) DO UPDATE SET user_id=excluded.user_id
-		RETURNING notified
-	`, userID).Scan(&notified)
-	return notified, err
+		ON CONFLICT (user_id) DO NOTHING
+	`, userID)
+	return err
+}
+
+// A claimed delivery has no retry time until Telegram explicitly rejects it.
+func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time) (int, error) {
+	var attempts int
+	err := db.sql.QueryRowContext(ctx, `
+		INSERT INTO luxmed_reconnect_delivery (user_id, attempts)
+		SELECT user_id, 1 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified
+		ON CONFLICT (user_id) DO UPDATE SET attempts=luxmed_reconnect_delivery.attempts+1, retry_at=NULL
+		WHERE `+db.dateTimeSQL("luxmed_reconnect_delivery.retry_at")+` <= `+db.dateTimeSQL("$2")+`
+		RETURNING attempts
+	`, userID, now.UTC()).Scan(&attempts)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return attempts, err
+}
+
+func (db *DB) ScheduleLuxMedReconnectRetry(ctx context.Context, userID int64, retryAt time.Time) error {
+	_, err := db.sql.ExecContext(ctx, `
+		UPDATE luxmed_reconnect_delivery SET retry_at=$2 WHERE user_id=$1
+	`, userID, retryAt.UTC())
+	return err
+}
+
+func (db *DB) ReserveLuxMedSearch(ctx context.Context, userID int64, started time.Time, interval time.Duration) (bool, error) {
+	res, err := db.sql.ExecContext(ctx, `
+		INSERT INTO luxmed_search_cooldown (user_id, started_at) VALUES ($1, $2)
+		ON CONFLICT (user_id) DO UPDATE SET started_at=excluded.started_at
+		WHERE `+db.dateTimeSQL("luxmed_search_cooldown.started_at")+` <= `+db.dateTimeSQL("$3")+`
+	`, userID, started.UTC(), started.Add(-interval).UTC())
+	if err != nil {
+		return false, err
+	}
+	rows, err := res.RowsAffected()
+	return rows > 0, err
 }
 
 func (db *DB) MarkLuxMedReconnectNotified(ctx context.Context, userID int64) error {

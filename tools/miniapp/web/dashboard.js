@@ -126,8 +126,10 @@ function bindAccount() {
   }, failure);
   const check = main.querySelector('#account-check');
   check.onclick = () => void run(check, async () => {
-    account = (await api('account')).state;
-    if (account === 'needs_login' && state.ReconnectRequired) account = 'search_paused';
+    const result = await api('account');
+    if (!check.isConnected) return;
+    state.ReconnectRequired = result.ReconnectRequired;
+    account = state.ReconnectRequired ? 'search_paused' : result.state;
     connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
     const section = main.querySelector('.account');
     const status = main.querySelector('.account-status');

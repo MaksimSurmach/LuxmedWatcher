@@ -210,8 +210,13 @@ func TestSchedulerRenewsBrowserSessionBeforeHourlySearchIsDue(t *testing.T) {
 
 func testRunner(t *testing.T, notifier Notifier) (*Runner, *storage.DB, domain.Watch) {
 	t.Helper()
+	return testRunnerAt(t, notifier, filepath.Join(t.TempDir(), "watcher.sqlite"))
+}
+
+func testRunnerAt(t *testing.T, notifier Notifier, path string) (*Runner, *storage.DB, domain.Watch) {
+	t.Helper()
 	ctx := context.Background()
-	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "watcher.sqlite"))
+	db, err := storage.Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -330,7 +335,7 @@ type reconnectRecorder struct {
 func (n *reconnectRecorder) NotifyLuxMedReconnect(_ context.Context, _ domain.User) error {
 	n.attempts++
 	if n.attempts == 1 {
-		return errors.New("telegram rejected message")
+		return &ReconnectDeliveryRejected{RetryAfter: 2 * time.Minute}
 	}
 	n.delivered++
 	return nil
@@ -421,6 +426,16 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
 		t.Fatalf("expired session: %v", err)
 	}
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.deliverReconnect(ctx, user, time.Now().Add(90*time.Second)); err != nil || notifier.attempts != 1 {
+		t.Fatalf("delivery before Telegram's retry time: attempts=%d, err=%v", notifier.attempts, err)
+	}
+	if err := runner.deliverReconnect(ctx, user, time.Now().Add(3*time.Minute)); err != nil {
+		t.Fatalf("delivery after Telegram's retry time: %v", err)
+	}
 	runner = restart()
 	if _, err := runner.ManualCheck(ctx, other); !errors.Is(err, luxmed.ErrAuthentication) {
 		t.Fatalf("second search with expired session: %v", err)
@@ -450,5 +465,125 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	assertReconnect(true)
 	if notifier.attempts != 3 || notifier.delivered != 2 {
 		t.Fatalf("expected a warning for the new episode: %+v", notifier)
+	}
+}
+
+type reconnectNotifierFunc struct {
+	Notifier
+	send func() error
+}
+
+func (n reconnectNotifierFunc) NotifyLuxMedReconnect(context.Context, domain.User) error {
+	return n.send()
+}
+
+func TestReconnectDeliveryStopsAfterUncertainAcknowledgment(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "watcher.sqlite")
+	sends := 0
+	var db *storage.DB
+	notifier := reconnectNotifierFunc{send: func() error {
+		sends++
+		// Telegram accepted the send, but the database is unavailable before acknowledgment.
+		if err := db.Close(); err != nil {
+			t.Fatal(err)
+		}
+		return nil
+	}}
+	runner, original, watch := testRunnerAt(t, notifier, path)
+	db = original
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.requireReconnect(ctx, user); err == nil ||
+		!strings.Contains(err.Error(), "record LuxMed reconnect warning delivery") {
+		t.Fatalf("expected acknowledgment failure, got %v", err)
+	}
+
+	db, err = storage.Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	restarted := NewRunner(db, nil, notifier, 0, time.Hour, false)
+	if err := restarted.deliverReconnect(ctx, user, time.Now().Add(24*time.Hour)); err != nil || sends != 1 {
+		t.Fatalf("uncertain attempt was retried: sends=%d, err=%v", sends, err)
+	}
+	if required, err := db.LuxMedReconnectRequired(ctx, user.ID); err != nil || !required {
+		t.Fatalf("monitoring should still require sign-in: required=%t, err=%v", required, err)
+	}
+}
+
+func TestReconnectDeliveryStopsAfterPermanentRejection(t *testing.T) {
+	ctx := t.Context()
+	sends := 0
+	notifier := reconnectNotifierFunc{send: func() error {
+		sends++
+		return errors.New("telegram permanently rejected reconnect warning")
+	}}
+	runner, db, watch := testRunner(t, notifier)
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.requireReconnect(ctx, user); err == nil {
+		t.Fatal("expected permanent delivery failure")
+	}
+	restarted := NewRunner(db, nil, notifier, 0, time.Hour, false)
+	if err := restarted.deliverReconnect(ctx, user, time.Now().Add(24*time.Hour)); err != nil || sends != 1 {
+		t.Fatalf("permanent rejection was retried: sends=%d, err=%v", sends, err)
+	}
+}
+
+func TestSessionProbeResumesWatchesWithoutBypassingSearchCooldown(t *testing.T) {
+	ctx := t.Context()
+	const minimum = 5 * time.Minute
+	_, db, watch := testRunner(t, nil)
+	watch.CityID, watch.ServiceID = 1, 2
+	watch.CheckIntervalSeconds = 3600
+	if err := db.UpdateWatch(ctx, watch); err != nil {
+		t.Fatal(err)
+	}
+	var searches, probes atomic.Int32
+	var connected atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/session" {
+			probes.Add(1)
+		} else {
+			searches.Add(1)
+		}
+		if !connected.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	t.Cleanup(server.Close)
+	browser, err := luxmed.NewBrowser(server.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := func() *Runner {
+		runner := NewRunner(db, nil, nil, minimum, time.Hour, false)
+		runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
+		return runner
+	}
+
+	if err := start().CheckWatch(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
+		t.Fatalf("expired search: %v", err)
+	}
+	due, err := db.DueWatches(ctx, 0)
+	if err != nil || len(due) != 0 {
+		t.Fatalf("expired session accelerated a full search: %v, %v", due, err)
+	}
+	connected.Store(true)
+	runner := start()
+	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	scheduler.maintainReconnectSessions(ctx)
+	due, err = db.DueWatches(ctx, 0)
+	if err != nil || len(due) != 1 || probes.Load() != 1 {
+		t.Fatalf("session probe did not restore the watch: probes=%d, due=%v, err=%v", probes.Load(), due, err)
+	}
+	if err := start().CheckWatch(ctx, due[0]); !errors.Is(err, ErrRateLimited) || searches.Load() != 1 {
+		t.Fatalf("search bypassed the persisted cooldown: searches=%d, err=%v", searches.Load(), err)
 	}
 }
