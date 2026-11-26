@@ -116,6 +116,16 @@ func (b *Bot) retryLoginNotice(telegramID int64, state *flow) {
 	}
 }
 
+func (b *Bot) stopLoginAfterDeleteFailure(telegramID int64, locale string) {
+	// Replacing the flow cancels verification before attempting the warning.
+	state := &flow{Kind: flowAccountCheck, notice: &loginNotice{
+		user: domain.User{TelegramChatID: telegramID, Locale: locale},
+		key:  "flow.account.delete_failed",
+	}}
+	b.setFlow(telegramID, state)
+	b.retryLoginNotice(telegramID, state)
+}
+
 type loginVerification struct {
 	user            domain.User
 	done            chan struct{}

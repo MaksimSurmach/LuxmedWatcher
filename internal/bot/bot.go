@@ -257,16 +257,16 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		return
 	}
 	switch command {
-	case "logout_luxmed", "connect":
+	case "logout_luxmed":
 		b.db.CancelActiveCredentialAttempt(telegramID)
+	case "connect":
+		b.clearCredentialFlow(telegramID)
 	}
 	credentialMessage := state.receivesCredential(command)
 	if credentialMessage {
 		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(telegramID, message.MessageID)); err != nil {
 			b.logger.Warn("could not delete Telegram credential message")
-			b.clearFlow(telegramID)
-			locale := i18n.Normalize(message.From.LanguageCode, b.cfg.DefaultLocale)
-			b.send(domain.User{TelegramChatID: telegramID}, b.catalog.T(locale, "flow.account.delete_failed"), nil)
+			b.stopLoginAfterDeleteFailure(telegramID, i18n.Normalize(message.From.LanguageCode, b.cfg.DefaultLocale))
 			return
 		}
 		if state.Kind == flowAccountCheck {
@@ -357,7 +357,6 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 	case "app":
 		b.showApp(ctx, user, "")
 	case "connect":
-		b.clearCredentialFlow(user.TelegramUserID)
 		b.showConnect(ctx, user)
 	case "watches":
 		b.showWatches(ctx, user)
@@ -511,8 +510,8 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 	case data == "account":
 		b.showConnect(ctx, user)
 	case data == "connect:password":
-		b.clearFlow(user.TelegramUserID)
 		if b.cfg.MiniApp != nil {
+			b.clearCredentialFlow(user.TelegramUserID)
 			b.showApp(ctx, user, "settings")
 		} else {
 			b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountLogin})
@@ -549,7 +548,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
-		b.clearFlow(telegramID)
+		b.clearCredentialFlow(telegramID)
 		b.showConnect(ctx, user)
 	case data == "app":
 		b.showApp(ctx, user, "")

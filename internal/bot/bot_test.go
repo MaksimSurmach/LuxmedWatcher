@@ -1361,7 +1361,7 @@ func TestChromeReconnectPreservesPendingWatchConfirmation(t *testing.T) {
 			if !signedIn.Load() {
 				w.WriteHeader(http.StatusUnauthorized)
 			}
-		case "/viewer":
+		case "/ticket/42":
 			signedIn.Store(true)
 			fmt.Fprintf(w, `{"ticket":%q}`, strings.Repeat("a", 64))
 		default:
@@ -1377,6 +1377,10 @@ func TestChromeReconnectPreservesPendingWatchConfirmation(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+	b.cfg.MiniApp, err = luxmed.NewMiniApp(worker.URL, "https://app.example", "")
+	if err != nil {
+		t.Fatal(err)
+	}
 	runner := scheduler.NewRunner(b.db, b.cryptor, nil, time.Minute, time.Hour, false)
 	runner.UseBrowsers(b.cfg.Browsers)
 	b.SetRunner(runner)
@@ -1389,7 +1393,21 @@ func TestChromeReconnectPreservesPendingWatchConfirmation(t *testing.T) {
 
 	b.handleAction(ctx, user.TelegramUserID, "account", nil)
 	loginMessage(b, ctx, user, "/connect", 1)
-	action := credentialAction("chrome", user.CredentialRevisions())
+	b.handleAction(ctx, user.TelegramUserID, "connect:password", nil)
+	if err := b.db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
+		UserID: user.ID, EncryptedPassword: "inactive migrated fixture",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b.handleAction(ctx, user.TelegramUserID, credentialAction("forget", user.CredentialRevisions()), nil)
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("forget did not remove the migrated credentials: %v", err)
+	}
+	current, err := b.db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := credentialAction("chrome", current.CredentialRevisions())
 	b.handleAction(ctx, user.TelegramUserID, action, b.selectChrome(user.TelegramUserID, action))
 	b.handleAction(ctx, user.TelegramUserID, "confirm:draft", nil)
 	saved, err := b.db.WatchesByUser(ctx, user.ID)
@@ -1436,5 +1454,77 @@ func TestNewWatchUsesSavedLoginAndLocalCities(t *testing.T) {
 				t.Fatal("new watch did not start with saved login and local city data")
 			}
 		})
+	}
+}
+
+func TestCredentialDeleteFailureKeepsInputProtectedUntilWarningArrives(t *testing.T) {
+	ctx := t.Context()
+	var deletes, warnings atomic.Int32
+	var probe context.Context
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/deleteMessage"):
+			if deletes.Add(1) == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+		case strings.Contains(r.FormValue("text"), "Delete it in the chat"):
+			if !errors.Is(probe.Err(), context.Canceled) {
+				t.Error("verification was still running while sending the warning")
+			}
+			if warnings.Add(1) == 1 {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	started := make(chan context.Context, 1)
+	b.newClient = func(bool) luxmed.Client { return cancelableLoginClient{started: started} }
+	b.submitLogin(ctx, user, luxmed.Credentials{Login: "fixture", Password: "synthetic"})
+	select {
+	case probe = <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("verification did not start")
+	}
+	loginMessage(b, ctx, user, "first repeat", 1)
+	b.workers.Wait()
+	state := b.getFlow(user.TelegramUserID)
+	if state == nil || state.Kind != flowAccountCheck || state.notice == nil ||
+		state.notice.key != "flow.account.delete_failed" {
+		t.Fatal("double failure cleared password protection")
+	}
+	loginMessage(b, ctx, user, "second repeat", 2)
+	loginMessage(b, ctx, user, "ordinary text", 3)
+	if deletes.Load() != 2 || warnings.Load() != 2 || b.getFlow(user.TelegramUserID) != nil {
+		t.Fatalf("warning did not end password protection: deletions=%d warnings=%d", deletes.Load(), warnings.Load())
+	}
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("verification saved a password after deletion failed: %v", err)
+	}
+}
+
+func TestConnectMenuDoesNotCancelMiniAppCredentialAttempt(t *testing.T) {
+	ctx := t.Context()
+	b := testBot(t)
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: {}}
+	attempt, err := b.db.StartCredentialAttempt(ctx, user, "mini-app")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attempt.Finish()
+	if err := b.db.PrepareCredentialAttempt(attempt.Context(), b.cryptor, user,
+		luxmed.Credentials{Login: "fixture", Password: "synthetic"}, attempt); err != nil {
+		t.Fatal(err)
+	}
+	loginMessage(b, ctx, user, "/connect", 1)
+	b.handleAction(ctx, user.TelegramUserID, "account", nil)
+	if err := attempt.Context().Err(); err != nil {
+		t.Fatalf("showing the login menu canceled Mini App verification: %v", err)
+	}
+	if _, err := b.db.SaveCredentialAttempt(attempt.Context(), attempt); err != nil {
+		t.Fatalf("showing the login menu prevented the Mini App save: %v", err)
 	}
 }
