@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -249,15 +250,127 @@ func TestOnlyOwnerCanHideHistory(t *testing.T) {
 	}
 }
 
+func TestHistoryExplainsUnavailableTimes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		offset  time.Duration
+		missing bool
+		message string
+	}{
+		{
+			name:    "appointment time passed",
+			offset:  -24 * time.Hour,
+			message: "This appointment time has passed.",
+		},
+		{
+			name:    "future time missing from results",
+			offset:  24 * time.Hour,
+			missing: true,
+			message: "This time no longer appears in search results. Check other times.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			var sends atomic.Int32
+			b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/botfake/sendMessage" {
+					t.Errorf("unexpected Telegram method: %s", r.URL.Path)
+					return
+				}
+				sends.Add(1)
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+					return
+				}
+				if text := r.Form.Get("text"); !strings.Contains(text, tc.message) {
+					t.Errorf("message %q does not contain %q", text, tc.message)
+				}
+				if markup := r.Form.Get("reply_markup"); strings.Contains(markup, luxmed.ReservationPageURL) {
+					t.Errorf("unavailable time offered a portal action: %s", markup)
+				}
+				fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+			})
+			user := createUser(t, b, 101, domain.UserStatusActive)
+			id, err := b.db.CreateWatch(ctx, domain.Watch{
+				UserID: user.ID, Name: "Example", CityID: 1, ServiceID: 12, CheckIntervalSeconds: 300,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			item, _, err := b.db.UpsertAppointmentHistory(ctx, id, domain.Appointment{
+				Fingerprint: "test-slot",
+				DateTime:    time.Now().Add(tc.offset),
+				BookingURL:  luxmed.ReservationPageURL,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.missing {
+				nextCheck := item.LastSeenAt.Add(time.Minute)
+				if err := b.db.MarkMissingAppointments(ctx, id, nextCheck, item.LastSeenAt); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			b.showHistory(ctx, user)
+			if got := sends.Load(); got != 1 {
+				t.Errorf("sent %d messages, want 1", got)
+			}
+		})
+	}
+}
+
 func TestAppointmentNotificationEscapesHTMLAndShowsRemainingSlots(t *testing.T) {
 	b := testBot(t)
 	text := b.appointmentNotification("en", domain.Watch{Name: "A < B & C"}, []domain.AppointmentHistory{
 		{Appointment: domain.Appointment{DateTime: time.Unix(0, 0), DoctorName: "<b>Example</b>", FacilityName: "A & B", Address: "Street 12"}},
 	}, 3, 10)
-	for _, value := range []string{"<b>LuxMed appointments found: 3</b>", "A &lt; B &amp; C", "&lt;b&gt;Example&lt;/b&gt;", "A &amp; B", "Street 12", "<i>More in history: 2</i>"} {
+	for _, value := range []string{
+		"<b>Appointment times found · 3</b>", "A &lt; B &amp; C", "&lt;b&gt;Example&lt;/b&gt;", "A &amp; B",
+		"Street 12", "<i>More in history: 2</i>", "Check the time and book in the LUX MED portal.",
+	} {
 		if !strings.Contains(text, value) {
 			t.Errorf("notification missing %q in %q", value, text)
 		}
+	}
+}
+
+func TestWatchWithExpiredSessionOffersSignIn(t *testing.T) {
+	ctx := t.Context()
+	var sends atomic.Int32
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botfake/sendMessage" {
+			t.Errorf("unexpected Telegram method: %s", r.URL.Path)
+			return
+		}
+		sends.Add(1)
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+			return
+		}
+		text := r.Form.Get("text")
+		if !strings.Contains(text, "Sign-in required.") || strings.Contains(text, "luxmed_authentication") {
+			t.Errorf("unexpected message: %q", text)
+		}
+		markup := r.Form.Get("reply_markup")
+		if !strings.Contains(markup, "Sign in to LUX MED") || !strings.Contains(markup, "connect:open") {
+			t.Errorf("missing sign-in action: %s", markup)
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	id, err := b.db.CreateWatch(ctx, domain.Watch{
+		UserID: user.ID, Name: "Example", CityID: 1, ServiceID: 12, CheckIntervalSeconds: 300,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.MarkWatchChecked(ctx, id, false, "luxmed_authentication"); err != nil {
+		t.Fatal(err)
+	}
+	b.showWatches(ctx, user)
+	if got := sends.Load(); got != 1 {
+		t.Errorf("sent %d messages, want 1", got)
 	}
 }
 
