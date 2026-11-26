@@ -249,12 +249,12 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	}
 	message := update.Message
 	telegramID := message.From.ID
-	command := b.messageCommand(message)
+	state := b.getFlow(telegramID)
+	command := b.messageCommand(message, state)
 	switch command {
 	case "logout_luxmed", "connect":
 		b.db.CancelActiveCredentialAttempt(telegramID)
 	}
-	state := b.getFlow(telegramID)
 	credentialMessage := state.receivesCredential(command)
 	if credentialMessage {
 		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(telegramID, message.MessageID)); err != nil {

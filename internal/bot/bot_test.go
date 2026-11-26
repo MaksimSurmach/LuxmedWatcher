@@ -1014,20 +1014,21 @@ func TestTelegramRoutesCommandsDuringPasswordVerification(t *testing.T) {
 		b.handleUpdate(ctx, tgbotapi.Update{Message: &tgbotapi.Message{
 			MessageID: id, From: &tgbotapi.User{ID: user.TelegramUserID},
 			Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
-			Text: text, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(text)}},
+			Text: text, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(strings.SplitN(text, " ", 2)[0])}},
 		}})
 	}
 	update("/watches", 20)
 	update("/help", 21)
-	update("/synthetic_password", 22)
-	if !watches.Load() || !help.Load() || deleted.Load() != 1 {
+	update("/watches fixture", 22)
+	update("/synthetic_password", 23)
+	if !watches.Load() || !help.Load() || deleted.Load() != 2 {
 		t.Fatalf("verification did not route known commands and scrub input: watches=%v help=%v deleted=%d",
 			watches.Load(), help.Load(), deleted.Load())
 	}
-	update("/connect", 23)
+	update("/connect", 24)
 	releaseLogin()
 	b.workers.Wait()
-	if deleted.Load() != 1 || !menu.Load() {
+	if deleted.Load() != 2 || !menu.Load() {
 		t.Fatalf("connect command did not show the mode menu: deleted=%d menu=%v", deleted.Load(), menu.Load())
 	}
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {

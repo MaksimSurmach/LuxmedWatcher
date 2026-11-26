@@ -17,9 +17,10 @@ func loginExitCommand(command string) bool {
 	return command == "cancel" || command == "logout_luxmed" || command == "connect"
 }
 
-func (b *Bot) messageCommand(message *tgbotapi.Message) string {
+func (b *Bot) messageCommand(message *tgbotapi.Message, state *flow) string {
 	command := message.Command()
-	if !loginExitCommand(command) {
+	checkingPassword := state != nil && state.Kind == flowAccountCheck
+	if !loginExitCommand(command) && !checkingPassword {
 		return command
 	}
 	// An entity can cover only a prefix of a password.
@@ -154,7 +155,7 @@ func (b *Bot) completeLogin(telegramID int64, pending, retry *flow) bool {
 
 func (b *Bot) saveLogin(user domain.User, creds luxmed.Credentials, attempt *storage.CredentialAttempt) error {
 	if b.runner != nil {
-		return b.runner.VerifyChatCredentialAttempt(user, creds, attempt)
+		return b.runner.VerifyCredentialAttempt(user, creds, attempt)
 	}
 	// A bot without a runner is used by the standalone bot tests.
 	defer attempt.Finish()

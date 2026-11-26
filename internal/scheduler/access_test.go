@@ -17,7 +17,15 @@ import (
 
 type catalogClient struct {
 	fakeLuxMed
-	cities func(context.Context) error
+	cities       func(context.Context) error
+	authenticate func(context.Context) error
+}
+
+func (c *catalogClient) Authenticate(ctx context.Context, creds luxmed.Credentials) error {
+	if c.authenticate != nil {
+		return c.authenticate(ctx)
+	}
+	return c.fakeLuxMed.Authenticate(ctx, creds)
 }
 
 func (c *catalogClient) GetCities(ctx context.Context) ([]domain.City, error) {
@@ -32,16 +40,38 @@ func TestCatalogManualCheckAndSaveShareAuthenticationAndRetryAfter(t *testing.T)
 		t.Fatal(err)
 	}
 	runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: {}})
-	creds := luxmed.Credentials{Login: "fixture", Password: "synthetic"}
+	creds := luxmed.Credentials{Login: "fixture", Password: "replacement"}
+	previous := luxmed.Credentials{Login: creds.Login, Password: "previous"}
+	if _, err := db.SaveCredentials(ctx, runner.cryptor, user, previous); err != nil {
+		t.Fatal(err)
+	}
+	user, err = db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
 	var calls int
-	var response error
+	response := errors.Join(
+		&luxmed.HTTPError{StatusCode: http.StatusNotFound},
+		&luxmed.HTTPError{StatusCode: http.StatusServiceUnavailable, RetryAfter: time.Minute},
+	)
 	client := &catalogClient{cities: func(context.Context) error {
 		calls++
 		return response
 	}}
 	runner.newClient = func(bool) luxmed.Client { return client }
-	if err := runner.SaveCredentials(ctx, user, creds); err != nil {
+	if err := runner.SaveCredentialsForAttempt(ctx, user, creds, "mini-app"); err != nil {
 		t.Fatal(err)
+	}
+	if calls != 0 || client.logins != 1 {
+		t.Fatalf("Mini App must save after authentication: catalog=%d login=%d", calls, client.logins)
+	}
+	replacement, err := db.LoginAccount(ctx, user.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved, err := runner.cryptor.OpenCredentials(user.ID, replacement.EncryptedPassword)
+	if err != nil || saved != creds {
+		t.Fatalf("Mini App did not replace the saved credentials: %v", err)
 	}
 	user, err = db.UserByID(ctx, user.ID)
 	if err != nil {
@@ -51,10 +81,6 @@ func TestCatalogManualCheckAndSaveShareAuthenticationAndRetryAfter(t *testing.T)
 		_, err := client.GetCities(ctx)
 		return err
 	}
-	response = errors.Join(
-		&luxmed.HTTPError{StatusCode: http.StatusNotFound},
-		&luxmed.HTTPError{StatusCode: http.StatusServiceUnavailable, RetryAfter: time.Minute},
-	)
 	if err := runner.WithLuxMedClient(ctx, user, query); !errors.Is(err, luxmed.ErrUnavailable) {
 		t.Fatalf("catalog throttle = %v", err)
 	}
@@ -67,7 +93,7 @@ func TestCatalogManualCheckAndSaveShareAuthenticationAndRetryAfter(t *testing.T)
 	if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, ErrRateLimited) {
 		t.Fatalf("scheduled search during Retry-After = %v", err)
 	}
-	if calls != 2 || client.logins != 1 {
+	if calls != 1 || client.logins != 1 {
 		t.Fatalf("upstream during Retry-After: catalog=%d login=%d", calls, client.logins)
 	}
 	runner.accounts[user.ID].retryAfter = time.Time{}
@@ -82,7 +108,7 @@ func TestCatalogManualCheckAndSaveShareAuthenticationAndRetryAfter(t *testing.T)
 		}
 	}
 	account, err := db.LuxMedAccount(ctx, user.ID)
-	if err != nil || account.Status != domain.AccountStatusAuthFailed || calls != 3 || client.logins != 1 {
+	if err != nil || account.Status != domain.AccountStatusAuthFailed || calls != 2 || client.logins != 1 {
 		t.Fatalf("rejected account status=%s catalog=%d login=%d: %v", account.Status, calls, client.logins, err)
 	}
 
@@ -125,7 +151,7 @@ func TestCredentialVerificationCannotCommitAfterDeadlineOrChromeChoice(t *testin
 			}
 			// Legacy credentials must never opt the account into saved-login mode.
 			runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: {}})
-			client := &catalogClient{cities: func(probe context.Context) error {
+			client := &catalogClient{authenticate: func(probe context.Context) error {
 				deadline, ok := probe.Deadline()
 				if !ok || time.Until(deadline) > 12*time.Second {
 					t.Errorf("verification did not receive a bounded deadline")
@@ -462,7 +488,7 @@ func checkChatCredentialSave(t *testing.T, withChrome bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.VerifyChatCredentialAttempt(user, want, attempt); err != nil {
+	if err := runner.VerifyCredentialAttempt(user, want, attempt); err != nil {
 		t.Fatal(err)
 	}
 	account, err := db.LoginAccount(ctx, user.ID, withChrome)
