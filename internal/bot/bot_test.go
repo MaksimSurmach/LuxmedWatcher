@@ -131,10 +131,11 @@ func TestPasswordLoginResumesOnlyActiveSearchesAfterAuthentication(t *testing.T)
 	must(b.db.MarkWatchChecked(ctx, pausedID, false, "luxmed_authentication"))
 	must(b.db.SetWatchStatus(ctx, pausedID, domain.WatchStatusPaused))
 	must(b.db.BeginLuxMedReconnect(ctx, user.ID))
-	if attempt, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, time.Now()); err != nil || attempt != 1 {
-		t.Fatalf("claim reconnect warning: attempt=%d, err=%v", attempt, err)
+	claim, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, time.Now())
+	if err != nil || claim.Attempt != 1 {
+		t.Fatalf("claim reconnect warning: attempt=%d, err=%v", claim.Attempt, err)
 	}
-	must(b.db.RecordLuxMedReconnectRejection(ctx, user.ID, 1, time.Now().Add(time.Minute), 0))
+	must(b.db.RecordLuxMedReconnectRejection(ctx, user.ID, claim, time.Now().Add(time.Minute), 0))
 	if reserved, err := b.db.ReserveLuxMedSearch(ctx, user.ID, time.Now(), minimum); err != nil || !reserved {
 		t.Fatalf("reserve search before login: reserved=%v, err=%v", reserved, err)
 	}
@@ -158,8 +159,8 @@ func TestPasswordLoginResumesOnlyActiveSearchesAfterAuthentication(t *testing.T)
 	if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err != nil || required {
 		t.Fatalf("successful login left reconnect episode open: required=%v, err=%v", required, err)
 	}
-	if attempt, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, time.Now().Add(time.Hour)); err != nil || attempt != 0 {
-		t.Fatalf("queued reconnect warning survived successful login: attempt=%d, err=%v", attempt, err)
+	if claim, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, time.Now().Add(time.Hour)); err != nil || claim.Attempt != 0 {
+		t.Fatalf("queued reconnect warning survived successful login: attempt=%d, err=%v", claim.Attempt, err)
 	}
 	due, err := b.db.DueWatches(ctx, 0)
 	if err != nil || len(due) != 1 || due[0].ID != activeID || due[0].CityID != search.CityID ||

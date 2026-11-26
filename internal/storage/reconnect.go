@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"errors"
 	"time"
@@ -25,38 +26,46 @@ func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) error {
 	return err
 }
 
+type ReconnectDeliveryClaim struct {
+	ID      string
+	Attempt int
+}
+
 // A claimed delivery can be retried only when the attempt is known to be unsuccessful.
-func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time) (int, error) {
-	var attempts int
+func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time) (ReconnectDeliveryClaim, error) {
+	claim := ReconnectDeliveryClaim{ID: rand.Text()}
 	err := db.sql.QueryRowContext(ctx, `
-		INSERT INTO luxmed_reconnect_delivery (user_id, attempts)
-		SELECT user_id, 1 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified
-		ON CONFLICT (user_id) DO UPDATE SET attempts=luxmed_reconnect_delivery.attempts+1, retry_at=NULL
+		INSERT INTO luxmed_reconnect_delivery (user_id, attempts, claim_id)
+		SELECT user_id, 1, $3 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified
+		ON CONFLICT (user_id) DO UPDATE SET attempts=luxmed_reconnect_delivery.attempts+1, retry_at=NULL, claim_id=excluded.claim_id
 		WHERE `+db.dateTimeSQL("luxmed_reconnect_delivery.retry_at")+` <= `+db.dateTimeSQL("$2")+`
 		RETURNING attempts
-	`, userID, now.UTC()).Scan(&attempts)
+	`, userID, now.UTC(), claim.ID).Scan(&claim.Attempt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return 0, nil
+		return ReconnectDeliveryClaim{}, nil
 	}
-	return attempts, err
+	return claim, err
 }
 
 // A nonzero forbidden limit records a 403 and suppresses further retries when the episode reaches the limit.
 func (db *DB) RecordLuxMedReconnectRejection(
 	ctx context.Context,
 	userID int64,
-	attempt int,
+	claim ReconnectDeliveryClaim,
 	retryAt time.Time,
 	forbiddenLimit int,
 ) error {
+	if claim.ID == "" {
+		return errors.New("missing reconnect delivery claim ID")
+	}
 	_, err := db.sql.ExecContext(ctx, `
 		UPDATE luxmed_reconnect_delivery
 		SET forbidden_failures=forbidden_failures + CASE WHEN $3 > 0 THEN 1 ELSE 0 END,
 		    retry_at=CASE WHEN $3 > 0 AND forbidden_failures + 1 >= $3
 		                  THEN NULL ELSE COALESCE($2, retry_at) END
-		WHERE user_id=$1 AND attempts=$4 AND retry_at IS NULL
+		WHERE user_id=$1 AND claim_id=$4 AND retry_at IS NULL
 		    AND ($3 = 0 OR forbidden_failures < $3)
-	`, userID, retryAt.UTC(), forbiddenLimit, attempt)
+	`, userID, retryAt.UTC(), forbiddenLimit, claim.ID)
 	return err
 }
 

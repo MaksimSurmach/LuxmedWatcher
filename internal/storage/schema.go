@@ -48,6 +48,7 @@ CREATE TABLE IF NOT EXISTS luxmed_reconnect (
 CREATE TABLE IF NOT EXISTS luxmed_reconnect_delivery (
 	user_id %[5]s PRIMARY KEY REFERENCES luxmed_reconnect(user_id) ON DELETE CASCADE,
 	attempts INTEGER NOT NULL,
+	claim_id TEXT NOT NULL DEFAULT '',
 	forbidden_failures INTEGER NOT NULL DEFAULT 0,
 	retry_at %[6]s
 );

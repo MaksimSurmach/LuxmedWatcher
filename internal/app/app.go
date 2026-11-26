@@ -50,6 +50,9 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	defer db.Close()
+	if err := db.SetReconnectJournalDirectory(a.cfg.DatabasePath + ".reconnect"); err != nil {
+		return err
+	}
 
 	catalog, err := i18n.Load(a.cfg.DefaultLocale)
 	if err != nil {

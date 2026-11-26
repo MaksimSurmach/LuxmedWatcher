@@ -56,12 +56,6 @@ type accountCheck struct {
 	client                   luxmed.Client
 }
 
-type reconnectRejection struct {
-	attempt        int
-	retryAt        time.Time
-	forbiddenLimit int
-}
-
 type Runner struct {
 	browsers             map[int64]*luxmed.Browser
 	db                   *storage.DB
@@ -73,7 +67,6 @@ type Runner struct {
 	rawPayloads          bool
 	mu                   sync.Mutex
 	accounts             map[int64]*accountCheck
-	pendingRejections    map[int64]reconnectRejection
 	capacity             chan struct{}
 }
 
@@ -82,9 +75,8 @@ func NewRunner(db *storage.DB, cryptor *security.Cryptor, notifier Notifier, min
 		db: db, cryptor: cryptor, notifier: notifier,
 		newClient:       func(raw bool) luxmed.Client { return luxmed.NewHTTPClient(raw) },
 		minimumInterval: minimumInterval, notificationCooldown: cooldown, rawPayloads: rawPayloads,
-		accounts:          make(map[int64]*accountCheck),
-		pendingRejections: make(map[int64]reconnectRejection),
-		capacity:          make(chan struct{}, 3),
+		accounts: make(map[int64]*accountCheck),
+		capacity: make(chan struct{}, 3),
 	}
 }
 
@@ -134,11 +126,7 @@ func (r *Runner) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.L
 		state, done := r.acquireAccount(account.UserID, false)
 		if state != nil {
 			defer r.releaseAccount(state)
-			if err := r.db.SaveVerifiedLuxMedAccount(ctx, account); err != nil {
-				return err
-			}
-			r.clearPendingRejection(account.UserID)
-			return nil
+			return r.db.SaveVerifiedLuxMedAccount(ctx, account)
 		}
 
 		select {
@@ -363,14 +351,17 @@ func (r *Runner) deliverReconnect(ctx context.Context, user domain.User, now tim
 	if !ok {
 		return nil
 	}
-	if err := r.flushReconnectRejection(ctx, user.ID); err != nil {
+	replayCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	err := r.db.ReplayReconnectRejection(replayCtx, user.ID)
+	cancel()
+	if err != nil {
 		return err
 	}
-	attempt, err := r.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+	claim, err := r.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
 	if err != nil {
 		return fmt.Errorf("claim LuxMed reconnect delivery: %w", err)
 	}
-	if attempt == 0 {
+	if claim.Attempt == 0 {
 		return nil
 	}
 
@@ -384,45 +375,15 @@ func (r *Runner) deliverReconnect(ctx context.Context, user domain.User, now tim
 		return nil
 	}
 	if rejected, ok := errors.AsType[*ReconnectDeliveryRejected](sendErr); ok {
-		backoff := min(time.Hour, time.Minute<<min(attempt-1, 6))
-		r.mu.Lock()
-		r.pendingRejections[user.ID] = reconnectRejection{
-			attempt:        attempt,
-			retryAt:        time.Now().Add(max(backoff, rejected.RetryAfter)),
-			forbiddenLimit: rejected.ForbiddenLimit,
+		backoff := min(time.Hour, time.Minute<<min(claim.Attempt-1, 6))
+		retryAt := time.Now().Add(max(backoff, rejected.RetryAfter))
+		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		if err := r.db.JournalReconnectRejection(recordCtx, user.ID, claim, retryAt, rejected.ForbiddenLimit); err != nil {
+			sendErr = errors.Join(sendErr, fmt.Errorf("record LuxMed reconnect rejection: %w", err))
 		}
-		r.mu.Unlock()
-		sendErr = errors.Join(sendErr, r.flushReconnectRejection(ctx, user.ID))
 	}
 	return fmt.Errorf("send LuxMed reconnect warning: %w", sendErr)
-}
-
-// Persist an explicit rejection before another send. A failed write can be retried
-// by the normal reconnect checks without holding the account while the database is down.
-func (r *Runner) flushReconnectRejection(ctx context.Context, userID int64) error {
-	r.mu.Lock()
-	pending, ok := r.pendingRejections[userID]
-	r.mu.Unlock()
-	if !ok {
-		return nil
-	}
-
-	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-	defer cancel()
-	err := r.db.RecordLuxMedReconnectRejection(
-		recordCtx, userID, pending.attempt, pending.retryAt, pending.forbiddenLimit,
-	)
-	if err != nil {
-		return fmt.Errorf("record LuxMed reconnect rejection: %w", err)
-	}
-	r.clearPendingRejection(userID)
-	return nil
-}
-
-func (r *Runner) clearPendingRejection(userID int64) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	delete(r.pendingRejections, userID)
 }
 
 func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
@@ -436,7 +397,6 @@ func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
 	if err != nil {
 		return fmt.Errorf("resolve LuxMed reconnect status: %w", err)
 	}
-	r.clearPendingRejection(userID)
 	return nil
 }
 

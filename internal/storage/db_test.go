@@ -564,6 +564,8 @@ func TestReconnectDeliveryCounterMigration(t *testing.T) {
 		now := time.Now().UTC()
 		_, err = db.sql.ExecContext(ctx, `ALTER TABLE luxmed_reconnect_delivery DROP COLUMN forbidden_failures`)
 		must(err)
+		_, err = db.sql.ExecContext(ctx, `ALTER TABLE luxmed_reconnect_delivery DROP COLUMN claim_id`)
+		must(err)
 		_, err = db.sql.ExecContext(ctx, `
 			INSERT INTO luxmed_reconnect_delivery(user_id, attempts, retry_at) VALUES ($1, 3, $2)
 		`, user.ID, now.Add(time.Hour))
@@ -571,29 +573,29 @@ func TestReconnectDeliveryCounterMigration(t *testing.T) {
 		must(db.Migrate(ctx))
 		must(db.Migrate(ctx))
 
-		attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
 		must(err)
-		if attempt != 0 {
-			t.Fatalf("migration changed the existing retry time: attempt=%d", attempt)
+		if claim.Attempt != 0 {
+			t.Fatalf("migration changed the existing retry time: attempt=%d", claim.Attempt)
 		}
-		attempt, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Hour))
+		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Hour))
 		must(err)
-		if attempt != 4 {
-			t.Fatalf("migration changed the total attempt count: attempt=%d", attempt)
+		if claim.Attempt != 4 {
+			t.Fatalf("migration changed the total attempt count: attempt=%d", claim.Attempt)
 		}
 		for range 2 {
-			must(db.RecordLuxMedReconnectRejection(ctx, user.ID, 4, now.Add(8*time.Hour), 2))
+			must(db.RecordLuxMedReconnectRejection(ctx, user.ID, claim, now.Add(8*time.Hour), 2))
 		}
-		attempt, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(9*time.Hour))
+		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(9*time.Hour))
 		must(err)
-		if attempt != 5 {
-			t.Fatalf("legacy attempts consumed the new 403 budget: attempt=%d", attempt)
+		if claim.Attempt != 5 {
+			t.Fatalf("legacy attempts consumed the new 403 budget: attempt=%d", claim.Attempt)
 		}
-		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, 5, now.Add(15*time.Hour), 2))
-		attempt, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(16*time.Hour))
+		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, claim, now.Add(15*time.Hour), 2))
+		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(16*time.Hour))
 		must(err)
-		if attempt != 0 {
-			t.Fatalf("delivery resumed after reaching the 403 limit: attempt=%d", attempt)
+		if claim.Attempt != 0 {
+			t.Fatalf("delivery resumed after reaching the 403 limit: attempt=%d", claim.Attempt)
 		}
 	})
 }
@@ -737,6 +739,63 @@ func TestUpcomingHistoryPagesNearestFirst(t *testing.T) {
 		}
 		if want := []int{24, 48, 72, -2, -48}; !slices.Equal(got, want) {
 			t.Fatalf("hours from now across pages = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestReconnectJournalReplayIsScopedToDeliveryClaim(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		directory := t.TempDir()
+		must(db.SetReconnectJournalDirectory(directory))
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		must(err)
+		if claim.Attempt != 1 {
+			t.Fatalf("initial delivery claim: %+v", claim)
+		}
+
+		unavailable, cancel := context.WithCancel(ctx)
+		cancel()
+		err = db.JournalReconnectRejection(unavailable, user.ID, claim, now.Add(time.Hour), 2)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("simulated primary write failure: %v", err)
+		}
+		// Recreate the application-side storage handle with the same durable directory.
+		restarted := &DB{sql: db.sql, postgres: db.postgres}
+		must(restarted.SetReconnectJournalDirectory(directory))
+		must(restarted.ReplayReconnectRejection(ctx, user.ID))
+
+		next, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Hour))
+		must(err)
+		if next.Attempt != 2 || next.ID == claim.ID {
+			t.Fatalf("replay did not restore the retry: %+v", next)
+		}
+
+		err = restarted.JournalReconnectRejection(unavailable, user.ID, next, now.Add(3*time.Hour), 2)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("simulated failure before an episode was closed: %v", err)
+		}
+		must(db.ResolveLuxMedReconnect(ctx, user.ID))
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		replacement, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(4*time.Hour))
+		must(err)
+		if replacement.Attempt != 1 || replacement.ID == claim.ID || replacement.ID == next.ID {
+			t.Fatalf("replacement episode reused a delivery claim: %+v", replacement)
+		}
+		must(restarted.ReplayReconnectRejection(ctx, user.ID))
+		afterReplay, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(5*time.Hour))
+		must(err)
+		if afterReplay.Attempt != 0 {
+			t.Fatalf("old rejection made an unrelated delivery retryable: %+v", afterReplay)
 		}
 	})
 }

@@ -25,6 +25,8 @@ Set `DATABASE_URL` to a PostgreSQL URL to select PostgreSQL. If the URL is empty
 
 Selecting another database starts from the data already in that database. Keep the SQLite volume if it contains accounts or watches you want to retain. Back up the database and keep `APP_MASTER_KEY` separately.
 
+Keep the directory alongside `DATABASE_PATH` on persistent storage for either database backend. The app journals confirmed Telegram rejections in `<DATABASE_PATH>.reconnect` before updating the database, so it can honor the retry schedule after a restart. When an attempt has no durable outcome, the app suppresses automatic retries to avoid a possible duplicate.
+
 ## Telegram workflow
 
 - Open the bot in a private chat and use `/start`. Admins can issue a limited-use invite with `/invite [max_uses]`.

@@ -55,6 +55,25 @@ func TestNotifyLuxMedReconnectDeliveryOutcomes(t *testing.T) {
 			wantError: "telegram permanently rejected reconnect warning",
 		},
 		{
+			name: "blocked with truncated body", status: 403, truncated: true,
+			response: `{"ok":false,`, wantError: "telegram temporarily rejected reconnect warning",
+			retryAfter: 6 * time.Hour, forbiddenLimit: 4,
+		},
+		{
+			name: "bad request with truncated body", status: 400, truncated: true,
+			response: `{"ok":false,`, wantError: "telegram permanently rejected reconnect warning",
+		},
+		{
+			name: "unauthorized with truncated body", status: 401, truncated: true,
+			response: `{"ok":false,`, wantError: "telegram permanently rejected reconnect warning",
+		},
+		{
+			name: "explicit server rejection", status: 502,
+			response:   `{"ok":false,"error_code":502,"parameters":{"retry_after":42}}`,
+			wantError:  "telegram temporarily rejected reconnect warning",
+			retryAfter: 42 * time.Second,
+		},
+		{
 			name: "unknown", status: 502, response: "invalid body",
 			wantError: "telegram reconnect delivery outcome unknown",
 		},

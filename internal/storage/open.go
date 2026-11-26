@@ -17,8 +17,9 @@ import (
 )
 
 type DB struct {
-	sql      *sql.DB
-	postgres bool
+	sql                *sql.DB
+	postgres           bool
+	reconnectDirectory string
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {
@@ -31,7 +32,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("open SQLite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	return open(ctx, &DB{sql: db})
+	return open(ctx, &DB{sql: db, reconnectDirectory: path + ".reconnect"})
 }
 
 func OpenPostgres(ctx context.Context, dsn string) (*DB, error) {
@@ -106,15 +107,17 @@ func (db *DB) Migrate(ctx context.Context) error {
 	}
 	if db.postgres {
 		if _, err := tx.ExecContext(ctx, `
-			ALTER TABLE luxmed_reconnect_delivery ADD COLUMN IF NOT EXISTS forbidden_failures INTEGER NOT NULL DEFAULT 0
+			ALTER TABLE luxmed_reconnect_delivery ADD COLUMN IF NOT EXISTS forbidden_failures INTEGER NOT NULL DEFAULT 0,
+			    ADD COLUMN IF NOT EXISTS claim_id TEXT NOT NULL DEFAULT ''
 		`); err != nil {
-			return fmt.Errorf("add PostgreSQL reconnect rejection counter: %w", err)
+			return fmt.Errorf("add PostgreSQL reconnect delivery columns: %w", err)
 		}
 	} else {
 		for _, column := range []struct{ table, name, definition string }{
 			{"users", "preferred_city_id", "INTEGER"},
 			{"users", "preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
 			{"luxmed_reconnect_delivery", "forbidden_failures", "INTEGER NOT NULL DEFAULT 0"},
+			{"luxmed_reconnect_delivery", "claim_id", "TEXT NOT NULL DEFAULT ''"},
 		} {
 			var exists bool
 			err := tx.QueryRowContext(ctx, `

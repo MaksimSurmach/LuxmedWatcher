@@ -36,27 +36,30 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 	client := &reconnectHTTP{HTTPClient: api.Client, ctx: ctx}
 	api.Client = client
 	_, err := api.Request(msg)
-	if err == nil {
+	if err == nil && (client.status < http.StatusBadRequest || client.status >= http.StatusInternalServerError) {
 		return nil
 	}
 	rejected, apiRejected := errors.AsType[*tgbotapi.Error](err)
-	if client.status == http.StatusTooManyRequests {
-		delay := client.retryAfter
-		if apiRejected && rejected.Code == http.StatusTooManyRequests {
+	code, delay := client.status, client.retryAfter
+	if apiRejected {
+		// A 4xx HTTP response is decisive even if its body cannot be decoded.
+		if code < http.StatusBadRequest || code >= http.StatusInternalServerError {
+			code = rejected.Code
+		}
+		if rejected.Code == code {
 			delay = max(delay, time.Duration(rejected.RetryAfter)*time.Second)
 		}
-		return &scheduler.ReconnectDeliveryRejected{RetryAfter: delay}
 	}
-	if apiRejected {
-		switch {
-		case rejected.Code == http.StatusTooManyRequests || rejected.Code >= http.StatusInternalServerError:
-			return &scheduler.ReconnectDeliveryRejected{RetryAfter: time.Duration(rejected.RetryAfter) * time.Second}
-		case rejected.Code == http.StatusForbidden:
-			// The user may unblock the bot while the reconnect episode is still open.
-			return &scheduler.ReconnectDeliveryRejected{RetryAfter: 6 * time.Hour, ForbiddenLimit: 4}
-		case rejected.Code >= http.StatusBadRequest:
-			return errors.New("telegram permanently rejected reconnect warning")
-		}
+	switch {
+	case code == http.StatusTooManyRequests:
+		return &scheduler.ReconnectDeliveryRejected{RetryAfter: delay}
+	case code == http.StatusForbidden:
+		// The user may unblock the bot while the reconnect episode is still open.
+		return &scheduler.ReconnectDeliveryRejected{RetryAfter: max(6*time.Hour, delay), ForbiddenLimit: 4}
+	case code >= http.StatusBadRequest && code < http.StatusInternalServerError:
+		return errors.New("telegram permanently rejected reconnect warning")
+	case apiRejected && code >= http.StatusInternalServerError:
+		return &scheduler.ReconnectDeliveryRejected{RetryAfter: delay}
 	}
 	if client.failedBeforeConnection {
 		return &scheduler.ReconnectDeliveryRejected{BeforeSend: true}
@@ -80,7 +83,7 @@ func (c *reconnectHTTP) Do(req *http.Request) (*http.Response, error) {
 	res, err := c.HTTPClient.Do(req.WithContext(ctx))
 	if res != nil {
 		c.status = res.StatusCode
-		if value := res.Header.Get("Retry-After"); c.status == http.StatusTooManyRequests && value != "" {
+		if value := res.Header.Get("Retry-After"); value != "" {
 			if seconds, err := strconv.ParseUint(value, 10, 31); err == nil {
 				c.retryAfter = time.Duration(seconds) * time.Second
 			} else if date, err := http.ParseTime(value); err == nil {
