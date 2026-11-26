@@ -37,13 +37,13 @@ func TestNotificationSingleSlot(t *testing.T) {
 func TestNotificationGroupsSameStreetOnceAndSortsTimes(t *testing.T) {
 	b := testBot(t)
 	items := []domain.AppointmentHistory{
-		slot("Krakow", "Clinic A", "Main 1", "Dr B", 6, 8, 0),
-		slot("Krakow", "Clinic A", "Main 1", "Dr A", 5, 14, 0),
+		slot("Krakow", "Clinic A", " Main  1 ", "Dr B", 6, 8, 0),
+		slot("Krakow", "Clinic A", "MAIN 1", "Dr A", 5, 14, 0),
 		slot("Krakow", "Clinic A", "Main 1", "Dr A", 5, 9, 0),
 	}
-	text, _ := b.appointmentNotification("en", domain.Watch{}, items, 3, 10)
-	if strings.Count(text, "Main 1") != 1 || strings.Count(text, "Clinic A") != 1 {
-		t.Errorf("address repeated: %q", text)
+	text, shown := b.appointmentNotification("en", domain.Watch{}, items, 3, 10)
+	if shown != 3 || strings.Count(text, "\nMain 1\n") != 1 || strings.Count(text, "Clinic A") != 1 {
+		t.Errorf("expected all slots under one original address, got %d in %q", shown, text)
 	}
 	order := []string{"Jan 5, 2030", "09:00", "14:00", "Jan 6, 2030", "08:00"}
 	last := -1

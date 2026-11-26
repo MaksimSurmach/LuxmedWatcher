@@ -84,7 +84,7 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 }
 
 func slotPlace(item domain.AppointmentHistory) [3]string {
-	return [3]string{item.CityName, item.FacilityName, item.Address}
+	return [3]string{item.CityName, item.FacilityName, domain.NormalizeAppointmentAddress(item.Address)}
 }
 
 func dayOf(item domain.AppointmentHistory) string {
