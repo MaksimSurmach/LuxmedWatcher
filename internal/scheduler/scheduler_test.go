@@ -917,3 +917,41 @@ func TestConfirmedPartialSearchResolvesReconnect(t *testing.T) {
 		})
 	}
 }
+
+type timedOutSearchClient struct{ fakeLuxMed }
+
+func (c *timedOutSearchClient) SearchAppointments(ctx context.Context, _ domain.Watch) (luxmed.SearchResult, error) {
+	// A successful preview is followed by a detail request that exceeds the search deadline.
+	<-ctx.Done()
+	return luxmed.SearchResult{Checked: true}, errors.Join(luxmed.ErrPartialResults, ctx.Err())
+}
+
+func TestConfirmedSessionResolvesReconnectAfterSearchDeadline(t *testing.T) {
+	ctx := t.Context()
+	runner, db, watch := testRunner(t, nil)
+	runner.newClient = func(bool) luxmed.Client { return &timedOutSearchClient{} }
+	if err := db.BeginLuxMedReconnect(ctx, watch.UserID); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	if attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, watch.UserID, now); err != nil || attempt != 1 {
+		t.Fatalf("seed warning delivery: attempt=%d err=%v", attempt, err)
+	}
+	if err := db.RecordLuxMedReconnectRejection(ctx, watch.UserID, now.Add(time.Minute), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	searchCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	count, err := runner.ManualCheck(searchCtx, watch)
+	if count != 0 || !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, luxmed.ErrPartialResults) {
+		t.Fatalf("search: count=%d err=%v", count, err)
+	}
+	required, err := db.LuxMedReconnectRequired(ctx, watch.UserID)
+	if err != nil || required {
+		t.Fatalf("reconnect required after confirmed session = %t, err=%v", required, err)
+	}
+	if attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, watch.UserID, now.Add(time.Hour)); err != nil || attempt != 0 {
+		t.Fatalf("warning survived search deadline: attempt=%d err=%v", attempt, err)
+	}
+}

@@ -376,9 +376,12 @@ func (r *Runner) deliverReconnect(ctx context.Context, user domain.User, now tim
 }
 
 func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
-	required, err := r.db.LuxMedReconnectRequired(ctx, userID)
+	// Persist a confirmed session even if the search expires after a successful response.
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	required, err := r.db.LuxMedReconnectRequired(recordCtx, userID)
 	if err == nil && required {
-		err = r.db.ResolveLuxMedReconnect(ctx, userID)
+		err = r.db.ResolveLuxMedReconnect(recordCtx, userID)
 	}
 	if err != nil {
 		return fmt.Errorf("resolve LuxMed reconnect status: %w", err)
