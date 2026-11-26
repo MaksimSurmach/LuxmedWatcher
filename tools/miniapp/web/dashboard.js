@@ -355,10 +355,14 @@ function bookingDialog(slot) {
     // A late answer must not rewrite a dialog that now shows another time: announce it
     // and refresh the list once no dialog is open.
     if (!current(dialog, session)) {
-      flash(outcome);
-      if (tab !== 'history') return;
-      if (!dialog.open) void switchTab('history');
-      else dialog.addEventListener('close', () => void switchTab('history'), { once: true });
+      // switchTab clears announcements, so announce after the list is refreshed.
+      const refresh = async () => { await switchTab('history'); flash(outcome); };
+      if (tab !== 'history') flash(outcome);
+      else if (!dialog.open) void refresh();
+      else {
+        flash(outcome);
+        dialog.addEventListener('close', () => void refresh(), { once: true });
+      }
       return;
     }
     note.className = 'note outcome';
