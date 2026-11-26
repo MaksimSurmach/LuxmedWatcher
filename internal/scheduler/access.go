@@ -49,6 +49,10 @@ func (r *Runner) WithLuxMedClient(
 // SaveCredentials verifies a candidate within the gateway request budget. The
 // revision check at commit gives a concurrent Chrome choice or logout priority.
 func (r *Runner) SaveCredentials(ctx context.Context, user domain.User, creds luxmed.Credentials) error {
+	return r.SaveCredentialsForAttempt(ctx, user, creds, "")
+}
+
+func (r *Runner) SaveCredentialsForAttempt(ctx context.Context, user domain.User, creds luxmed.Credentials, id string) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	state, _ := r.acquireAccount(user.ID, false)
@@ -69,6 +73,14 @@ func (r *Runner) SaveCredentials(ctx context.Context, user domain.User, creds lu
 	if modeChanged || saveCanceled || !current.IsActive() {
 		return storage.ErrCredentialsChanged
 	}
+	var attempt *storage.CredentialAttempt
+	if id != "" {
+		attempt, ctx, err = r.db.BeginCredentialAttempt(ctx, r.cryptor, user, creds, id)
+		if err != nil {
+			return err
+		}
+		defer attempt.Finish()
+	}
 	client := r.newClient(r.rawPayloads)
 	// Leave time to commit and return a response after verification.
 	probeCtx, stop := context.WithTimeout(ctx, 12*time.Second)
@@ -82,7 +94,12 @@ func (r *Runner) SaveCredentials(ctx context.Context, user domain.User, creds lu
 		r.noteAccessFailure(state, err)
 		return err
 	}
-	sealed, err := r.db.SaveCredentials(ctx, r.cryptor, user, creds)
+	var sealed string
+	if attempt == nil {
+		sealed, err = r.db.SaveCredentials(ctx, r.cryptor, user, creds)
+	} else {
+		sealed, err = r.db.SaveCredentialAttempt(ctx, attempt)
+	}
 	if err != nil {
 		return fmt.Errorf("save verified LuxMed credentials: %w", err)
 	}

@@ -55,6 +55,7 @@ let cities;
 let tab = 'home';
 let flashTimer;
 let renderID = 0;
+let passwordSave = null;
 
 for (const target of document.querySelectorAll('[data-icon]')) target.innerHTML = icon(target.dataset.icon);
 
@@ -73,11 +74,12 @@ function flash(message) {
   flashTimer = setTimeout(() => { announcement.textContent = ''; }, 4000);
 }
 
-async function api(action, data = {}) {
+async function api(action, data = {}, attemptID = '') {
   let response;
   const headers = { 'Content-Type': 'application/json' };
   if (action === 'auth' || action === 'connect') headers['X-Telegram-Init-Data'] = telegram.initData;
   if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
+  if (attemptID) headers['X-LuxMed-Login-Attempt'] = attemptID;
   try {
     response = await fetch(`/api/dashboard/${action}`, {
       method: 'POST', redirect: 'error', cache: 'no-store',
@@ -150,8 +152,8 @@ function accountSection(compact = false) {
   </section>`;
 }
 
-async function signIn() {
-  const { url } = await api('connect');
+async function signIn(attemptID) {
+  const { url } = await api('connect', {}, attemptID);
   let target;
   try {
     target = new URL(url);
@@ -167,17 +169,37 @@ async function signIn() {
 function bindAccount() {
   const failure = main.querySelector('[data-account-error]');
   const connect = main.querySelector('#connect');
-  if (connect) connect.onclick = () => void run(connect, signIn, failure);
+  if (connect) connect.onclick = () => {
+    const attempt = passwordSave;
+    if (attempt) attempt.openingChrome = true;
+    void run(connect, async () => {
+      try {
+        await signIn(attempt?.id);
+      } catch (error) {
+        if (attempt) attempt.openingChrome = false;
+        throw error;
+      }
+    }, failure);
+  };
   const form = main.querySelector('#credentials');
   form.onsubmit = (event) => {
     event.preventDefault();
+    if (passwordSave?.saving || passwordSave?.openingChrome) return;
+    const attempt = { id: crypto.randomUUID(), saving: true, openingChrome: false };
+    passwordSave = attempt;
     void run(form.querySelector('button'), async () => {
       try {
-        await api('credentials', { Login: form.elements.login.value, Password: form.elements.password.value });
+        await api('credentials', { Login: form.elements.login.value, Password: form.elements.password.value }, attempt.id);
+      } catch (error) {
+        if (!attempt.openingChrome) throw error;
       } finally {
+        attempt.saving = false;
         form.elements.password.value = '';
       }
-      await switchTab(tab);
+      if (!attempt.openingChrome) {
+        passwordSave = null;
+        await switchTab(tab);
+      }
     }, failure);
   };
   const forget = main.querySelector('#forget-credentials');

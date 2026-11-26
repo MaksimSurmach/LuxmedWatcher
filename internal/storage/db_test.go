@@ -1239,10 +1239,22 @@ func TestChromeSelectionRestoresMigratedLoginAfterOverlappingSave(t *testing.T) 
 			t.Fatal(err)
 		}
 		creds := security.Credentials{Login: "fixture", Password: "candidate"}
-		if _, err := db.SaveCredentials(ctx, key, user, creds); err != nil {
+		attempt, probe, err := db.BeginCredentialAttempt(ctx, key, user, creds, "first")
+		if err != nil {
 			t.Fatal(err)
 		}
-		if err := db.ChooseChromeDuringPasswordSave(ctx, user, legacy); err != nil {
+		defer attempt.Finish()
+		if _, err := db.SaveCredentialAttempt(probe, attempt); err != nil {
+			t.Fatal(err)
+		}
+		current, err := db.UserByID(ctx, user.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ChooseBrowserLogin(ctx, current, db.CancelCredentialAttempt(user.TelegramUserID, "other")); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("unrelated or stale tab undid the login: %v", err)
+		}
+		if err := db.ChooseBrowserLogin(ctx, current, db.CancelCredentialAttempt(user.TelegramUserID, "first")); err != nil {
 			t.Fatal(err)
 		}
 		a, err := db.LuxMedAccount(ctx, user.ID)
@@ -1256,6 +1268,73 @@ func TestChromeSelectionRestoresMigratedLoginAfterOverlappingSave(t *testing.T) 
 		if err != nil || len(watches) != 1 || watches[0].ID != id ||
 			watches[0].Status != domain.WatchStatusActive || access.Status != LuxMedAccessPending {
 			t.Fatalf("Chrome switch lost search state: watches=%+v access=%+v err=%v", watches, access, err)
+		}
+	})
+}
+
+func TestCredentialTransitionsKeepModeAccessAndWatchesTogether(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42, Status: domain.UserStatusActive})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID, Status: domain.WatchStatusActive})
+		must(err)
+		key, err := security.NewCryptor(make([]byte, 32))
+		must(err)
+		creds := security.Credentials{Login: "fixture", Password: "synthetic"}
+		must(db.ResolveLuxMedReconnect(ctx, user.ID))
+
+		// Chrome accepts a cancellation while the verification is still outstanding.
+		pending, _, err := db.BeginCredentialAttempt(ctx, key, user, creds, "pending")
+		must(err)
+		defer pending.Finish()
+		must(db.ChooseBrowserLogin(ctx, user, db.CancelCredentialAttempt(user.TelegramUserID, "pending")))
+		if _, err := db.SaveCredentialAttempt(ctx, pending); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("late completion crossed a Chrome choice: %v", err)
+		}
+		user, err = db.UserByID(ctx, user.ID)
+		must(err)
+		_, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+		must(err)
+		if access.SavedLogin || access.HasCredentials || access.Status != LuxMedAccessConnected {
+			t.Fatalf("opening existing Chrome changed that mode: %+v", access)
+		}
+
+		// Two candidates can share a starting revision. Only the one that actually
+		// wrote the ciphertext may be rolled back by its matching Chrome click.
+		other, _, err := db.BeginCredentialAttempt(ctx, key, user, creds, "other")
+		must(err)
+		defer other.Finish()
+		winner, probe, err := db.BeginCredentialAttempt(ctx, key, user, creds, "winner")
+		must(err)
+		defer winner.Finish()
+		_, err = db.SaveCredentialAttempt(probe, winner)
+		must(err)
+		user, err = db.UserByID(ctx, user.ID)
+		must(err)
+		if err := db.ChooseBrowserLogin(ctx, user, db.CancelCredentialAttempt(user.TelegramUserID, "other")); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("wrong candidate undid the current login: %v", err)
+		}
+		_, access, err = db.WatchesWithReconnectState(ctx, user.ID)
+		must(err)
+		if !access.SavedLogin || !access.HasCredentials || access.Status != LuxMedAccessPending {
+			t.Fatalf("new password mode did not require protected verification: %+v", access)
+		}
+		must(db.ResolveLuxMedReconnect(ctx, user.ID))
+		must(db.DeleteLuxMedAccount(ctx, user.ID))
+		watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+		must(err)
+		if access.SavedLogin || access.HasCredentials || access.Status != LuxMedAccessUnchecked ||
+			len(watches) != 1 || watches[0].Status != domain.WatchStatusPaused {
+			t.Fatalf("logout returned stale mode, access or watches: %+v %+v", access, watches)
+		}
+		if _, err := db.SaveCredentialAttempt(ctx, winner); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("completed login was allowed to undo logout: %v", err)
 		}
 	})
 }

@@ -17,6 +17,10 @@ func (db *DB) SaveCredentials(ctx context.Context, key *security.Cryptor, owner 
 	if err != nil {
 		return "", err
 	}
+	return db.saveSealedCredentials(ctx, owner, sealed)
+}
+
+func (db *DB) saveSealedCredentials(ctx context.Context, owner domain.User, sealed string) (string, error) {
 	// Verification calls LUX MED outside the transaction. A later opt-out or
 	// logout takes precedence even when no credentials existed before that call.
 	tx, err := db.sql.BeginTx(ctx, nil)
@@ -106,12 +110,21 @@ func (db *DB) ConfirmBrowserLogin(ctx context.Context, owner domain.User) error 
 	return err
 }
 
-// ChooseChromeDuringPasswordSave fences an attempt that began in Chrome mode.
-// If it committed first, undo only that revision and restore any migrated row.
-func (db *DB) ChooseChromeDuringPasswordSave(ctx context.Context, owner domain.User, previous domain.LuxMedAccount) error {
-	if previous.UseSavedLogin || (previous.UserID != 0 && previous.UserID != owner.ID) {
-		return ErrCredentialsChanged
+// ChooseBrowserLogin opens Chrome or cancels a specified, overlapping save.
+// An already committed save may be undone only if its exact ciphertext matches.
+func (db *DB) ChooseBrowserLogin(ctx context.Context, user domain.User, attempt *CredentialAttempt) error {
+	if attempt == nil || attempt.owner.ID != user.ID || attempt.previous.UseSavedLogin {
+		return db.ConfirmBrowserLogin(ctx, user)
 	}
+	err := db.chooseChromeDuringSave(ctx, attempt)
+	if errors.Is(err, ErrCredentialsChanged) {
+		return db.ConfirmBrowserLogin(ctx, user)
+	}
+	return err
+}
+
+func (db *DB) chooseChromeDuringSave(ctx context.Context, attempt *CredentialAttempt) error {
+	owner, previous := attempt.owner, attempt.previous
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -134,9 +147,10 @@ func (db *DB) ChooseChromeDuringPasswordSave(ctx context.Context, owner domain.U
 	// Read the account after taking the user row lock. In PostgreSQL a waiter
 	// can see the updated user row before a new statement sees the account write.
 	var savedMode bool
+	var sealed string
 	err = tx.QueryRowContext(ctx, `
-		SELECT use_saved_login FROM luxmed_accounts WHERE user_id=$1
-	`, owner.ID).Scan(&savedMode)
+		SELECT use_saved_login, encrypted_password FROM luxmed_accounts WHERE user_id=$1
+	`, owner.ID).Scan(&savedMode, &sealed)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
@@ -145,6 +159,9 @@ func (db *DB) ChooseChromeDuringPasswordSave(ctx context.Context, owner domain.U
 	}
 	if revision == owner.CredentialRevision {
 		return tx.Commit()
+	}
+	if sealed != attempt.sealed {
+		return ErrCredentialsChanged
 	}
 	if previous.UserID == owner.ID {
 		if err := upsertLuxMedAccount(ctx, tx, previous); err != nil {

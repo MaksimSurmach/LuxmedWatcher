@@ -446,7 +446,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	b.handleAction(ctx, cb.From.ID, data, attempt)
 }
 
-func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, attempt *passwordAttempt) {
+func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, attempt *storage.CredentialAttempt) {
 	user, err := b.db.UserByTelegramID(ctx, telegramID)
 	if err != nil {
 		return
@@ -499,14 +499,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 			return
 		}
 		b.clearFlow(user.ID)
-		var err error
-		overlapsSave := attempt != nil && attempt.owner.ID == user.ID && !attempt.previous.UseSavedLogin
-		if overlapsSave {
-			err = b.db.ChooseChromeDuringPasswordSave(ctx, attempt.owner, attempt.previous)
-		}
-		if !overlapsSave || errors.Is(err, storage.ErrCredentialsChanged) {
-			err = b.db.ConfirmBrowserLogin(ctx, user)
-		}
+		err := b.db.ChooseBrowserLogin(ctx, user, attempt)
 		if errors.Is(err, storage.ErrCredentialsChanged) {
 			b.showConnect(ctx, user)
 			return

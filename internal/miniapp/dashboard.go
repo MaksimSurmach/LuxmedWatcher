@@ -40,7 +40,7 @@ type dashboard struct {
 	connect      func(context.Context, int64) (string, error)
 	runner       *scheduler.Runner
 	checkAccount func(context.Context, domain.User) (scheduler.BrowserSessionCheck, error)
-	saveLogin    func(context.Context, domain.User, luxmed.Credentials) error
+	saveLogin    func(context.Context, domain.User, luxmed.Credentials, string) error
 }
 
 func Dashboard(
@@ -52,7 +52,7 @@ func Dashboard(
 ) http.Handler {
 	d := &dashboard{
 		cfg: cfg, key: productionKey(), sessions: newSessions(), db: db, browsers: browsers,
-		connect: app.Link, runner: runner, saveLogin: runner.SaveCredentials, checkAccount: runner.CheckBrowserSession,
+		connect: app.Link, runner: runner, saveLogin: runner.SaveCredentialsForAttempt, checkAccount: runner.CheckBrowserSession,
 	}
 	return d.handler()
 }
@@ -76,7 +76,7 @@ func (d *dashboard) handler() http.Handler {
 		dashboardResult(w, nil, d.db.ForgetCredentials(r.Context(), user.ID))
 	}))
 	mux.HandleFunc("POST "+dashboardPrefix+"account", dashboardDeadline(d.authorize(d.account)))
-	mux.HandleFunc("POST "+dashboardPrefix+"connect", d.authorize(d.openBrowser))
+	mux.HandleFunc("POST "+dashboardPrefix+"connect", d.browserLogin)
 	mux.HandleFunc("POST "+dashboardPrefix+"viewer-access", d.authorizeTelegram(func(w http.ResponseWriter, _ *http.Request, _ domain.User) {
 		reply(w, http.StatusNoContent, nil)
 	}))
@@ -156,11 +156,6 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
-	stored, err := d.db.LuxMedAccount(r.Context(), user.ID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		dashboardResult(w, nil, err)
-		return
-	}
 	reply(w, http.StatusOK, struct {
 		SavedLogin         bool
 		HasCredentials     bool
@@ -173,7 +168,7 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		ReconnectRequired  bool
 		ReconnectEpisodeID string `json:",omitempty"`
 		AccountStatus      storage.LuxMedAccessStatus
-	}{stored.UseSavedLogin, err == nil, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
+	}{access.SavedLogin, access.HasCredentials, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
 		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.Status})
 }
@@ -514,7 +509,12 @@ func (d *dashboard) saveCredentials(w http.ResponseWriter, r *http.Request, user
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
-	dashboardResult(w, nil, d.saveLogin(r.Context(), user, creds))
+	id, ok := credentialAttemptID(r)
+	if !ok {
+		reply(w, http.StatusBadRequest, nil)
+		return
+	}
+	dashboardResult(w, nil, d.saveLogin(r.Context(), user, creds, id))
 }
 
 func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -550,12 +550,43 @@ func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.
 	reply(w, http.StatusOK, result)
 }
 
-func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User) {
-	if !authorizedUser(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, user.TelegramUserID, time.Now(), d.key) {
+func credentialAttemptID(r *http.Request) (string, bool) {
+	id := r.Header.Get("X-LuxMed-Login-Attempt")
+	if len(id) > 64 {
+		return "", false
+	}
+	for _, c := range id {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return "", false
+		}
+	}
+	return id, true
+}
+
+func (d *dashboard) browserLogin(w http.ResponseWriter, r *http.Request) {
+	id, ok := d.sessions.verify(r.Header.Get("Authorization"), time.Now())
+	if !ok || r.Header.Get("Origin") != d.cfg.Origin ||
+		!authorizedUser(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, id, time.Now(), d.key) {
 		reply(w, http.StatusUnauthorized, nil)
 		return
 	}
-	if err := d.db.ConfirmBrowserLogin(r.Context(), user); err != nil {
+	token, ok := credentialAttemptID(r)
+	if !ok {
+		reply(w, http.StatusBadRequest, nil)
+		return
+	}
+	if d.browsers[id] == nil {
+		reply(w, http.StatusForbidden, nil)
+		return
+	}
+	attempt := d.db.CancelCredentialAttempt(id, token)
+	d.withUser(func(w http.ResponseWriter, r *http.Request, user domain.User) {
+		d.openBrowser(w, r, user, attempt)
+	}, func(*http.Request) (int64, bool) { return id, true })(w, r)
+}
+
+func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User, attempt *storage.CredentialAttempt) {
+	if err := d.db.ChooseBrowserLogin(r.Context(), user, attempt); err != nil {
 		dashboardResult(w, nil, err)
 		return
 	}

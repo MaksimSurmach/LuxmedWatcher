@@ -99,7 +99,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		syncedLocales = append(syncedLocales, persisted.Locale)
 	}
 	handler := d.handler()
-	request := func(action, body, requestOrigin, identity string, want int) *httptest.ResponseRecorder {
+	request := func(action, body, requestOrigin, identity string, want int, attemptID ...string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, dashboardPrefix+action, strings.NewReader(body))
 		req.Header.Set("Origin", requestOrigin)
@@ -110,6 +110,9 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		}
 		if action == "connect" {
 			req.Header.Set("X-Telegram-Init-Data", signTelegram(owner.TelegramUserID, 12, time.Now(), priv))
+		}
+		if len(attemptID) != 0 {
+			req.Header.Set("X-LuxMed-Login-Attempt", attemptID[0])
 		}
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
@@ -163,12 +166,21 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		t.Fatalf("explicit Mini App removal retained migrated credentials: %v", err)
 	}
 	const secret = "  example password  "
-	d.saveLogin = func(ctx context.Context, user domain.User, creds luxmed.Credentials) error {
+	d.saveLogin = func(ctx context.Context, user domain.User, creds luxmed.Credentials, id string) error {
 		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 17*time.Second {
 			t.Error("credential request does not reserve time for the gateway response")
 		}
 		if creds.Login != "patient" || creds.Password != secret {
 			return luxmed.ErrAuthentication
+		}
+		if id != "" {
+			attempt, ctx, err := db.BeginCredentialAttempt(ctx, cryptor, user, creds, id)
+			if err != nil {
+				return err
+			}
+			defer attempt.Finish()
+			_, err = db.SaveCredentialAttempt(ctx, attempt)
+			return err
 		}
 		_, err := db.SaveCredentials(ctx, cryptor, user, creds)
 		return err
@@ -177,6 +189,11 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	request("credentials", validLogin, origin, "", http.StatusUnauthorized)
 	request("credentials", validLogin, "https://other.example", token, http.StatusUnauthorized)
 	request("credentials", `{"Login":"  ","Password":"x"}`, origin, token, http.StatusBadRequest)
+	request("credentials", validLogin, origin, token, http.StatusNoContent, "commit-first")
+	request("connect", "{}", origin, token, http.StatusPreconditionFailed, "different-attempt")
+	request("connect", "{}", origin, token, http.StatusOK, "commit-first")
+	request("connect", "{}", origin, token, http.StatusOK, "click-first")
+	request("credentials", validLogin, origin, token, http.StatusPreconditionFailed, "click-first")
 	request("credentials", validLogin, origin, token, http.StatusNoContent)
 	request("connect", "{}", origin, token, http.StatusPreconditionFailed)
 	request("credentials", `{"Login":"patient","Password":"wrong"}`, origin, token, http.StatusConflict)

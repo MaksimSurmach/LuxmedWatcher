@@ -21,6 +21,7 @@ type DB struct {
 	sql                *sql.DB
 	postgres           bool
 	reconnectDirectory string
+	credentialAttempts sync.Map // credentialAttemptKey to *CredentialAttempt.
 	pendingRejections  sync.Map // reconnectJournalKey to an outcome awaiting a durable write
 }
 

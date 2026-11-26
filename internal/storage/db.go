@@ -312,6 +312,9 @@ func (db *DB) removeCredentials(ctx context.Context, userID int64, pauseWatches 
 		if _, err := tx.ExecContext(ctx, `UPDATE watches SET status=$1, updated_at=$2 WHERE user_id=$3 AND status=$4`, domain.WatchStatusPaused, time.Now().UTC(), userID, domain.WatchStatusActive); err != nil {
 			return err
 		}
+		if err := setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessUnchecked, false); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
