@@ -161,7 +161,7 @@ func (db *DB) BrowserLoginMode(ctx context.Context, userID int64) (revision int6
 func (db *DB) switchToBrowserLogin(ctx context.Context, owner domain.User) error {
 	return db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
 		err := requireOneRow(tx.ExecContext(ctx, `
-			UPDATE luxmed_accounts SET use_saved_login=FALSE WHERE user_id=$1 AND use_saved_login
+			DELETE FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login
 		`, owner.ID))
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrCredentialsChanged

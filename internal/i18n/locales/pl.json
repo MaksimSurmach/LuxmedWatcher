@@ -1,6 +1,6 @@
 {
   "button.chrome": "Zaloguj się przez Chrome",
-  "button.chrome_switch": "Przejdź na Chrome i zachowaj dane logowania",
+  "button.chrome_switch": "Przejdź na Chrome i usuń dane logowania",
   "button.saved_login": "Zapisz login i hasło",
   "button.delete_credentials": "Usuń zapisane dane logowania",
   "widget.login_method": "Wybierz sposób logowania.",

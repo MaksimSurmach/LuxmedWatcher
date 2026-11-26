@@ -1,6 +1,6 @@
 {
   "button.chrome": "Войти через Chrome",
-  "button.chrome_switch": "Перейти на Chrome и сохранить данные входа",
+  "button.chrome_switch": "Перейти на Chrome и удалить данные входа",
   "button.saved_login": "Сохранить логин и пароль",
   "button.delete_credentials": "Удалить сохранённые данные входа",
   "widget.login_method": "Выберите способ входа.",

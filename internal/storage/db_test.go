@@ -754,23 +754,25 @@ func TestCredentialMigrationAndModeSwitch(t *testing.T) {
 		if len(ids) != 0 {
 			t.Fatal("password mode scheduled browser renewal")
 		}
-		must(db.ForgetCredentials(ctx, user.ID))
+		revision := current.CredentialRevision
+		choice := db.SelectBrowserLoginAtRevision(user.TelegramUserID, &revision, true)
+		must(db.ChooseBrowserLogin(ctx, current, choice))
+		if _, err := db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("switching to Chrome did not delete the account: %v", err)
+		}
+		watch, err := db.Watch(ctx, id)
+		must(err)
+		if watch.Status != domain.WatchStatusActive {
+			t.Fatal("switching mode paused the watch")
+		}
 		if _, err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
-			t.Fatalf("late save after forgetting: %v", err)
+			t.Fatalf("late save after switching to Chrome: %v", err)
 		}
 		current, err = db.UserByID(ctx, user.ID)
 		must(err)
 		must(db.ConfirmBrowserLogin(ctx, current))
 		if _, err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
 			t.Fatalf("late save after choosing Chrome: %v", err)
-		}
-		if _, err := db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
-			t.Fatal("credentials restored after opt-out", err)
-		}
-		watch, err := db.Watch(ctx, id)
-		must(err)
-		if watch.Status != domain.WatchStatusActive {
-			t.Fatal("switching mode paused the watch")
 		}
 		ids, err = db.ActiveBrowserWatchTelegramIDs(ctx)
 		must(err)

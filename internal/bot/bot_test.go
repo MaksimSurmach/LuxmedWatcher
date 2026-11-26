@@ -618,11 +618,9 @@ func TestTelegramChromeOpeningKeepsMigratedCredentialsUntilExplicitRemoval(t *te
 	}
 	switchAction := fmt.Sprintf("connect:switch:%d", revision)
 	b.handleAction(ctx, user.TelegramUserID, switchAction, b.selectChrome(user.TelegramUserID, switchAction))
-	retained, err := b.db.LuxMedAccount(ctx, user.ID)
-	if err != nil || retained.UseSavedLogin || retained.EncryptedPassword == "" || opened.Load() != 2 {
-		t.Fatalf("fresh confirmation failed to select Chrome and retain credentials: opened=%d err=%v", opened.Load(), err)
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) || opened.Load() != 2 {
+		t.Fatalf("fresh confirmation failed to select Chrome and delete credentials: opened=%d err=%v", opened.Load(), err)
 	}
-	b.handleAction(ctx, user.TelegramUserID, "connect:forget", nil)
 	b.handleAction(ctx, user.TelegramUserID, "connect:chrome", nil)
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) || opened.Load() != 3 {
 		t.Fatalf("Chrome did not open after explicit opt-out: opened=%d error=%v", opened.Load(), err)
