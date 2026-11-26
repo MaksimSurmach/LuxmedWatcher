@@ -641,3 +641,64 @@ func TestBrowserBusyReleasesOnlyUnusedSearchReservation(t *testing.T) {
 		})
 	}
 }
+
+func TestReconnectDeliveryAfterTelegramUnblocks(t *testing.T) {
+	ctx := t.Context()
+	attempts, delivered := 0, 0
+	blocked := true
+	notifier := reconnectNotifierFunc{send: func() error {
+		attempts++
+		if blocked {
+			return &ReconnectDeliveryRejected{RetryAfter: 6 * time.Hour, MaxAttempts: 4}
+		}
+		delivered++
+		return nil
+	}}
+	runner, db, watch := testRunner(t, notifier)
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.requireReconnect(ctx, user); err == nil {
+		t.Fatal("expected rejection while blocked")
+	}
+
+	restarted := NewRunner(db, nil, notifier, 0, time.Hour, false)
+	blocked = false
+	now := time.Now()
+	if err := restarted.deliverReconnect(ctx, user, now.Add(time.Hour)); err != nil || attempts != 1 {
+		t.Fatalf("retry before the cooldown: attempts=%d err=%v", attempts, err)
+	}
+	if err := restarted.deliverReconnect(ctx, user, now.Add(7*time.Hour)); err != nil || delivered != 1 {
+		t.Fatalf("retry after unblocking: delivered=%d err=%v", delivered, err)
+	}
+	if err := restarted.deliverReconnect(ctx, user, now.Add(48*time.Hour)); err != nil || attempts != 2 || delivered != 1 {
+		t.Fatalf("duplicate after acceptance: attempts=%d delivered=%d err=%v", attempts, delivered, err)
+	}
+}
+
+func TestReconnectDeliveryStopsAfterBlockedRetryLimit(t *testing.T) {
+	ctx := t.Context()
+	const limit = 4
+	attempts := 0
+	notifier := reconnectNotifierFunc{send: func() error {
+		attempts++
+		return &ReconnectDeliveryRejected{RetryAfter: 6 * time.Hour, MaxAttempts: limit}
+	}}
+	runner, db, watch := testRunner(t, notifier)
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.requireReconnect(ctx, user); err == nil {
+		t.Fatal("expected rejection while blocked")
+	}
+	for attempt := 2; attempt <= limit; attempt++ {
+		if err := runner.deliverReconnect(ctx, user, time.Now().Add(7*time.Hour)); err == nil {
+			t.Fatalf("expected rejection on attempt %d", attempt)
+		}
+	}
+	if err := runner.deliverReconnect(ctx, user, time.Now().Add(24*time.Hour)); err != nil || attempts != limit {
+		t.Fatalf("retry limit not respected: attempts=%d err=%v", attempts, err)
+	}
+}

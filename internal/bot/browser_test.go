@@ -16,11 +16,12 @@ import (
 
 func TestNotifyLuxMedReconnectDeliveryOutcomes(t *testing.T) {
 	for _, test := range []struct {
-		name       string
-		status     int
-		response   string
-		wantError  string
-		retryAfter time.Duration
+		name        string
+		status      int
+		response    string
+		wantError   string
+		retryAfter  time.Duration
+		maxAttempts int
 	}{
 		{
 			name: "accepted", status: 200,
@@ -34,7 +35,14 @@ func TestNotifyLuxMedReconnectDeliveryOutcomes(t *testing.T) {
 		},
 		{
 			name: "blocked", status: 403,
-			response:  `{"ok":false,"error_code":403,"description":"bot was blocked by the user"}`,
+			response:    `{"ok":false,"error_code":403,"description":"bot was blocked by the user"}`,
+			wantError:   "telegram temporarily rejected reconnect warning",
+			retryAfter:  6 * time.Hour,
+			maxAttempts: 4,
+		},
+		{
+			name: "bad request", status: 400,
+			response:  `{"ok":false,"error_code":400}`,
 			wantError: "telegram permanently rejected reconnect warning",
 		},
 		{
@@ -66,7 +74,7 @@ func TestNotifyLuxMedReconnectDeliveryOutcomes(t *testing.T) {
 				t.Fatalf("delivery error = %v, want %s", err, test.wantError)
 			}
 			rejection, retryable := errors.AsType[*scheduler.ReconnectDeliveryRejected](err)
-			if retryable != (test.retryAfter > 0) || retryable && rejection.RetryAfter != test.retryAfter {
+			if retryable != (test.retryAfter > 0) || retryable && (rejection.RetryAfter != test.retryAfter || rejection.MaxAttempts != test.maxAttempts) {
 				t.Fatalf("incorrect retry classification: %v", rejection)
 			}
 		})
