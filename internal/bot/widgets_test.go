@@ -180,9 +180,11 @@ func TestBookCommandOpensOfficialReservationPage(t *testing.T) {
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":51}}`)
 	})
 	user := createUser(t, b, 101, domain.UserStatusActive)
-	b.handleCommand(t.Context(), user, &tgbotapi.Message{
+	b.handleUpdate(t.Context(), tgbotapi.Update{Message: &tgbotapi.Message{
+		From: &tgbotapi.User{ID: user.TelegramUserID},
+		Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
 		Text: "/book", Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: 5}},
-	})
+	}})
 	select {
 	case <-sent:
 	default:

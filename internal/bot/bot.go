@@ -249,12 +249,13 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	}
 	message := update.Message
 	telegramID := message.From.ID
-	switch message.Command() {
+	command := b.messageCommand(message)
+	switch command {
 	case "logout_luxmed", "connect":
 		b.db.CancelActiveCredentialAttempt(telegramID)
 	}
 	state := b.getFlow(telegramID)
-	credentialMessage := state.receivesCredential(message)
+	credentialMessage := state.receivesCredential(command)
 	if credentialMessage {
 		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(telegramID, message.MessageID)); err != nil {
 			b.logger.Warn("could not delete Telegram credential message")
@@ -290,8 +291,8 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		b.handleText(ctx, user, value)
 		return
 	}
-	if message.IsCommand() {
-		b.handleCommand(ctx, user, message)
+	if command != "" {
+		b.handleCommand(ctx, user, message, command)
 		return
 	}
 	b.handleText(ctx, user, strings.TrimSpace(message.Text))
@@ -328,8 +329,7 @@ func (b *Bot) upsertUser(ctx context.Context, msg *tgbotapi.Message) (domain.Use
 	return user, nil
 }
 
-func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi.Message) {
-	command := msg.Command()
+func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi.Message, command string) {
 	if !user.IsActive() && command != "start" && command != "language" && command != "menu" && command != "cancel" {
 		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
 		return

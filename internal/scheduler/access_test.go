@@ -430,12 +430,24 @@ func TestRejectedPasswordSubmissionKeepsAcceptedChromeChoice(t *testing.T) {
 	}
 }
 
-func TestChatOnlySaveNeedsAuthenticationWithoutCityCatalog(t *testing.T) {
+func TestChatSaveNeedsAuthenticationWithoutCityCatalog(t *testing.T) {
+	for _, scenario := range []string{"password only", "Chrome without Mini App"} {
+		t.Run(scenario, func(t *testing.T) {
+			checkChatCredentialSave(t, scenario == "Chrome without Mini App")
+		})
+	}
+}
+
+func checkChatCredentialSave(t *testing.T, withChrome bool) {
+	t.Helper()
 	ctx := t.Context()
 	runner, db, watch := testRunner(t, nil)
 	user, err := db.UserByID(ctx, watch.UserID)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if withChrome {
+		runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: {}})
 	}
 	cityCalls := 0
 	client := &catalogClient{
@@ -446,10 +458,14 @@ func TestChatOnlySaveNeedsAuthenticationWithoutCityCatalog(t *testing.T) {
 	}
 	runner.newClient = func(bool) luxmed.Client { return client }
 	want := luxmed.Credentials{Login: "fixture", Password: "replacement"}
-	if err := runner.SaveCredentials(ctx, user, want); err != nil {
+	attempt, err := db.StartCredentialAttempt(ctx, user, "")
+	if err != nil {
 		t.Fatal(err)
 	}
-	account, err := db.LoginAccount(ctx, user.ID, false)
+	if err := runner.VerifyChatCredentialAttempt(user, want, attempt); err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.LoginAccount(ctx, user.ID, withChrome)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -127,11 +127,12 @@ func TestFirstPasswordLoginSavesCredentialsWhenHistoryIsUnavailable(t *testing.T
 	user := createUser(t, b, 10, domain.UserStatusActive)
 	b.newClient = func(bool) luxmed.Client { return authClient{historyErr: luxmed.ErrUnavailable} }
 	b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountPass, Login: "example"})
-	const password = "/watches"
+	const command = "/logout_luxmed"
+	const password = command + " fixture"
 	b.handleUpdate(ctx, tgbotapi.Update{Message: &tgbotapi.Message{
 		MessageID: 1, From: &tgbotapi.User{ID: user.TelegramUserID},
 		Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
-		Text: password, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(password)}},
+		Text: password, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(command)}},
 	}})
 	b.workers.Wait()
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
@@ -865,15 +866,24 @@ func TestTelegramLogoutCancelsPasswordVerificationAndPausesSearches(t *testing.T
 		t.Fatal("login did not start")
 	}
 	const command = "/logout_luxmed"
-	b.handleUpdate(ctx, tgbotapi.Update{Message: &tgbotapi.Message{
-		MessageID: 20,
-		From:      &tgbotapi.User{ID: user.TelegramUserID},
-		Chat:      &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
-		Text:      command, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(command)}},
-	}})
+	send := func(id int, text string) {
+		b.handleUpdate(ctx, tgbotapi.Update{Message: &tgbotapi.Message{
+			MessageID: id,
+			From:      &tgbotapi.User{ID: user.TelegramUserID},
+			Chat:      &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
+			Text:      text, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(command)}},
+		}})
+	}
+	send(20, command+" fixture")
+	beforeLogout, err := b.db.UserByID(ctx, user.ID)
+	if err != nil || beforeLogout.CredentialRevisions() != user.CredentialRevisions() || deleted.Load() != 1 {
+		t.Fatalf("command prefix affected the login state: revisions=%+v deleted=%d err=%v",
+			beforeLogout.CredentialRevisions(), deleted.Load(), err)
+	}
+	send(21, command)
 	releaseLogin()
 	b.workers.Wait()
-	if deleted.Load() != 0 {
+	if deleted.Load() != 1 {
 		t.Fatal("logout was treated as a password message")
 	}
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {

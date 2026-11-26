@@ -60,10 +60,18 @@ func (r *Runner) SaveCredentialsForAttempt(ctx context.Context, user domain.User
 	if err != nil {
 		return err
 	}
-	return r.VerifyCredentialAttempt(user, creds, attempt)
+	return r.verifyCredentialAttempt(user, creds, attempt, r.browsers != nil)
 }
 
-func (r *Runner) VerifyCredentialAttempt(user domain.User, creds luxmed.Credentials, attempt *storage.CredentialAttempt) error {
+// VerifyChatCredentialAttempt validates the password before saving it.
+// The scheduled search verifies access to protected results.
+func (r *Runner) VerifyChatCredentialAttempt(user domain.User, creds luxmed.Credentials, attempt *storage.CredentialAttempt) error {
+	return r.verifyCredentialAttempt(user, creds, attempt, false)
+}
+
+func (r *Runner) verifyCredentialAttempt(
+	user domain.User, creds luxmed.Credentials, attempt *storage.CredentialAttempt, checkCatalog bool,
+) error {
 	defer attempt.Finish()
 	ctx, cancel := context.WithTimeout(attempt.Context(), 15*time.Second)
 	defer cancel()
@@ -92,7 +100,7 @@ func (r *Runner) VerifyCredentialAttempt(user domain.User, creds luxmed.Credenti
 	// Leave time to commit and return a response after verification.
 	probeCtx, stop := context.WithTimeout(ctx, 12*time.Second)
 	err = client.Authenticate(probeCtx, creds)
-	if err == nil && r.browsers != nil {
+	if err == nil && checkCatalog {
 		_, err = client.GetCities(probeCtx)
 	}
 	err = errors.Join(probeCtx.Err(), err)
