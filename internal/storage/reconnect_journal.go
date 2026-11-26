@@ -65,7 +65,7 @@ func (db *DB) journalReconnectOutcome(ctx context.Context, userID int64, outcome
 		}
 		journalErr = fmt.Errorf("write reconnect journal: %w", journalErr)
 	}
-	applied, err := db.persistReconnectRejection(ctx, userID, outcome)
+	applied, err := db.persistReconnectOutcomeWithoutFile(ctx, userID, outcome)
 	if err != nil || !applied {
 		db.pendingRejections.Store(reconnectJournalKey{userID, outcome.Claim.ID}, outcome)
 		return errors.Join(journalErr, err)
@@ -79,7 +79,7 @@ func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error 
 		if key.(reconnectJournalKey).userID != userID {
 			return true
 		}
-		applied, err := db.persistReconnectRejection(ctx, userID, value.(reconnectRejection))
+		applied, err := db.persistReconnectOutcomeWithoutFile(ctx, userID, value.(reconnectRejection))
 		if err != nil {
 			replayErr = fmt.Errorf("persist pending reconnect rejection: %w", err)
 			return false
@@ -89,8 +89,16 @@ func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error 
 		}
 		return true
 	})
-	if replayErr != nil || db.reconnectDirectory == "" {
+	if replayErr != nil {
 		return replayErr
+	}
+	if db.postgres {
+		if err := db.replayUnsentReconnectReservations(ctx, userID); err != nil {
+			return err
+		}
+	}
+	if db.reconnectDirectory == "" {
+		return nil
 	}
 	entries, err := os.ReadDir(db.reconnectDirectory)
 	if errors.Is(err, os.ErrNotExist) {
@@ -111,6 +119,35 @@ func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error 
 		replayErr = errors.Join(replayErr, err)
 	}
 	return replayErr
+}
+
+func (db *DB) persistReconnectOutcomeWithoutFile(ctx context.Context, userID int64, outcome reconnectRejection) (bool, error) {
+	applied, err := db.persistReconnectRejection(ctx, userID, outcome)
+	if err != nil || applied || !db.postgres || !outcome.UnconfirmedClaim {
+		return applied, err
+	}
+	// The reservation may not be visible yet. Persist its outcome independently.
+	_, err = db.sql.ExecContext(ctx, `
+		INSERT INTO luxmed_reconnect_unsent (user_id, claim_id, retry_at)
+		VALUES ($1, $2, $3) ON CONFLICT (user_id, claim_id) DO NOTHING
+	`, userID, outcome.Claim.ID, outcome.RetryAt.UTC())
+	return err == nil, err
+}
+
+func (db *DB) replayUnsentReconnectReservations(ctx context.Context, userID int64) error {
+	// Rows lacking a visible reservation stay queued. Updating and consuming a match is atomic.
+	_, err := db.sql.ExecContext(ctx, `
+		WITH applied AS (
+			UPDATE luxmed_reconnect_delivery d
+			SET retry_at=u.retry_at, last_failure_forbidden=FALSE
+			FROM luxmed_reconnect_unsent u
+			WHERE d.user_id=$1 AND u.user_id=d.user_id AND u.claim_id=d.claim_id AND d.retry_at IS NULL
+			RETURNING d.user_id, d.claim_id
+		)
+		DELETE FROM luxmed_reconnect_unsent u USING applied a
+		WHERE u.user_id=a.user_id AND u.claim_id=a.claim_id
+	`, userID)
+	return err
 }
 
 func (db *DB) replayReconnectFile(ctx context.Context, userID int64, path string) error {

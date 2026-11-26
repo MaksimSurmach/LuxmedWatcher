@@ -276,13 +276,13 @@ func (r *Runner) checkWithAccount(ctx context.Context, requested domain.Watch, m
 	if authFailed {
 		state.recoveryPending = false
 		notifyCtx, cancel := context.WithTimeout(parent, 10*time.Second)
-		beginErr := r.beginReconnect(notifyCtx, user.ID)
+		beginErr := r.db.BeginLuxMedReconnectAfterSearch(notifyCtx, user.ID)
 		if beginErr == nil {
 			err = errors.Join(err, r.deliverReconnect(notifyCtx, user, time.Now()))
 		}
 		cancel()
 		if beginErr != nil {
-			return count, errors.Join(err, beginErr)
+			return count, errors.Join(err, fmt.Errorf("save LuxMed reconnect status: %w", beginErr))
 		}
 	}
 	recordCtx, stop := context.WithTimeout(parent, 5*time.Second)
@@ -476,7 +476,7 @@ func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
 }
 
 // CheckBrowserSession confirms a manual sign-in and restores saved active searches.
-// On authentication failure it also reports whether a reconnect episode was open during the probe.
+// The boolean reports whether an episode remains open after the probe.
 func (r *Runner) CheckBrowserSession(ctx context.Context, user domain.User) (bool, error) {
 	browser := r.browsers[user.TelegramUserID]
 	if browser == nil {
@@ -517,6 +517,18 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	err := browser.Check(probeCtx)
 	cancel()
 	if err == nil {
+		needsTerms, readErr := r.db.LuxMedReconnectRequiresTerms(ctx, user.ID)
+		if readErr != nil {
+			return false, readErr
+		}
+		if needsTerms && !state.recoveryPending {
+			checkErr := r.checkReconnectSearch(ctx, user.ID, state, time.Now())
+			required, readErr := r.db.LuxMedReconnectRequired(ctx, user.ID)
+			if readErr == nil && !required {
+				return false, nil
+			}
+			return required, errors.Join(checkErr, readErr)
+		}
 		return false, r.confirmReconnectRecovery(ctx, user.ID, state)
 	}
 	if errors.Is(err, luxmed.ErrAuthentication) {
@@ -554,15 +566,19 @@ func (r *Runner) recheckPasswordBeforeWarning(ctx context.Context, user domain.U
 	if err != nil || !due {
 		return errors.Join(replayErr, err)
 	}
+	return errors.Join(replayErr, r.checkReconnectSearch(ctx, user.ID, state, now))
+}
+
+func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *accountCheck, now time.Time) error {
 	r.mu.Lock()
 	ready := !now.Before(state.next)
 	r.mu.Unlock()
 	if !ready {
-		return replayErr
+		return nil
 	}
-	watches, err := r.db.WatchesByUser(ctx, user.ID)
+	watches, err := r.db.WatchesByUser(ctx, userID)
 	if err != nil {
-		return errors.Join(replayErr, err)
+		return err
 	}
 	for _, watch := range watches {
 		if watch.Status == domain.WatchStatusActive && luxmed.SearchWindowOpen(watch, now) {
@@ -571,10 +587,10 @@ func (r *Runner) recheckPasswordBeforeWarning(ctx context.Context, user domain.U
 			if errors.Is(err, ErrRateLimited) || errors.Is(err, ErrInactive) {
 				continue
 			}
-			return errors.Join(replayErr, err)
+			return err
 		}
 	}
-	return replayErr
+	return nil
 }
 
 func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accountCheck) (luxmed.Client, error) {

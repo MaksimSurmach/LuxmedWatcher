@@ -374,9 +374,13 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	other.ID = otherID
 
 	var status, requests atomic.Int32
+	var sessionReady atomic.Bool
 	status.Store(http.StatusTooManyRequests)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		if r.URL.Path == "/session" && sessionReady.Load() {
+			return
+		}
 		code := int(status.Load())
 		if code != http.StatusOK {
 			w.WriteHeader(code)
@@ -463,14 +467,24 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 		t.Fatalf("warning should be accepted once across searches and restarts: %+v", notifier)
 	}
 
+	// Reopen the account runner while the form works but the protected terms request still fails.
+	runner = restart()
+	sessionReady.Store(true)
+	if required, err := runner.CheckBrowserSession(ctx, user); !required || !errors.Is(err, luxmed.ErrAuthentication) {
+		t.Fatalf("ready form bypassed the failed terms request: required=%v err=%v", required, err)
+	}
+	assertReconnect(true)
+	if notifier.attempts != 2 || notifier.delivered != 1 {
+		t.Fatalf("ready form opened a duplicate episode: %+v", notifier)
+	}
 	status.Store(http.StatusOK)
-	if count, err := runner.ManualCheck(ctx, watch); count != 0 || err != nil {
-		t.Fatalf("search after reconnect: count=%d, error=%v", count, err)
+	if err := runner.renewBrowserSession(ctx, 42, browser); err != nil {
+		t.Fatalf("protected search did not confirm reconnect: %v", err)
 	}
 	assertReconnect(false)
 	due, err := db.DueWatches(ctx, 0)
-	if err != nil || len(due) != 1 || due[0].ID != otherID || due[0].ServiceID != other.ServiceID ||
-		due[0].CityID != other.CityID || due[0].CheckIntervalSeconds != other.CheckIntervalSeconds {
+	if err != nil || len(due) != 1 || due[0].ID != watch.ID || due[0].ServiceID != watch.ServiceID ||
+		due[0].CityID != watch.CityID || due[0].CheckIntervalSeconds != watch.CheckIntervalSeconds {
 		t.Fatalf("expected the other active search to resume with saved filters, got %+v, %v", due, err)
 	}
 	if err := runner.CheckWatch(ctx, due[0]); err != nil {
@@ -478,6 +492,7 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	}
 
 	status.Store(http.StatusUnauthorized)
+	sessionReady.Store(false)
 	if err := runner.renewBrowserSession(ctx, 42, browser); err != nil {
 		t.Fatalf("second expiry: %v", err)
 	}
@@ -599,10 +614,13 @@ func TestSessionProbeResumesWatchesWithoutBypassingSearchCooldown(t *testing.T) 
 	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	scheduler.maintainReconnectSessions(ctx)
 	due, err = db.DueWatches(ctx, 0)
-	if err != nil || len(due) != 1 || probes.Load() != 1 {
-		t.Fatalf("session probe did not restore the watch: probes=%d, due=%v, err=%v", probes.Load(), due, err)
+	if err != nil || len(due) != 0 || probes.Load() != 1 {
+		t.Fatalf("session probe prematurely restored the watch: probes=%d, due=%v, err=%v", probes.Load(), due, err)
 	}
-	if err := start().CheckWatch(ctx, due[0]); !errors.Is(err, ErrRateLimited) || searches.Load() != 1 {
+	if required, err := db.LuxMedReconnectRequired(ctx, watch.UserID); err != nil || !required {
+		t.Fatalf("session probe closed the episode during cooldown: required=%v, err=%v", required, err)
+	}
+	if _, err := start().ManualCheck(ctx, watch); !errors.Is(err, ErrRateLimited) || searches.Load() != 1 {
 		t.Fatalf("search bypassed the persisted cooldown: searches=%d, err=%v", searches.Load(), err)
 	}
 }

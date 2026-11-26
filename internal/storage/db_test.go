@@ -873,49 +873,74 @@ func TestReconnectJournalKeepsBothOutcomesDuringDatabaseFailure(t *testing.T) {
 }
 
 func TestUnsentReservationJournalWaitsForPostgresCommit(t *testing.T) {
-	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
-		if !db.postgres {
-			t.Skip("requires concurrent PostgreSQL transactions")
-		}
-		must := func(err error) {
-			t.Helper()
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		journal := t.TempDir()
-		must(db.SetReconnectJournalDirectory(journal))
-		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
-		must(err)
-		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
-		must(err)
-		must(db.BeginLuxMedReconnect(ctx, user.ID))
-		tx, err := db.sql.BeginTx(ctx, nil)
-		must(err)
-		defer tx.Rollback()
-		claim := ReconnectDeliveryClaim{ID: "late-claim"}
-		_, err = tx.ExecContext(ctx, `
+	for _, mode := range []string{"file journal", "PostgreSQL only"} {
+		t.Run(mode, func(t *testing.T) {
+			testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+				if !db.postgres {
+					t.Skip("requires concurrent PostgreSQL transactions")
+				}
+				must := func(err error) {
+					t.Helper()
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				var journal string
+				if mode == "file journal" {
+					journal = t.TempDir()
+					must(db.SetReconnectJournalDirectory(journal))
+				}
+				user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+				must(err)
+				_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+				must(err)
+				must(db.BeginLuxMedReconnect(ctx, user.ID))
+				tx, err := db.sql.BeginTx(ctx, nil)
+				must(err)
+				defer tx.Rollback()
+				claim := ReconnectDeliveryClaim{ID: "late-claim"}
+				_, err = tx.ExecContext(ctx, `
 			INSERT INTO luxmed_reconnect_delivery (user_id, attempts, claim_id) VALUES ($1, 1, $2)
 		`, user.ID, claim.ID)
-		must(err)
-		now := time.Now().UTC()
-		must(db.JournalUnsentReconnectReservation(ctx, user.ID, claim, now.Add(time.Minute)))
-		_, err = os.Stat(filepath.Join(journal, reconnectRejectionName(user.ID, claim.ID)))
-		must(err)
-		must(tx.Commit())
+				must(err)
+				now := time.Now().UTC()
+				must(db.JournalUnsentReconnectReservation(ctx, user.ID, claim, now.Add(time.Minute)))
+				if journal != "" {
+					_, err = os.Stat(filepath.Join(journal, reconnectRejectionName(user.ID, claim.ID)))
+					must(err)
+				} else {
+					var pending int
+					must(db.sql.QueryRowContext(ctx, "SELECT COUNT(*) FROM luxmed_reconnect_unsent WHERE user_id=$1 AND claim_id=$2", user.ID, claim.ID).Scan(&pending))
+					if pending != 1 {
+						t.Fatalf("known unsent outcome was not stored before commit: %d", pending)
+					}
+				}
+				must(tx.Commit())
 
-		restarted := &DB{sql: db.sql, postgres: true}
-		must(restarted.SetReconnectJournalDirectory(journal))
-		must(restarted.ReplayReconnectRejection(ctx, user.ID))
-		if _, err := os.Stat(filepath.Join(journal, reconnectRejectionName(user.ID, claim.ID))); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("confirmed journal was not cleared: %v", err)
-		}
-		next, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Minute))
-		must(err)
-		if next.Attempt != 2 || next.ID == claim.ID {
-			t.Fatalf("late committed claim remained blocked: %+v", next)
-		}
-	})
+				restarted := &DB{sql: db.sql, postgres: true}
+				if journal != "" {
+					must(restarted.SetReconnectJournalDirectory(journal))
+				}
+				must(restarted.ReplayReconnectRejection(ctx, user.ID))
+				if journal != "" {
+					if _, err := os.Stat(filepath.Join(journal, reconnectRejectionName(user.ID, claim.ID))); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("confirmed journal was not cleared: %v", err)
+					}
+				} else {
+					var pending int
+					must(db.sql.QueryRowContext(ctx, "SELECT COUNT(*) FROM luxmed_reconnect_unsent WHERE user_id=$1", user.ID).Scan(&pending))
+					if pending != 0 {
+						t.Fatalf("applied outcomes remained queued: %d", pending)
+					}
+				}
+				next, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Minute))
+				must(err)
+				if next.Attempt != 2 || next.ID == claim.ID {
+					t.Fatalf("late committed claim remained blocked: %+v", next)
+				}
+			})
+		})
+	}
 }
 
 func TestReconnectRejectionIsRetriedWithoutDiskJournal(t *testing.T) {

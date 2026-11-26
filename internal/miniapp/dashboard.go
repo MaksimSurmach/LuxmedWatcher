@@ -428,13 +428,12 @@ func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.
 	result := struct {
 		State             string `json:"state"`
 		ReconnectRequired bool
-	}{State: "connected"}
+	}{State: "connected", ReconnectRequired: required}
 
 	switch {
 	case err == nil:
 	case errors.Is(err, luxmed.ErrAuthentication):
 		result.State = "needs_login"
-		result.ReconnectRequired = required
 	case errors.Is(err, luxmed.ErrBrowserBusy):
 		reply(w, http.StatusTooManyRequests, nil)
 		return

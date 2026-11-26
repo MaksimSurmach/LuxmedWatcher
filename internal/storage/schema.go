@@ -42,7 +42,15 @@ CREATE TABLE IF NOT EXISTS luxmed_accounts (
 
 CREATE TABLE IF NOT EXISTS luxmed_reconnect (
 	user_id %[5]s PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-	notified BOOLEAN NOT NULL DEFAULT FALSE
+	notified BOOLEAN NOT NULL DEFAULT FALSE,
+	requires_terms BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS luxmed_reconnect_unsent (
+	user_id %[5]s NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	claim_id TEXT NOT NULL,
+	retry_at %[6]s NOT NULL,
+	PRIMARY KEY (user_id, claim_id)
 );
 
 CREATE TABLE IF NOT EXISTS luxmed_reconnect_delivery (

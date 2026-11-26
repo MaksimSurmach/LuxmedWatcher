@@ -10,10 +10,10 @@ import { checkPortal, observeSession, openProfile, waitForLogin } from './sessio
 test('only the current navigation can confirm an expired session', async () => {
   const origin = 'https://portal.example.test';
   const login = `${origin}/PatientPortal/NewPortal/Page/Account/Login`;
-  const page = {
+  const page = Object.assign(new EventEmitter(), {
     url: () => login,
     goto: async target => ({ url: () => target, status: () => 401, ok: () => false }),
-  };
+  });
   assert.equal(await checkPortal(page, origin), 'needs_login');
   page.goto = async () => { throw new Error('navigation timed out before receiving a response'); };
   assert.equal(await checkPortal(page, origin), 'unavailable');
@@ -21,6 +21,32 @@ test('only the current navigation can confirm an expired session', async () => {
   assert.equal(await checkPortal(page, origin), 'unavailable');
   page.goto = async () => ({ url: () => login, status: () => 200, ok: () => true });
   assert.equal(await checkPortal(page, origin), 'needs_login');
+});
+
+test('a login document reached by script during the current reservation check is confirmed', async () => {
+  const origin = 'https://portal.example.test';
+  const frame = {};
+  const response = (url, status, navigation = true) => ({
+    url: () => url,
+    status: () => status,
+    ok: () => status === 200,
+    request: () => ({ isNavigationRequest: () => navigation, frame: () => frame }),
+  });
+  const login = `${origin}/PatientPortal/NewPortal/Page/Account/Login`;
+  const page = Object.assign(new EventEmitter(), {
+    mainFrame: () => frame,
+    goto: async target => response(target, 200),
+    getByPlaceholder: () => ({
+      waitFor: async () => {
+        page.emit('response', response(login, 200, false));
+        page.emit('response', response(login, 503));
+        page.emit('response', response(login, 200));
+        throw new Error('reservation form was replaced by the login document');
+      },
+    }),
+  });
+  assert.equal(await checkPortal(page, origin), 'needs_login');
+  assert.equal(page.listenerCount('response'), 0);
 });
 
 test('the same Chrome profile can retain a portal session and report expiration', { timeout: 40_000 }, async (t) => {

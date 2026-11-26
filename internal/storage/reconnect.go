@@ -41,12 +41,29 @@ func (db *DB) WatchesWithReconnectState(ctx context.Context, userID int64) ([]do
 }
 
 func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) error {
+	return db.beginLuxMedReconnect(ctx, userID, false)
+}
+
+func (db *DB) BeginLuxMedReconnectAfterSearch(ctx context.Context, userID int64) error {
+	return db.beginLuxMedReconnect(ctx, userID, true)
+}
+
+func (db *DB) beginLuxMedReconnect(ctx context.Context, userID int64, requiresTerms bool) error {
 	_, err := db.sql.ExecContext(ctx, `
-		INSERT INTO luxmed_reconnect (user_id)
-		SELECT $1 WHERE EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=$2)
-		ON CONFLICT (user_id) DO NOTHING
-	`, userID, domain.WatchStatusActive)
+		INSERT INTO luxmed_reconnect (user_id, requires_terms)
+		SELECT $1, $3 WHERE EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=$2)
+		ON CONFLICT (user_id) DO UPDATE SET requires_terms=TRUE
+		WHERE excluded.requires_terms AND NOT luxmed_reconnect.requires_terms
+	`, userID, domain.WatchStatusActive, requiresTerms)
 	return err
+}
+
+func (db *DB) LuxMedReconnectRequiresTerms(ctx context.Context, userID int64) (bool, error) {
+	var required bool
+	err := db.sql.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1 AND requires_terms)
+	`, userID).Scan(&required)
+	return required, err
 }
 
 type ReconnectDeliveryClaim struct {
@@ -195,6 +212,11 @@ func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64) error
 	removed, err := result.RowsAffected()
 	if err != nil {
 		return err
+	}
+	if removed > 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM luxmed_reconnect_unsent WHERE user_id=$1`, userID); err != nil {
+			return err
+		}
 	}
 	// Sign-in errors can outlive a search that was paused before an episode opened.
 	_, err = tx.ExecContext(ctx, `

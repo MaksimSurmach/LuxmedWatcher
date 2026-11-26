@@ -57,6 +57,22 @@ function onPage(url, origin, path) {
 }
 
 export async function checkPortal(page, origin = portalOrigin) {
+  let reservationLoaded = false;
+  let confirmedLogin;
+  const loginNavigation = new Promise(resolve => { confirmedLogin = resolve; });
+  const observeNavigation = (response) => {
+    try {
+      const request = response.request();
+      if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) return;
+      const route = new URL(response.url());
+      if (onPage(route, origin, reservation) && response.ok()) reservationLoaded = true;
+      if (reservationLoaded && onPage(route, origin, login) &&
+          (response.ok() || response.status() === 401)) confirmedLogin('needs_login');
+    } catch {
+      // A detached frame cannot establish the portal session state.
+    }
+  };
+  page.on('response', observeNavigation);
   try {
     const response = await page.goto(`${origin}${reservation}`, { waitUntil: 'domcontentloaded', timeout: 15_000 });
     const navigation = response && new URL(response.url());
@@ -74,11 +90,17 @@ export async function checkPortal(page, origin = portalOrigin) {
       return 'unavailable';
     }
 
-    await page.getByPlaceholder('Wpisz lub wybierz z listy', { exact: true }).waitFor({ timeout: 10_000 });
-    const current = new URL(page.url());
-    return onPage(current, origin, reservation) ? 'ready' : 'unavailable';
+    reservationLoaded = true;
+    const form = page.getByPlaceholder('Wpisz lub wybierz z listy', { exact: true });
+    return await Promise.race([
+      loginNavigation,
+      form.waitFor({ timeout: 10_000 }).then(() =>
+        onPage(new URL(page.url()), origin, reservation) ? 'ready' : 'unavailable'),
+    ]);
   } catch {
     return 'unavailable';
+  } finally {
+    page.off('response', observeNavigation);
   }
 }
 
