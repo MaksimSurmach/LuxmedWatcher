@@ -155,19 +155,20 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		return
 	}
 	reply(w, http.StatusOK, struct {
-		SavedLogin         bool
-		HasCredentials     bool
-		CredentialRevision int64
-		Watches            []domain.Watch
-		Locale             string
-		CityID             *int
-		CityName           string
-		MinimumMinutes     int
-		DefaultMinutes     int
-		ReconnectRequired  bool
-		ReconnectEpisodeID string `json:",omitempty"`
-		AccountStatus      storage.LuxMedAccessStatus
-	}{access.SavedLogin, access.HasCredentials, access.CredentialRevision, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
+		SavedLogin             bool
+		HasCredentials         bool
+		CredentialRevision     int64
+		CredentialSaveRevision int64
+		Watches                []domain.Watch
+		Locale                 string
+		CityID                 *int
+		CityName               string
+		MinimumMinutes         int
+		DefaultMinutes         int
+		ReconnectRequired      bool
+		ReconnectEpisodeID     string `json:",omitempty"`
+		AccountStatus          storage.LuxMedAccessStatus
+	}{access.SavedLogin, access.HasCredentials, access.CredentialRevision, access.CredentialSaveRevision, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
 		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.Status})
 }
@@ -499,10 +500,15 @@ func (d *dashboard) providersForUser(ctx context.Context, user domain.User, city
 }
 
 func (d *dashboard) saveCredentials(w http.ResponseWriter, r *http.Request, user domain.User) {
-	var creds luxmed.Credentials
-	if !decodeDashboard(w, r, &creds) {
+	var input struct {
+		luxmed.Credentials
+		CredentialRevision     *int64
+		CredentialSaveRevision *int64
+	}
+	if !decodeDashboard(w, r, &input) {
 		return
 	}
+	creds := input.Credentials
 	creds.Login = strings.TrimSpace(creds.Login)
 	if creds.Login == "" || len(creds.Login) > 254 || creds.Password == "" || len(creds.Password) > 1024 {
 		reply(w, http.StatusBadRequest, nil)
@@ -511,6 +517,11 @@ func (d *dashboard) saveCredentials(w http.ResponseWriter, r *http.Request, user
 	id, ok := credentialAttemptID(r)
 	if !ok {
 		reply(w, http.StatusBadRequest, nil)
+		return
+	}
+	if input.CredentialRevision == nil || *input.CredentialRevision != user.CredentialRevision ||
+		input.CredentialSaveRevision == nil || *input.CredentialSaveRevision != user.CredentialSaveRevision {
+		dashboardResult(w, nil, storage.ErrCredentialsChanged)
 		return
 	}
 	dashboardResult(w, nil, d.saveLogin(r.Context(), user, creds, id))
@@ -579,6 +590,16 @@ func (d *dashboard) forgetCredentials(w http.ResponseWriter, r *http.Request, us
 	if !ok {
 		return
 	}
+	token, ok := credentialAttemptID(r)
+	if !ok {
+		reply(w, http.StatusBadRequest, nil)
+		return
+	}
+	if token != "" {
+		choice := d.db.SelectBrowserLogin(user.TelegramUserID, token, &revision, true)
+		dashboardResult(w, nil, d.db.ChooseBrowserLogin(r.Context(), user, choice))
+		return
+	}
 	if revision != user.CredentialRevision {
 		dashboardResult(w, nil, storage.ErrCredentialsChanged)
 		return
@@ -606,7 +627,7 @@ func (d *dashboard) browserLogin(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	attempt := d.db.SelectBrowserLogin(id, token, &revision)
+	attempt := d.db.SelectBrowserLogin(id, token, &revision, false)
 	d.withUser(func(w http.ResponseWriter, r *http.Request, user domain.User) {
 		d.openBrowser(w, r, user, attempt)
 	}, func(*http.Request) (int64, bool) { return id, true })(w, r)

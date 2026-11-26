@@ -167,68 +167,80 @@ async function signIn(revision, attemptID) {
 }
 
 function bindAccount() {
-  const { CredentialRevision } = state;
+  const { SavedLogin, CredentialRevision, CredentialSaveRevision } = state;
   async function refreshStaleAction(error) {
     if (error.key !== 'error.stale') throw error;
     await switchTab(tab, { reload: true });
     flash(errorText(error));
   }
 
+  function displayedAttempt() {
+    if (passwordSave && passwordSave.revision === CredentialRevision && passwordSave.saveRevision === CredentialSaveRevision) {
+      return passwordSave;
+    }
+    return null;
+  }
+
+  async function chooseChrome(action, attempt) {
+    if (attempt) attempt.choosingChrome = true;
+    try {
+      await action(attempt?.id);
+    } catch (error) {
+      await refreshStaleAction(error);
+    } finally {
+      if (attempt) {
+        attempt.choosingChrome = false;
+        if (!attempt.saving && passwordSave === attempt) passwordSave = null;
+      }
+    }
+  }
+
   const failure = main.querySelector('[data-account-error]');
   const connect = main.querySelector('#connect');
-  if (connect) connect.onclick = () => {
-    const attempt = passwordSave;
-    if (attempt) attempt.openingChrome = true;
-    void run(connect, async () => {
-      try {
-        await signIn(CredentialRevision, attempt?.id);
-      } catch (error) {
-        if (attempt) {
-          attempt.openingChrome = false;
-          if (!attempt.saving && passwordSave === attempt) passwordSave = null;
-        }
-        await refreshStaleAction(error);
-      }
-    }, failure);
-  };
+  if (connect) connect.onclick = () => void run(connect, () =>
+    chooseChrome((id) => signIn(CredentialRevision, id), displayedAttempt()), failure);
+
   const form = main.querySelector('#credentials');
   form.onsubmit = (event) => {
     event.preventDefault();
-    if (passwordSave?.saving || passwordSave?.openingChrome) return;
-    const attempt = { id: crypto.randomUUID(), saving: true, openingChrome: false };
+    if (passwordSave?.saving || passwordSave?.choosingChrome) return;
+    const attempt = {
+      id: crypto.randomUUID(), revision: CredentialRevision, saveRevision: CredentialSaveRevision,
+      saving: true, choosingChrome: false,
+    };
     passwordSave = attempt;
     void run(form.querySelector('button'), async () => {
       try {
-        await api('credentials', { Login: form.elements.login.value, Password: form.elements.password.value }, attempt.id);
+        try {
+          await api('credentials', {
+            Login: form.elements.login.value, Password: form.elements.password.value,
+            CredentialRevision, CredentialSaveRevision,
+          }, attempt.id);
+        } finally {
+          form.elements.password.value = '';
+        }
+        if (!attempt.choosingChrome) await switchTab(tab);
       } catch (error) {
-        if (!attempt.openingChrome) throw error;
+        if (!attempt.choosingChrome) await refreshStaleAction(error);
       } finally {
         attempt.saving = false;
-        form.elements.password.value = '';
-      }
-      if (!attempt.openingChrome) {
-        passwordSave = null;
-        await switchTab(tab);
+        if (!attempt.choosingChrome && passwordSave === attempt) passwordSave = null;
       }
     }, failure);
   };
   const forget = main.querySelector('#forget-credentials');
-  if (forget) forget.onclick = () => void run(forget, async () => {
-    try {
-      await api('forget-credentials', { CredentialRevision });
-    } catch (error) {
-      await refreshStaleAction(error);
-      return;
-    }
+  if (forget) forget.onclick = () => void run(forget, () => chooseChrome(async (id) => {
+    await api('forget-credentials', { CredentialRevision }, id);
     await switchTab(tab);
-  }, failure);
+  }, SavedLogin ? displayedAttempt() : null), failure);
   const check = main.querySelector('#account-check');
   let refreshTimer;
   let manualCheck = 0;
 
   const modeChanged = (latest) => latest.SavedLogin !== state.SavedLogin ||
     latest.HasCredentials !== state.HasCredentials ||
-    latest.CredentialRevision !== state.CredentialRevision;
+    latest.CredentialRevision !== state.CredentialRevision ||
+    latest.CredentialSaveRevision !== state.CredentialSaveRevision;
 
   async function showAccountSnapshot(latest) {
     const redraw = modeChanged(latest);

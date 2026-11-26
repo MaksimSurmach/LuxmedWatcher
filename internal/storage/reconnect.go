@@ -40,11 +40,12 @@ const (
 )
 
 type LuxMedAccessSnapshot struct {
-	Status             LuxMedAccessStatus
-	EpisodeID          string
-	SavedLogin         bool
-	HasCredentials     bool
-	CredentialRevision int64
+	Status                 LuxMedAccessStatus
+	EpisodeID              string
+	SavedLogin             bool
+	HasCredentials         bool
+	CredentialRevision     int64
+	CredentialSaveRevision int64
 }
 
 const accessStatusSQL = `COALESCE((SELECT status FROM luxmed_access WHERE user_id=$1), '')`
@@ -89,12 +90,13 @@ func (db *DB) WatchesWithReconnectState(ctx context.Context, userID int64) ([]do
 			`+hasAccountTermsRequirement("$1")+`, `+hasWatchSignInError("$2", "$3")+`,
 			EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login),
 			EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1),
-			(SELECT credential_revision FROM users WHERE id=$1)
+			credential_revision, credential_save_revision
+		FROM users WHERE id=$1
 		`,
 		userID, domain.WatchStatusActive, domain.WatchStatusPaused,
 	).Scan(
 		&access.EpisodeID, &access.Status, &requiresTerms, &staleSignInError,
-		&access.SavedLogin, &access.HasCredentials, &access.CredentialRevision,
+		&access.SavedLogin, &access.HasCredentials, &access.CredentialRevision, &access.CredentialSaveRevision,
 	)
 	if err != nil {
 		return nil, access, err

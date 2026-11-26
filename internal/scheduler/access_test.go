@@ -418,7 +418,7 @@ func TestRejectedPasswordSubmissionKeepsAcceptedChromeChoice(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			retry := db.SelectBrowserLogin(user.TelegramUserID, "rejected", &user.CredentialRevision)
+			retry := db.SelectBrowserLogin(user.TelegramUserID, "rejected", &user.CredentialRevision, false)
 			if err := db.ChooseBrowserLogin(ctx, current, retry); err != nil {
 				t.Fatalf("a rejected submission blocked reopening the current Chrome mode: %v", err)
 			}

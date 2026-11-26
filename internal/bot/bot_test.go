@@ -924,15 +924,17 @@ func TestTelegramChromeRollsBackMiniAppSaveDuringAcknowledgment(t *testing.T) {
 	if _, err := b.db.SaveCredentialAttempt(committed.Context(), committed); err != nil {
 		t.Fatal(err)
 	}
-	committed.Finish()
 	commit = func() error { return nil }
-	b.handleCallback(ctx, &tgbotapi.CallbackQuery{
-		ID: "chrome-finished", Data: fmt.Sprintf("connect:chrome:%d", owner.CredentialRevision),
-		From:    &tgbotapi.User{ID: user.TelegramUserID},
-		Message: &tgbotapi.Message{MessageID: 2, Chat: &tgbotapi.Chat{ID: user.TelegramUserID, Type: "private"}},
-	})
-	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
-		t.Fatalf("revision-bound Chrome click could not undo the completed Mini App save: %v", err)
+	for _, phase := range []string{"before Finish", "after Finish"} {
+		b.handleCallback(ctx, &tgbotapi.CallbackQuery{
+			ID: "chrome-finished", Data: fmt.Sprintf("connect:chrome:%d", owner.CredentialRevision),
+			From:    &tgbotapi.User{ID: user.TelegramUserID},
+			Message: &tgbotapi.Message{MessageID: 2, Chat: &tgbotapi.Chat{ID: user.TelegramUserID, Type: "private"}},
+		})
+		if _, err := b.db.LoginAccount(ctx, user.ID, true); err != nil {
+			t.Fatalf("stale Telegram button deleted committed credentials %s: %v", phase, err)
+		}
+		committed.Finish()
 	}
 }
 
