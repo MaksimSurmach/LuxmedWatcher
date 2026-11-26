@@ -257,11 +257,14 @@ func (db *DB) CreateWatch(ctx context.Context, watch domain.Watch) (int64, error
 }
 
 func (db *DB) UpdateWatch(ctx context.Context, watch domain.Watch) error {
+	// Preserve a legacy sign-in error until the account has its own verification requirement.
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE watches SET name=$1, city_id=$2, city_name=$3, service_id=$4, service_name=$5, doctor_id=$6,
 			doctor_name=$7, doctor_mode=$8, facility_mode=$9, facility_ids=$10, facility_names=$11, date_from=$12,
 			date_to=$13, next_days=$14, time_windows=$15, check_interval_seconds=$16, updated_at=$17,
-			last_checked_at=NULL, last_success_at=NULL, last_error=''
+			last_checked_at=NULL, last_success_at=NULL,
+			last_error=CASE WHEN `+watchSignInError+` AND NOT `+hasAccountTermsRequirement("$19")+`
+				THEN last_error ELSE '' END
 		WHERE id=$18 AND user_id=$19 AND status <> $20
 	`, append(watchParameters(watch), time.Now().UTC(), watch.ID, watch.UserID, domain.WatchStatusDeleted)...)
 	return requireOneRow(res, err)
@@ -319,7 +322,8 @@ func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool, br
 			AND (($3 AND (
 				EXISTS (SELECT 1 FROM luxmed_reconnect r WHERE r.user_id=u.id)
 				OR ((`+credentials+`)
-					AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status IN ($2, $5) AND `+watchSignInError+`))
+					AND (`+hasAccountTermsRequirement("u.id")+`
+						OR EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status IN ($2, $5) AND `+watchSignInError+`)))
 			))
 				OR (NOT $3 AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status=$2)))
 		ORDER BY u.telegram_user_id

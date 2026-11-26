@@ -540,7 +540,7 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		if needsTerms && !state.recoveryPending {
 			if !background {
 				// The existing reconciliation loop owns the protected search.
-				if err := r.db.SetLuxMedAccessStatus(ctx, user.ID, storage.LuxMedAccessPending); err != nil {
+				if err := r.db.SetLuxMedAccessStatus(ctx, user.ID, storage.LuxMedAccessPending, true); err != nil {
 					return BrowserSessionCheck{}, err
 				}
 				return BrowserSessionCheck{EpisodeID: episodeID, VerificationPending: true}, nil
@@ -561,7 +561,7 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		if readErr != nil {
 			return BrowserSessionCheck{}, fmt.Errorf("read LuxMed reconnect status: %w", readErr)
 		}
-		if writeErr := r.db.SetLuxMedAccessStatus(ctx, user.ID, storage.LuxMedAccessRejected); writeErr != nil {
+		if writeErr := r.db.SetLuxMedAccessStatus(ctx, user.ID, storage.LuxMedAccessRejected, false); writeErr != nil {
 			return BrowserSessionCheck{}, writeErr
 		}
 		return BrowserSessionCheck{EpisodeID: episodeID}, err
@@ -683,7 +683,7 @@ func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *
 func (r *Runner) recordAccessRejection(ctx context.Context, userID int64, rejection error) error {
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	return errors.Join(rejection, r.db.SetLuxMedAccessStatus(recordCtx, userID, storage.LuxMedAccessRejected))
+	return errors.Join(rejection, r.db.SetLuxMedAccessStatus(recordCtx, userID, storage.LuxMedAccessRejected, true))
 }
 
 func retryWithAnotherFilter(err error) bool {

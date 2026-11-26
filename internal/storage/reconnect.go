@@ -45,18 +45,25 @@ type LuxMedAccessSnapshot struct {
 
 const accessStatusSQL = `COALESCE((SELECT status FROM luxmed_access WHERE user_id=$1), '')`
 
-func (db *DB) SetLuxMedAccessStatus(ctx context.Context, userID int64, status LuxMedAccessStatus) error {
-	return setLuxMedAccessStatus(ctx, db.sql, userID, status)
+func (db *DB) SetLuxMedAccessStatus(ctx context.Context, userID int64, status LuxMedAccessStatus, requiresTerms bool) error {
+	return setLuxMedAccessStatus(ctx, db.sql, userID, status, requiresTerms)
+}
+
+func hasAccountTermsRequirement(userID string) string {
+	return `EXISTS (SELECT 1 FROM luxmed_access WHERE user_id=` + userID + ` AND requires_terms)`
 }
 
 func setLuxMedAccessStatus(ctx context.Context, writer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, userID int64, status LuxMedAccessStatus) error {
+}, userID int64, status LuxMedAccessStatus, requiresTerms bool) error {
 	_, err := writer.ExecContext(ctx, `
-		INSERT INTO luxmed_access (user_id, status) VALUES ($1, $2)
-		ON CONFLICT (user_id) DO UPDATE SET status=excluded.status
-		WHERE luxmed_access.status<>excluded.status
-	`, userID, status)
+		INSERT INTO luxmed_access (user_id, status, requires_terms)
+		VALUES ($1, $2, $3 OR ($2<>$4 AND `+hasWatchSignInError("$5", "$6")+`))
+		ON CONFLICT (user_id) DO UPDATE SET
+			status=excluded.status,
+			requires_terms=excluded.status<>$4 AND (luxmed_access.requires_terms OR excluded.requires_terms)
+		WHERE luxmed_access.status<>excluded.status OR (excluded.requires_terms AND NOT luxmed_access.requires_terms)
+	`, userID, status, requiresTerms, LuxMedAccessConnected, domain.WatchStatusActive, domain.WatchStatusPaused)
 	return err
 }
 
@@ -112,16 +119,15 @@ func (db *DB) beginLuxMedReconnect(ctx context.Context, userID int64, requiresTe
 	defer tx.Rollback()
 	first, end := luxmed.SearchDateBounds(time.Now())
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO luxmed_reconnect (user_id, episode_id, requires_terms)
-		SELECT $1, $7, $3 OR `+hasWatchSignInError("$2", "$6")+`
+		INSERT INTO luxmed_reconnect (user_id, episode_id)
+		SELECT $1, $3
 		WHERE `+db.hasCurrentReconnectSearch("$2", "$4", "$5")+`
-		ON CONFLICT (user_id) DO UPDATE SET requires_terms=TRUE
-		WHERE excluded.requires_terms AND NOT luxmed_reconnect.requires_terms
-	`, userID, domain.WatchStatusActive, requiresTerms, first.UTC(), end.UTC(), domain.WatchStatusPaused, rand.Text())
+		ON CONFLICT (user_id) DO NOTHING
+	`, userID, domain.WatchStatusActive, rand.Text(), first.UTC(), end.UTC())
 	if err != nil {
 		return err
 	}
-	if err := setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessRejected); err != nil {
+	if err := setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessRejected, requiresTerms); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -149,8 +155,7 @@ func (db *DB) LuxMedReconnectVerification(ctx context.Context, userID int64) (st
 	var required bool
 	err := db.sql.QueryRowContext(ctx, `
 		SELECT `+reconnectEpisodeSQL+`,
-		    EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1 AND requires_terms)
-		    OR `+hasWatchSignInError("$2", "$3")+`
+		    `+hasAccountTermsRequirement("$1")+` OR `+hasWatchSignInError("$2", "$3")+`
 	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&episodeID, &required)
 	return episodeID, required, err
 }
@@ -329,5 +334,5 @@ func (db *DB) resolveLuxMedReconnectTx(ctx context.Context, tx *sql.Tx, userID i
 	if err != nil {
 		return err
 	}
-	return setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessConnected)
+	return setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessConnected, false)
 }

@@ -1632,6 +1632,99 @@ func TestAssignedBrowserVerifiesPausedLegacyErrorWithoutPasswordOrEpisode(t *tes
 	}
 }
 
+func TestProtectedVerificationSurvivesEditingOnlyPausedSearch(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "watcher.sqlite")
+	runner, db, watch := testRunnerAt(t, nil, path)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(db.DeleteLuxMedAccount(ctx, watch.UserID))
+	must(db.MarkWatchChecked(ctx, watch.ID, false, "luxmed_authentication"))
+
+	var authorized atomic.Bool
+	var termsCalls atomic.Int32
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/session" {
+			return
+		}
+		termsCalls.Add(1)
+		if req.URL.Path != luxmed.TermsURL || req.URL.Query().Get("serviceVariantId") != "34" {
+			t.Errorf("verification did not use the edited filters: %s", req.URL.RequestURI())
+		}
+		if !authorized.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"termsForService":{"termsForDays":[]}}`)
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	must(err)
+	browsers := map[int64]*luxmed.Browser{42: browser}
+	runner.UseBrowsers(browsers)
+	user, err := db.UserByID(ctx, watch.UserID)
+	must(err)
+
+	// Editing before the first manual check must also preserve legacy evidence.
+	watch.CityID, watch.ServiceID = 1, 12
+	must(db.UpdateWatch(ctx, watch))
+	must(db.SetUserWatchStatus(ctx, watch.UserID, watch.ID, domain.WatchStatusPaused))
+	checkPending := func() {
+		t.Helper()
+		result, err := runner.CheckBrowserSession(ctx, user)
+		if err != nil || !result.VerificationPending || result.EpisodeID != "" {
+			t.Fatalf("session page bypassed protected verification: %+v, %v", result, err)
+		}
+	}
+	checkPending()
+
+	watch.ServiceID = 34
+	must(db.UpdateWatch(ctx, watch))
+	saved, err := db.Watch(ctx, watch.ID)
+	must(err)
+	if saved.LastError != "" {
+		t.Fatalf("legacy card still carries the requirement: %+v", saved)
+	}
+	must(db.Close())
+
+	db, err = storage.Open(ctx, path)
+	must(err)
+	t.Cleanup(func() { db.Close() })
+	runner = NewRunner(db, nil, nil, 0, time.Hour, false)
+	runner.UseBrowsers(browsers)
+	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	checkPending()
+	if ids := scheduler.maintainReconnectSessions(ctx); !slices.Equal(ids, []int64{42}) || termsCalls.Load() != 1 {
+		t.Fatalf("edited paused search lost background verification: ids=%v calls=%d", ids, termsCalls.Load())
+	}
+	_, access, err := db.WatchesWithReconnectState(ctx, watch.UserID)
+	must(err)
+	if access.Status != storage.LuxMedAccessRejected || access.EpisodeID != "" {
+		t.Fatalf("protected 401 should reject access without opening an episode: %+v", access)
+	}
+
+	checkPending()
+	authorized.Store(true)
+	if ids := scheduler.maintainReconnectSessions(ctx); !slices.Equal(ids, []int64{42}) || termsCalls.Load() != 2 {
+		t.Fatalf("protected success was not checked: ids=%v calls=%d", ids, termsCalls.Load())
+	}
+	watches, access, err := db.WatchesWithReconnectState(ctx, watch.UserID)
+	must(err)
+	if access.Status != storage.LuxMedAccessConnected || access.EpisodeID != "" ||
+		len(watches) != 1 || watches[0].Status != domain.WatchStatusPaused || watches[0].ServiceID != 34 ||
+		watches[0].LastCheckedAt != nil {
+		t.Fatalf("recovery changed the edited search or did not confirm access: %+v, %+v", watches, access)
+	}
+	if ids := scheduler.maintainReconnectSessions(ctx); len(ids) != 0 {
+		t.Fatalf("confirmed account stayed in the recovery queue: %v", ids)
+	}
+}
+
 func TestPausedLegacySignInErrorRecoversWithAlternativeProtectedFilter(t *testing.T) {
 	ctx := t.Context()
 	runner, db, good := testRunner(t, nil)
