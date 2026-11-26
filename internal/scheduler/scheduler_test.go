@@ -470,8 +470,12 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	// Reopen the account runner while the form works but the protected terms request still fails.
 	runner = restart()
 	sessionReady.Store(true)
-	if required, err := runner.CheckBrowserSession(ctx, user); !required || !errors.Is(err, luxmed.ErrAuthentication) {
-		t.Fatalf("ready form bypassed the failed terms request: required=%v err=%v", required, err)
+	requestsBefore = requests.Load()
+	if required, err := runner.CheckBrowserSession(ctx, user); !required || err != nil || requests.Load()-requestsBefore != 1 {
+		t.Fatalf("manual probe did more than check the form: required=%v err=%v requests=%d", required, err, requests.Load()-requestsBefore)
+	}
+	if err := runner.renewBrowserSession(ctx, 42, browser); !errors.Is(err, luxmed.ErrAuthentication) {
+		t.Fatalf("background check accepted the failed terms request: %v", err)
 	}
 	assertReconnect(true)
 	if notifier.attempts != 2 || notifier.delivered != 1 {
@@ -1370,6 +1374,84 @@ func TestDeferredPasswordVerificationSurvivesRestartAndRespectsSearchCooldown(t 
 			required, err := reopened.LuxMedReconnectRequired(ctx, watch.UserID)
 			if err != nil || required != (scenario.searchErr != nil) || sends != 0 {
 				t.Fatalf("episode after verification: open=%v duplicate warnings=%d err=%v", required, sends, err)
+			}
+		})
+	}
+}
+
+func TestBrowserRecoveryChecksAccessWithoutRestartingPausedOrExpiredSearch(t *testing.T) {
+	for _, paused := range []bool{true, false} {
+		name := "expired"
+		if paused {
+			name = "paused"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			runner, db, watch := testRunner(t, nil)
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			watch.CityID, watch.ServiceID, watch.CheckIntervalSeconds = 1, 12, 3600
+			if !paused {
+				past := time.Now().AddDate(0, 0, -2)
+				watch.DateTo = &past
+			}
+			must(db.UpdateWatch(ctx, watch))
+			must(db.MarkWatchChecked(ctx, watch.ID, false, "luxmed_authentication"))
+			must(db.BeginLuxMedReconnectAfterSearch(ctx, watch.UserID))
+			must(db.MarkLuxMedReconnectNotified(ctx, watch.UserID))
+			if paused {
+				must(db.SetWatchStatus(ctx, watch.ID, domain.WatchStatusPaused))
+			}
+			before, err := db.Watch(ctx, watch.ID)
+			must(err)
+			var termsCalls atomic.Int32
+			var authorized atomic.Bool
+			worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Path == "/session" {
+					return
+				}
+				termsCalls.Add(1)
+				q := req.URL.Query()
+				if req.URL.Path != luxmed.TermsURL || q.Get("serviceVariantId") != "12" ||
+					q.Get("searchDateFrom") == "" || q.Get("searchDateFrom") != q.Get("searchDateTo") {
+					t.Errorf("unexpected protected access probe: %s", req.URL.RequestURI())
+				}
+				if !authorized.Load() {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				fmt.Fprint(w, `{"termsForService":{"termsForDays":[]}}`)
+			}))
+			t.Cleanup(worker.Close)
+			browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+			must(err)
+			runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
+			user, err := db.UserByID(ctx, watch.UserID)
+			must(err)
+			if required, err := runner.CheckBrowserSession(ctx, user); err != nil || !required || termsCalls.Load() != 0 {
+				t.Fatalf("manual session check attempted a protected search: required=%v err=%v", required, err)
+			}
+			scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			scheduler.maintainReconnectSessions(ctx)
+			required, err := db.LuxMedReconnectRequired(ctx, watch.UserID)
+			if err != nil || !required || termsCalls.Load() != 1 {
+				t.Fatalf("protected 401 lost the episode: required=%v calls=%d err=%v", required, termsCalls.Load(), err)
+			}
+			authorized.Store(true)
+			scheduler.maintainReconnectSessions(ctx)
+			required, err = db.LuxMedReconnectRequired(ctx, watch.UserID)
+			if err != nil || required || termsCalls.Load() != 2 {
+				t.Fatalf("authorized probe did not clear the episode: required=%v calls=%d err=%v", required, termsCalls.Load(), err)
+			}
+			after, err := db.Watch(ctx, watch.ID)
+			must(err)
+			if after.Status != before.Status || after.LastCheckedAt == nil ||
+				!after.LastCheckedAt.Equal(*before.LastCheckedAt) || after.LastError != "" {
+				t.Fatalf("access probe changed the saved schedule: before=%+v after=%+v", before, after)
 			}
 		})
 	}

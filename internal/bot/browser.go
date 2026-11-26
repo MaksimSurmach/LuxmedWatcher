@@ -45,25 +45,6 @@ func (b *Bot) resumeAfterTelegramUnblock(ctx context.Context, telegramID int64) 
 	return b.runner.ResumeLuxMedReconnectDelivery(ctx, user.ID)
 }
 
-func (b *Bot) deferPasswordVerification(ctx context.Context, userID int64, client luxmed.Client) (bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
-	defer cancel()
-	watches, err := b.db.WatchesByUser(ctx, userID)
-	if err != nil {
-		return false, err
-	}
-	now := time.Now().UTC()
-	for _, watch := range watches {
-		if watch.Status == domain.WatchStatusActive && luxmed.SearchWindowOpen(watch, now) {
-			// A history request does not prove access to the protected terms route.
-			return true, nil
-		}
-	}
-	// A new account has no saved filters yet. Its personal search history is protected too.
-	_, err = client.GetRecentProcedures(ctx)
-	return false, err
-}
-
 func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error {
 	if !user.IsActive() || user.TelegramChatID <= 0 || user.TelegramChatID != user.TelegramUserID {
 		return errors.New("reconnect recipient has no private chat")

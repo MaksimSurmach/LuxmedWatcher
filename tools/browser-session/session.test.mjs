@@ -46,6 +46,17 @@ test('a login document reached by script during the current reservation check is
     }),
   });
   assert.equal(await checkPortal(page, origin), 'needs_login');
+  page.goto = async target => {
+    page.emit('response', response(target, 200));
+    page.emit('response', response(login, 200));
+    throw new Error('reservation navigation was interrupted by the login document');
+  };
+  assert.equal(await checkPortal(page, origin), 'needs_login');
+  page.goto = async target => {
+    page.emit('response', response(target, 401));
+    throw new Error('navigation interrupted after HTTP 401');
+  };
+  assert.equal(await checkPortal(page, origin), 'needs_login');
   assert.equal(page.listenerCount('response'), 0);
 });
 

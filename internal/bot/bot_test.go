@@ -104,18 +104,30 @@ func TestWatchActionsRequireActiveOwnerInPrivateChat(t *testing.T) {
 
 type authClient struct {
 	luxmed.Client
-	err       error
-	searchErr error
+	err        error
+	historyErr error
 }
 
 func (c authClient) Authenticate(context.Context, luxmed.Credentials) error { return c.err }
 
 func (c authClient) GetRecentProcedures(context.Context) ([]domain.Procedure, error) {
-	return nil, c.searchErr
+	return nil, c.historyErr
 }
 
-func (c authClient) SearchAppointments(context.Context, domain.Watch) (luxmed.SearchResult, error) {
-	return luxmed.SearchResult{Checked: c.searchErr == nil}, c.searchErr
+func TestFirstPasswordLoginSavesCredentialsWhenHistoryIsUnavailable(t *testing.T) {
+	ctx := t.Context()
+	b := testBot(t)
+	user := createUser(t, b, 10, domain.UserStatusActive)
+	b.newClient = func(bool) luxmed.Client { return authClient{historyErr: luxmed.ErrUnavailable} }
+	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "example"})
+	b.handleText(ctx, user, "example password")
+	account, err := b.db.LuxMedAccount(ctx, user.ID)
+	if err != nil || account.EncryptedPassword == "" || account.EncryptedPassword == "example password" {
+		t.Fatalf("first login did not save encrypted credentials: %v", err)
+	}
+	if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err != nil || required {
+		t.Fatalf("first login unexpectedly started an episode: required=%v err=%v", required, err)
+	}
 }
 
 func TestPasswordLoginDuringCooldownSavesCredentialsAndQueuesOnlyActiveSearches(t *testing.T) {

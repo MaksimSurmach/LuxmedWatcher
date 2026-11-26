@@ -35,6 +35,7 @@ type SearchResult struct {
 
 type Client interface {
 	Authenticate(ctx context.Context, creds Credentials) error
+	CheckTermsAccess(ctx context.Context, watch domain.Watch) error
 	SearchAppointments(ctx context.Context, watch domain.Watch) (SearchResult, error)
 	GetCities(ctx context.Context) ([]domain.City, error)
 	GetServices(ctx context.Context) ([]domain.Service, error)

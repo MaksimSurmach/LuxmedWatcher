@@ -177,6 +177,14 @@ func (db *DB) MarkLuxMedReconnectNotified(ctx context.Context, userID int64) err
 }
 
 func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
+	return db.resolveLuxMedReconnect(ctx, userID, true)
+}
+
+func (db *DB) ResolveLuxMedReconnectAfterAccessProbe(ctx context.Context, userID int64) error {
+	return db.resolveLuxMedReconnect(ctx, userID, false)
+}
+
+func (db *DB) resolveLuxMedReconnect(ctx context.Context, userID int64, requeue bool) error {
 	var pending bool
 	err := db.sql.QueryRowContext(ctx, reconnectRequiredQuery+`
 		OR EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status IN ($2, $3) AND `+watchSignInError+`)`,
@@ -194,7 +202,7 @@ func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
 	}
 	defer tx.Rollback()
 
-	if err := resolveLuxMedReconnect(ctx, tx, userID); err != nil {
+	if err := resolveLuxMedReconnect(ctx, tx, userID, requeue); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -204,7 +212,7 @@ func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
 	return nil
 }
 
-func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64) error {
+func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64, requeue bool) error {
 	result, err := tx.ExecContext(ctx, `DELETE FROM luxmed_reconnect WHERE user_id=$1`, userID)
 	if err != nil {
 		return err
@@ -221,8 +229,8 @@ func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64) error
 	// Sign-in errors can outlive a search that was paused before an episode opened.
 	_, err = tx.ExecContext(ctx, `
 		UPDATE watches
-		SET last_checked_at=CASE WHEN status=$2 THEN NULL ELSE last_checked_at END, last_error=''
-		WHERE user_id=$1 AND status IN ($2, $3) AND (($4 AND status=$2) OR `+watchSignInError+`)
-	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused, removed > 0)
+		SET last_checked_at=CASE WHEN status=$2 AND $4 THEN NULL ELSE last_checked_at END, last_error=''
+		WHERE user_id=$1 AND status IN ($2, $3) AND (($4 AND $5 AND status=$2) OR `+watchSignInError+`)
+	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused, requeue, removed > 0)
 	return err
 }

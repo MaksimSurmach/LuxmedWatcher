@@ -179,7 +179,7 @@ func (db *DB) saveLuxMedAccount(ctx context.Context, account domain.LuxMedAccoun
 		return err
 	}
 	if verified {
-		if err := resolveLuxMedReconnect(ctx, tx, account.UserID); err != nil {
+		if err := resolveLuxMedReconnect(ctx, tx, account.UserID, true); err != nil {
 			return err
 		}
 	} else {
@@ -300,10 +300,11 @@ func (db *DB) ReconnectWatchTelegramIDs(ctx context.Context) ([]int64, error) {
 
 func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool) ([]int64, error) {
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT DISTINCT u.telegram_user_id
-		FROM users u JOIN watches w ON w.user_id=u.id
-		WHERE u.status=$1 AND u.role <> '' AND w.status=$2
-			AND (NOT $3 OR EXISTS (SELECT 1 FROM luxmed_reconnect r WHERE r.user_id=u.id))
+		SELECT u.telegram_user_id
+		FROM users u
+		WHERE u.status=$1 AND u.role <> ''
+			AND (($3 AND EXISTS (SELECT 1 FROM luxmed_reconnect r WHERE r.user_id=u.id))
+				OR (NOT $3 AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status=$2)))
 		ORDER BY u.telegram_user_id
 	`, domain.UserStatusActive, domain.WatchStatusActive, reconnectOnly)
 	if err != nil {

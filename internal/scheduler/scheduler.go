@@ -513,7 +513,11 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		}
 		return false, r.recheckPasswordBeforeWarning(ctx, user, state)
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	timeout := 25 * time.Second
+	if !background {
+		timeout = 15 * time.Second
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	err := browser.Check(probeCtx)
 	cancel()
 	if err == nil {
@@ -522,7 +526,11 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 			return false, readErr
 		}
 		if needsTerms && !state.recoveryPending {
-			checkErr := r.checkReconnectSearch(ctx, user.ID, state, time.Now())
+			if !background {
+				// The existing reconciliation loop owns the protected search.
+				return true, nil
+			}
+			checkErr := r.checkReconnectSearch(ctx, user.ID, state, time.Now(), browser, true)
 			required, readErr := r.db.LuxMedReconnectRequired(ctx, user.ID)
 			if readErr == nil && !required {
 				return false, nil
@@ -563,13 +571,13 @@ func (r *Runner) recheckPasswordBeforeWarning(ctx context.Context, user domain.U
 	now := time.Now()
 	replayErr := r.replayReconnect(ctx, user.ID)
 	due, err := r.db.LuxMedReconnectDeliveryDue(ctx, user.ID, now)
-	if err != nil || !due {
+	if err != nil {
 		return errors.Join(replayErr, err)
 	}
-	return errors.Join(replayErr, r.checkReconnectSearch(ctx, user.ID, state, now))
+	return errors.Join(replayErr, r.checkReconnectSearch(ctx, user.ID, state, now, nil, due))
 }
 
-func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *accountCheck, now time.Time) error {
+func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *accountCheck, now time.Time, browser *luxmed.Browser, checkActive bool) error {
 	r.mu.Lock()
 	ready := !now.Before(state.next)
 	r.mu.Unlock()
@@ -580,8 +588,13 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 	if err != nil {
 		return err
 	}
+	hasSearch := false
 	for _, watch := range watches {
 		if watch.Status == domain.WatchStatusActive && luxmed.SearchWindowOpen(watch, now) {
+			if !checkActive {
+				return nil
+			}
+			hasSearch = true
 			// Use the same authenticated search and persisted cooldown as a normal check.
 			_, err := r.checkWithAccount(ctx, watch, true, state)
 			if errors.Is(err, ErrRateLimited) || errors.Is(err, ErrInactive) {
@@ -590,7 +603,55 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 			return err
 		}
 	}
-	return nil
+	if hasSearch {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if browser != nil {
+		return r.probeReconnectAccess(ctx, userID, now, browser.Client(), watches)
+	}
+	client, err := r.passwordClient(ctx, userID, state)
+	if errors.Is(err, ErrNoAccount) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return r.probeReconnectAccess(ctx, userID, now, client, watches)
+}
+
+func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, now time.Time, client luxmed.Client, watches []domain.Watch) error {
+	for _, watch := range watches {
+		if watch.CityID <= 0 || watch.ServiceID <= 0 {
+			continue
+		}
+		if r.minimumInterval > 0 {
+			ok, err := r.db.ReserveLuxMedSearch(ctx, userID, now, r.minimumInterval)
+			if err != nil || !ok {
+				return err
+			}
+		}
+		if err := client.CheckTermsAccess(ctx, watch); err != nil {
+			if errors.Is(err, luxmed.ErrBrowserBusy) && !errors.Is(err, luxmed.ErrUnavailable) && r.minimumInterval > 0 {
+				releaseCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+				defer stop()
+				return errors.Join(err, r.db.ReleaseLuxMedSearch(releaseCtx, userID, now))
+			}
+			return err
+		}
+		return r.resolveAfterAccessProbe(ctx, userID)
+	}
+	if _, err := client.GetRecentProcedures(ctx); err != nil {
+		return err
+	}
+	return r.resolveAfterAccessProbe(ctx, userID)
+}
+
+func (r *Runner) resolveAfterAccessProbe(ctx context.Context, userID int64) error {
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return r.db.ResolveLuxMedReconnectAfterAccessProbe(recordCtx, userID)
 }
 
 func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accountCheck) (luxmed.Client, error) {

@@ -58,16 +58,24 @@ function onPage(url, origin, path) {
 
 export async function checkPortal(page, origin = portalOrigin) {
   let reservationLoaded = false;
-  let confirmedLogin;
-  const loginNavigation = new Promise(resolve => { confirmedLogin = resolve; });
+  let loginConfirmed = false;
+  let reportLogin;
+  const loginNavigation = new Promise(resolve => { reportLogin = resolve; });
   const observeNavigation = (response) => {
     try {
       const request = response.request();
       if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) return;
       const route = new URL(response.url());
-      if (onPage(route, origin, reservation) && response.ok()) reservationLoaded = true;
-      if (reservationLoaded && onPage(route, origin, login) &&
-          (response.ok() || response.status() === 401)) confirmedLogin('needs_login');
+      const status = response.status();
+      if (onPage(route, origin, reservation) && (response.ok() || (status >= 300 && status < 400))) {
+        reservationLoaded = true;
+      }
+      if ((onPage(route, origin, reservation) && status === 401) ||
+          (reservationLoaded && onPage(route, origin, login) &&
+           (response.ok() || status === 401))) {
+        loginConfirmed = true;
+        reportLogin('needs_login');
+      }
     } catch {
       // A detached frame cannot establish the portal session state.
     }
@@ -75,6 +83,7 @@ export async function checkPortal(page, origin = portalOrigin) {
   page.on('response', observeNavigation);
   try {
     const response = await page.goto(`${origin}${reservation}`, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+    if (loginConfirmed) return 'needs_login';
     const navigation = response && new URL(response.url());
     if (navigation?.origin === origin && response.status() === 401) {
       return 'needs_login';
@@ -98,7 +107,7 @@ export async function checkPortal(page, origin = portalOrigin) {
         onPage(new URL(page.url()), origin, reservation) ? 'ready' : 'unavailable'),
     ]);
   } catch {
-    return 'unavailable';
+    return loginConfirmed ? 'needs_login' : 'unavailable';
   } finally {
     page.off('response', observeNavigation);
   }

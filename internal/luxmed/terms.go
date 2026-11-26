@@ -52,6 +52,21 @@ func SearchWindowOpen(watch domain.Watch, now time.Time) bool {
 	return !from.After(to)
 }
 
+// CheckTermsAccess validates the protected terms response without searching the saved schedule.
+func (c *HTTPClient) CheckTermsAccess(ctx context.Context, watch domain.Watch) error {
+	day := startOfDay(time.Now())
+	query, err := termsQuery(watch, watch.FacilityIDs, day, day)
+	if err != nil {
+		return err
+	}
+	data, err := c.get(ctx, TermsURL+"?"+query.Encode())
+	if err != nil {
+		return err
+	}
+	_, err = decodeTermsResponse(watch, data, false)
+	return err
+}
+
 func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch) (result SearchResult, err error) {
 	authVersion := c.authVersion
 	defer func() { result.Authenticated = c.authVersion != authVersion }()
