@@ -12,6 +12,7 @@ import (
 )
 
 const reconnectRequiredQuery = `SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1)`
+const reconnectEpisodeSQL = `COALESCE((SELECT episode_id FROM luxmed_reconnect WHERE user_id=$1), '')`
 const signInErrorsSQL = `('luxmed_authentication', 'luxmed_account_missing')`
 const watchSignInError = `last_error IN ` + signInErrorsSQL
 
@@ -21,25 +22,31 @@ func (db *DB) LuxMedReconnectRequired(ctx context.Context, userID int64) (bool, 
 	return required, err
 }
 
-func (db *DB) WatchesWithReconnectState(ctx context.Context, userID int64) ([]domain.Watch, bool, error) {
+func (db *DB) LuxMedReconnectEpisode(ctx context.Context, userID int64) (string, error) {
+	var episodeID string
+	err := db.sql.QueryRowContext(ctx, `SELECT `+reconnectEpisodeSQL, userID).Scan(&episodeID)
+	return episodeID, err
+}
+
+func (db *DB) WatchesWithReconnectState(ctx context.Context, userID int64) ([]domain.Watch, string, error) {
 	tx, err := db.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
 	if err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
 	defer tx.Rollback()
 
 	watches, err := watchesByUser(ctx, tx, userID)
 	if err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
-	var required bool
-	if err := tx.QueryRowContext(ctx, reconnectRequiredQuery, userID).Scan(&required); err != nil {
-		return nil, false, err
+	var episodeID string
+	if err := tx.QueryRowContext(ctx, `SELECT `+reconnectEpisodeSQL, userID).Scan(&episodeID); err != nil {
+		return nil, "", err
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, false, err
+		return nil, "", err
 	}
-	return watches, required, nil
+	return watches, episodeID, nil
 }
 
 func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) error {
@@ -53,12 +60,12 @@ func (db *DB) BeginLuxMedReconnectAfterSearch(ctx context.Context, userID int64)
 func (db *DB) beginLuxMedReconnect(ctx context.Context, userID int64, requiresTerms bool) error {
 	first, end := luxmed.SearchDateBounds(time.Now())
 	_, err := db.sql.ExecContext(ctx, `
-		INSERT INTO luxmed_reconnect (user_id, requires_terms)
-		SELECT $1, $3 OR `+hasWatchSignInError("$2", "$6")+`
+		INSERT INTO luxmed_reconnect (user_id, episode_id, requires_terms)
+		SELECT $1, $7, $3 OR `+hasWatchSignInError("$2", "$6")+`
 		WHERE `+db.hasCurrentReconnectSearch("$2", "$4", "$5")+`
 		ON CONFLICT (user_id) DO UPDATE SET requires_terms=TRUE
 		WHERE excluded.requires_terms AND NOT luxmed_reconnect.requires_terms
-	`, userID, domain.WatchStatusActive, requiresTerms, first.UTC(), end.UTC(), domain.WatchStatusPaused)
+	`, userID, domain.WatchStatusActive, requiresTerms, first.UTC(), end.UTC(), domain.WatchStatusPaused, rand.Text())
 	return err
 }
 
@@ -79,13 +86,15 @@ func hasWatchSignInError(active, paused string) string {
 		AND ` + watchSignInError + `)`
 }
 
-func (db *DB) LuxMedReconnectRequiresTerms(ctx context.Context, userID int64) (bool, error) {
+func (db *DB) LuxMedReconnectVerification(ctx context.Context, userID int64) (string, bool, error) {
+	var episodeID string
 	var required bool
 	err := db.sql.QueryRowContext(ctx, `
-		SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1 AND requires_terms)
+		SELECT `+reconnectEpisodeSQL+`,
+		    EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1 AND requires_terms)
 		    OR `+hasWatchSignInError("$2", "$3")+`
-	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&required)
-	return required, err
+	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&episodeID, &required)
+	return episodeID, required, err
 }
 
 type ReconnectDeliveryClaim struct {

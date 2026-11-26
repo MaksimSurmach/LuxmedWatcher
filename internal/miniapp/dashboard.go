@@ -15,6 +15,7 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
+	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
@@ -36,7 +37,7 @@ type dashboard struct {
 	db           *storage.DB
 	browsers     map[int64]*luxmed.Browser
 	connect      func(context.Context, int64) (string, error)
-	checkAccount func(context.Context, domain.User) (bool, error)
+	checkAccount func(context.Context, domain.User) (scheduler.BrowserSessionCheck, error)
 }
 
 func Dashboard(
@@ -44,7 +45,7 @@ func Dashboard(
 	db *storage.DB,
 	browsers map[int64]*luxmed.Browser,
 	app *luxmed.MiniApp,
-	checkAccount func(context.Context, domain.User) (bool, error),
+	checkAccount func(context.Context, domain.User) (scheduler.BrowserSessionCheck, error),
 ) http.Handler {
 	d := &dashboard{
 		cfg: cfg, key: productionKey(), sessions: newSessions(), db: db, browsers: browsers,
@@ -134,22 +135,23 @@ type dashboardHistoryCursor struct {
 }
 
 func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.User) {
-	watches, reconnect, err := d.db.WatchesWithReconnectState(r.Context(), user.ID)
+	watches, episodeID, err := d.db.WatchesWithReconnectState(r.Context(), user.ID)
 	if err != nil {
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
 	reply(w, http.StatusOK, struct {
-		Watches           []domain.Watch
-		Locale            string
-		CityID            *int
-		CityName          string
-		MinimumMinutes    int
-		DefaultMinutes    int
-		ReconnectRequired bool
+		Watches            []domain.Watch
+		Locale             string
+		CityID             *int
+		CityName           string
+		MinimumMinutes     int
+		DefaultMinutes     int
+		ReconnectRequired  bool
+		ReconnectEpisodeID string `json:",omitempty"`
 	}{watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
-		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), reconnect})
+		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), episodeID != "", episodeID})
 }
 
 func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -424,15 +426,19 @@ func (d *dashboard) setStatus(w http.ResponseWriter, r *http.Request, user domai
 
 func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {
 	ctx := r.Context()
-	required, err := d.checkAccount(ctx, user)
+	check, err := d.checkAccount(ctx, user)
 	result := struct {
-		State             string `json:"state"`
-		ReconnectRequired bool
-	}{State: "connected", ReconnectRequired: required}
+		State              string `json:"state"`
+		ReconnectRequired  bool
+		ReconnectEpisodeID string `json:",omitempty"`
+	}{
+		State: "connected", ReconnectRequired: check.VerificationPending || check.EpisodeID != "",
+		ReconnectEpisodeID: check.EpisodeID,
+	}
 
 	switch {
 	case err == nil:
-		if required {
+		if check.VerificationPending {
 			result.State = "verification_pending"
 		}
 	case errors.Is(err, luxmed.ErrAuthentication):

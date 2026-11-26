@@ -135,6 +135,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if res := request("load", "{}", origin, token, http.StatusOK); !strings.Contains(res.Body.String(), `"ReconnectRequired":false`) {
 		t.Fatalf("reconnect state leaked across users: %s", res.Body)
 	}
+	var lastEpisodeID string
 	for _, scenario := range []struct {
 		status  domain.WatchStatus
 		episode bool
@@ -160,13 +161,31 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		if !strings.Contains(result.Body.String(), `"state":"verification_pending","ReconnectRequired":true`) {
 			t.Fatalf("account probe bypassed protected verification for %s watch: %s", status, result.Body)
 		}
+		var check struct{ ReconnectEpisodeID string }
+		if err := json.Unmarshal(result.Body.Bytes(), &check); err != nil {
+			t.Fatal(err)
+		}
+		if (check.ReconnectEpisodeID != "") != scenario.episode {
+			t.Fatalf("probe episode ID did not match open episode: %s", result.Body)
+		}
+		if scenario.episode {
+			if check.ReconnectEpisodeID == lastEpisodeID {
+				t.Fatal("new reconnect episode reused the previous ID")
+			}
+			lastEpisodeID = check.ReconnectEpisodeID
+			if err := db.BeginLuxMedReconnectAfterSearch(ctx, other.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
 		result = request("load", "{}", origin, otherToken, http.StatusOK)
 		var pending struct {
-			Watches           []domain.Watch
-			ReconnectRequired bool
+			Watches            []domain.Watch
+			ReconnectRequired  bool
+			ReconnectEpisodeID string
 		}
 		if err := json.Unmarshal(result.Body.Bytes(), &pending); err != nil || len(pending.Watches) != 1 ||
-			pending.Watches[0].LastError != "luxmed_authentication" || pending.ReconnectRequired != scenario.episode {
+			pending.Watches[0].LastError != "luxmed_authentication" || pending.ReconnectRequired != scenario.episode ||
+			pending.ReconnectEpisodeID != check.ReconnectEpisodeID {
 			t.Fatalf("load lost the pending sign-in evidence: %s (%v)", result.Body, err)
 		}
 		// Simulate the protected request succeeding in the background.
@@ -204,7 +223,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
 		t.Fatal(err)
 	}
-	d.checkAccount = func(ctx context.Context, user domain.User) (bool, error) {
+	d.checkAccount = func(ctx context.Context, user domain.User) (scheduler.BrowserSessionCheck, error) {
 		required, err := runner.CheckBrowserSession(ctx, user)
 		// Simulate background recovery winning as soon as the probe releases the account.
 		if resolveErr := db.ResolveLuxMedReconnect(ctx, user.ID); resolveErr != nil {

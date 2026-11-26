@@ -427,7 +427,7 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	if err := db.MarkWatchChecked(ctx, watch.ID, false, ""); err != nil {
 		t.Fatal(err)
 	}
-	if required, err := db.LuxMedReconnectRequiresTerms(ctx, watch.UserID); err != nil || !required {
+	if _, required, err := db.LuxMedReconnectVerification(ctx, watch.UserID); err != nil || !required {
 		t.Fatalf("session rejection did not carry forward the protected access requirement: required=%v err=%v", required, err)
 	}
 	if notifier.attempts != 1 || notifier.delivered != 0 {
@@ -484,7 +484,7 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	runner = restart()
 	sessionReady.Store(true)
 	requestsBefore = requests.Load()
-	if required, err := runner.CheckBrowserSession(ctx, user); !required || err != nil || requests.Load()-requestsBefore != 1 {
+	if required, err := runner.CheckBrowserSession(ctx, user); !required.VerificationPending || err != nil || requests.Load()-requestsBefore != 1 {
 		t.Fatalf("manual probe did more than check the form: required=%v err=%v requests=%d", required, err, requests.Load()-requestsBefore)
 	}
 	if err := runner.renewBrowserSession(ctx, 42, browser); !errors.Is(err, luxmed.ErrAuthentication) {
@@ -1445,7 +1445,7 @@ func TestBrowserRecoveryChecksAccessWithoutRestartingPausedOrExpiredSearch(t *te
 			runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
 			user, err := db.UserByID(ctx, watch.UserID)
 			must(err)
-			if required, err := runner.CheckBrowserSession(ctx, user); err != nil || !required || termsCalls.Load() != 0 {
+			if required, err := runner.CheckBrowserSession(ctx, user); err != nil || !required.VerificationPending || termsCalls.Load() != 0 {
 				t.Fatalf("manual session check attempted a protected search: required=%v err=%v", required, err)
 			}
 			scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
@@ -1581,7 +1581,7 @@ func TestAssignedBrowserVerifiesPausedLegacyErrorWithoutPasswordOrEpisode(t *tes
 	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	user, err := db.UserByID(ctx, watch.UserID)
 	must(err)
-	if pending, err := runner.CheckBrowserSession(ctx, user); err != nil || !pending || termsCalls.Load() != 0 {
+	if pending, err := runner.CheckBrowserSession(ctx, user); err != nil || !pending.VerificationPending || termsCalls.Load() != 0 {
 		t.Fatalf("manual probe bypassed legacy verification: pending=%v calls=%d err=%v", pending, termsCalls.Load(), err)
 	}
 	if ids := scheduler.maintainReconnectSessions(ctx); !slices.Equal(ids, []int64{42}) || termsCalls.Load() != 1 {

@@ -54,6 +54,7 @@ let apiToken;
 let cities;
 let tab = 'home';
 let account = 'unchecked';
+let pendingEpisodeID = '';
 let flashTimer;
 let renderID = 0;
 
@@ -162,6 +163,7 @@ function bindAccount() {
     const latest = await api('load');
     if (!check.isConnected) return;
     const recovered = (hasPendingAccess(state) || result.ReconnectRequired) && !hasPendingAccess(latest);
+    pendingEpisodeID = result.ReconnectEpisodeID ?? '';
     applySnapshot(latest, recovered && result.state === 'needs_login' ? 'unchecked' : result.state);
     if (tab === 'home' || tab === 'watches') {
       await switchTab(tab, { reload: false });
@@ -916,8 +918,10 @@ function hasPendingAccess(snapshot) {
 
 function applySnapshot(latest, checkedAccount = ['connected', 'verification_pending'].includes(account) ? account : 'unchecked') {
   state = latest;
-  if (state.ReconnectRequired) {
-    account = 'search_paused';
+  const waitingForThisEpisode = checkedAccount === 'verification_pending' &&
+    pendingEpisodeID === (latest.ReconnectEpisodeID ?? '');
+  if (latest.ReconnectRequired) {
+    account = waitingForThisEpisode ? 'verification_pending' : 'search_paused';
   } else if (checkedAccount === 'verification_pending') {
     account = hasPendingAccess(latest) ? checkedAccount : 'connected';
   } else {

@@ -483,12 +483,16 @@ func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
 	return nil
 }
 
+type BrowserSessionCheck struct {
+	EpisodeID           string
+	VerificationPending bool
+}
+
 // CheckBrowserSession confirms a manual sign-in and restores saved active searches.
-// The boolean reports whether reconnect or protected access verification is still required.
-func (r *Runner) CheckBrowserSession(ctx context.Context, user domain.User) (bool, error) {
+func (r *Runner) CheckBrowserSession(ctx context.Context, user domain.User) (BrowserSessionCheck, error) {
 	browser := r.browsers[user.TelegramUserID]
 	if browser == nil {
-		return false, luxmed.ErrAuthentication
+		return BrowserSessionCheck{}, luxmed.ErrAuthentication
 	}
 	return r.probeBrowserSession(ctx, user, browser, false)
 }
@@ -502,24 +506,24 @@ func (r *Runner) renewBrowserSession(ctx context.Context, telegramID int64, brow
 	return err
 }
 
-func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, browser *luxmed.Browser, background bool) (bool, error) {
+func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, browser *luxmed.Browser, background bool) (BrowserSessionCheck, error) {
 	if !user.IsActive() {
-		return false, nil
+		return BrowserSessionCheck{}, nil
 	}
 	state, _ := r.acquireAccount(user.ID, false)
 	if state == nil {
-		return false, luxmed.ErrBrowserBusy
+		return BrowserSessionCheck{}, luxmed.ErrBrowserBusy
 	}
 	defer r.releaseAccount(state)
 
 	if browser == nil {
 		if state.recoveryPending {
-			return false, r.confirmReconnectRecovery(ctx, user.ID, state)
+			return BrowserSessionCheck{}, r.confirmReconnectRecovery(ctx, user.ID, state)
 		}
 		if r.browsers != nil {
-			return false, nil
+			return BrowserSessionCheck{}, nil
 		}
-		return false, r.recheckPasswordBeforeWarning(ctx, user, state)
+		return BrowserSessionCheck{}, r.recheckPasswordBeforeWarning(ctx, user, state)
 	}
 	timeout := 25 * time.Second
 	if !background {
@@ -529,45 +533,45 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	err := browser.Check(probeCtx)
 	cancel()
 	if err == nil {
-		needsTerms, readErr := r.db.LuxMedReconnectRequiresTerms(ctx, user.ID)
+		episodeID, needsTerms, readErr := r.db.LuxMedReconnectVerification(ctx, user.ID)
 		if readErr != nil {
-			return false, readErr
+			return BrowserSessionCheck{}, readErr
 		}
 		if needsTerms && !state.recoveryPending {
 			if !background {
 				// The existing reconciliation loop owns the protected search.
-				return true, nil
+				return BrowserSessionCheck{EpisodeID: episodeID, VerificationPending: true}, nil
 			}
-			return true, r.checkReconnectSearch(ctx, user.ID, state, time.Now(), browser, true)
+			return BrowserSessionCheck{}, r.checkReconnectSearch(ctx, user.ID, state, time.Now(), browser, true)
 		}
-		return false, r.confirmReconnectRecovery(ctx, user.ID, state)
+		return BrowserSessionCheck{}, r.confirmReconnectRecovery(ctx, user.ID, state)
 	}
 	if errors.Is(err, luxmed.ErrAuthentication) {
 		state.recoveryPending = false
 	}
 	if !background {
 		if !errors.Is(err, luxmed.ErrAuthentication) {
-			return false, err
+			return BrowserSessionCheck{}, err
 		}
 		// Keep the episode and the rejected probe in the same account operation.
-		required, readErr := r.db.LuxMedReconnectRequired(ctx, user.ID)
+		episodeID, readErr := r.db.LuxMedReconnectEpisode(ctx, user.ID)
 		if readErr != nil {
-			return false, fmt.Errorf("read LuxMed reconnect status: %w", readErr)
+			return BrowserSessionCheck{}, fmt.Errorf("read LuxMed reconnect status: %w", readErr)
 		}
-		return required, err
+		return BrowserSessionCheck{EpisodeID: episodeID}, err
 	}
 	if errors.Is(err, luxmed.ErrBrowserBusy) {
-		return false, err
+		return BrowserSessionCheck{}, err
 	}
 	if errors.Is(err, luxmed.ErrAuthentication) {
 		recordCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return false, r.requireReconnect(recordCtx, user)
+		return BrowserSessionCheck{}, r.requireReconnect(recordCtx, user)
 	}
 	if state.recoveryPending {
-		return false, errors.Join(err, r.confirmReconnectRecovery(ctx, user.ID, state))
+		return BrowserSessionCheck{}, errors.Join(err, r.confirmReconnectRecovery(ctx, user.ID, state))
 	}
-	return false, err
+	return BrowserSessionCheck{}, err
 }
 
 func (r *Runner) recheckPasswordBeforeWarning(ctx context.Context, user domain.User, state *accountCheck) error {
