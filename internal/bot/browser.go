@@ -41,7 +41,7 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 			return &scheduler.ReconnectDeliveryRejected{RetryAfter: time.Duration(rejected.RetryAfter) * time.Second}
 		case rejected.Code == http.StatusForbidden:
 			// The user may unblock the bot while the reconnect episode is still open.
-			return &scheduler.ReconnectDeliveryRejected{RetryAfter: 6 * time.Hour, MaxAttempts: 4}
+			return &scheduler.ReconnectDeliveryRejected{RetryAfter: 6 * time.Hour, ForbiddenLimit: 4}
 		case rejected.Code >= http.StatusBadRequest:
 			return errors.New("telegram permanently rejected reconnect warning")
 		}

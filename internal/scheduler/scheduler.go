@@ -32,8 +32,8 @@ type Notifier interface {
 type ReconnectDeliveryRejected struct {
 	RetryAfter time.Duration
 	BeforeSend bool
-	// Zero uses the normal retry policy without an attempt limit.
-	MaxAttempts int
+	// A nonzero limit counts only explicit Telegram 403 responses in this episode.
+	ForbiddenLimit int
 }
 
 func (err *ReconnectDeliveryRejected) Error() string {
@@ -336,12 +336,11 @@ func (r *Runner) deliverReconnect(ctx context.Context, user domain.User, now tim
 		}
 		return nil
 	}
-	if rejected, ok := errors.AsType[*ReconnectDeliveryRejected](sendErr); ok &&
-		(rejected.MaxAttempts == 0 || attempt < rejected.MaxAttempts) {
+	if rejected, ok := errors.AsType[*ReconnectDeliveryRejected](sendErr); ok {
 		backoff := min(time.Hour, time.Minute<<min(attempt-1, 6))
 		retryAt := time.Now().Add(max(backoff, rejected.RetryAfter))
-		if err := r.db.ScheduleLuxMedReconnectRetry(recordCtx, user.ID, retryAt); err != nil {
-			return errors.Join(sendErr, fmt.Errorf("schedule LuxMed reconnect retry: %w", err))
+		if err := r.db.RecordLuxMedReconnectRejection(recordCtx, user.ID, retryAt, rejected.ForbiddenLimit); err != nil {
+			return errors.Join(sendErr, fmt.Errorf("record LuxMed reconnect rejection: %w", err))
 		}
 	}
 	return fmt.Errorf("send LuxMed reconnect warning: %w", sendErr)

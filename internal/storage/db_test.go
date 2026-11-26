@@ -546,3 +546,44 @@ func TestLegacySQLiteAppointmentTimeMigration(t *testing.T) {
 		}
 	}
 }
+
+func TestReconnectDeliveryCounterMigration(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+
+		now := time.Now().UTC()
+		_, err = db.sql.ExecContext(ctx, `ALTER TABLE luxmed_reconnect_delivery DROP COLUMN forbidden_failures`)
+		must(err)
+		_, err = db.sql.ExecContext(ctx, `
+			INSERT INTO luxmed_reconnect_delivery(user_id, attempts, retry_at) VALUES ($1, 3, $2)
+		`, user.ID, now.Add(time.Hour))
+		must(err)
+		must(db.Migrate(ctx))
+		must(db.Migrate(ctx))
+
+		attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		must(err)
+		if attempt != 0 {
+			t.Fatalf("migration changed the existing retry time: attempt=%d", attempt)
+		}
+		attempt, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Hour))
+		must(err)
+		if attempt != 4 {
+			t.Fatalf("migration changed the total attempt count: attempt=%d", attempt)
+		}
+		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, now.Add(8*time.Hour), 4))
+		attempt, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(9*time.Hour))
+		must(err)
+		if attempt != 5 {
+			t.Fatalf("legacy attempts consumed the new 403 budget: attempt=%d", attempt)
+		}
+	})
+}

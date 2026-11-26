@@ -41,10 +41,20 @@ func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, no
 	return attempts, err
 }
 
-func (db *DB) ScheduleLuxMedReconnectRetry(ctx context.Context, userID int64, retryAt time.Time) error {
+// A nonzero forbidden limit records a 403 and suppresses further retries when the episode reaches the limit.
+func (db *DB) RecordLuxMedReconnectRejection(
+	ctx context.Context,
+	userID int64,
+	retryAt time.Time,
+	forbiddenLimit int,
+) error {
 	_, err := db.sql.ExecContext(ctx, `
-		UPDATE luxmed_reconnect_delivery SET retry_at=$2 WHERE user_id=$1
-	`, userID, retryAt.UTC())
+		UPDATE luxmed_reconnect_delivery
+		SET forbidden_failures=forbidden_failures + CASE WHEN $3 > 0 THEN 1 ELSE 0 END,
+		    retry_at=CASE WHEN $3 > 0 AND forbidden_failures + 1 >= $3
+		                  THEN NULL ELSE COALESCE($2, retry_at) END
+		WHERE user_id=$1
+	`, userID, retryAt.UTC(), forbiddenLimit)
 	return err
 }
 

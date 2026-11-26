@@ -104,18 +104,29 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("apply storage schema: %w", err)
 	}
-	if !db.postgres {
-		for _, column := range []struct{ name, definition string }{
-			{"preferred_city_id", "INTEGER"},
-			{"preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
+	if db.postgres {
+		if _, err := tx.ExecContext(ctx, `
+			ALTER TABLE luxmed_reconnect_delivery ADD COLUMN IF NOT EXISTS forbidden_failures INTEGER NOT NULL DEFAULT 0
+		`); err != nil {
+			return fmt.Errorf("add PostgreSQL reconnect rejection counter: %w", err)
+		}
+	} else {
+		for _, column := range []struct{ table, name, definition string }{
+			{"users", "preferred_city_id", "INTEGER"},
+			{"users", "preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
+			{"luxmed_reconnect_delivery", "forbidden_failures", "INTEGER NOT NULL DEFAULT 0"},
 		} {
 			var exists bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('users') WHERE name=$1)`, column.name).Scan(&exists); err != nil {
-				return fmt.Errorf("inspect SQLite users schema: %w", err)
+			err := tx.QueryRowContext(ctx, `
+				SELECT EXISTS (SELECT 1 FROM pragma_table_info($1) WHERE name=$2)
+			`, column.table, column.name).Scan(&exists)
+			if err != nil {
+				return fmt.Errorf("inspect SQLite %s schema: %w", column.table, err)
 			}
 			if !exists {
-				if _, err := tx.ExecContext(ctx, `ALTER TABLE users ADD COLUMN `+column.name+` `+column.definition); err != nil {
-					return fmt.Errorf("add SQLite users column %s: %w", column.name, err)
+				query := `ALTER TABLE ` + column.table + ` ADD COLUMN ` + column.name + ` ` + column.definition
+				if _, err := tx.ExecContext(ctx, query); err != nil {
+					return fmt.Errorf("add SQLite %s column %s: %w", column.table, column.name, err)
 				}
 			}
 		}
