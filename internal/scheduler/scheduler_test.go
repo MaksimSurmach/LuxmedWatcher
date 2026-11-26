@@ -455,6 +455,9 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	if count, err := runner.ManualCheck(ctx, expired); count != 0 || err != nil || requests.Load() != requestsBefore {
 		t.Fatalf("past date range should make no requests: count=%d, error=%v", count, err)
 	}
+	if saved, err := db.Watch(ctx, expired.ID); err != nil || saved.LastCheckedAt != nil {
+		t.Fatalf("skipped search acquired a check timestamp: %+v, %v", saved, err)
+	}
 	assertReconnect(true)
 	if err := db.UpdateWatch(ctx, other); err != nil {
 		t.Fatal(err)
@@ -1464,6 +1467,73 @@ type termsProbeClient struct {
 
 func (c *termsProbeClient) CheckTermsAccess(ctx context.Context, watch domain.Watch) error {
 	return c.probe(ctx, watch)
+}
+
+func TestAssignedBrowserVerifiesPausedLegacyErrorWithoutPasswordOrEpisode(t *testing.T) {
+	ctx := t.Context()
+	runner, db, watch := testRunner(t, nil)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	watch.CityID, watch.ServiceID = 1, 12
+	must(db.UpdateWatch(ctx, watch))
+	must(db.DeleteLuxMedAccount(ctx, watch.UserID))
+	must(db.MarkWatchChecked(ctx, watch.ID, false, "luxmed_authentication"))
+	if _, err := db.LuxMedAccount(ctx, watch.UserID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("browser fixture unexpectedly has credentials: %v", err)
+	}
+	other, err := db.UpsertTelegramUser(ctx, domain.User{
+		TelegramUserID: 43, Status: domain.UserStatusActive, Role: domain.UserRoleUser,
+	})
+	must(err)
+	otherWatchID, err := db.CreateWatch(ctx, domain.Watch{UserID: other.ID, CityID: 1, ServiceID: 34})
+	must(err)
+	must(db.SetWatchStatus(ctx, otherWatchID, domain.WatchStatusPaused))
+	must(db.MarkWatchChecked(ctx, otherWatchID, false, "luxmed_authentication"))
+
+	var authorized atomic.Bool
+	var termsCalls atomic.Int32
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/session" {
+			return
+		}
+		termsCalls.Add(1)
+		if req.URL.Path != luxmed.TermsURL || req.URL.Query().Get("serviceVariantId") != "12" {
+			t.Errorf("unexpected protected request: %s", req.URL.RequestURI())
+		}
+		if !authorized.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		fmt.Fprint(w, `{"termsForService":{"termsForDays":[]}}`)
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	must(err)
+	runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
+	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if ids := scheduler.maintainReconnectSessions(ctx); !slices.Equal(ids, []int64{42}) || termsCalls.Load() != 1 {
+		t.Fatalf("wrong browser recovery candidates: ids=%v calls=%d", ids, termsCalls.Load())
+	}
+	before, err := db.Watch(ctx, watch.ID)
+	must(err)
+	if before.LastError != "luxmed_authentication" || before.LastCheckedAt == nil {
+		t.Fatalf("unverified browser cleared a legacy error: %+v", before)
+	}
+	authorized.Store(true)
+	scheduler.maintainReconnectSessions(ctx)
+	after, err := db.Watch(ctx, watch.ID)
+	must(err)
+	if termsCalls.Load() != 2 || after.LastError != "" || after.Status != domain.WatchStatusPaused ||
+		after.LastCheckedAt == nil || !after.LastCheckedAt.Equal(*before.LastCheckedAt) {
+		t.Fatalf("protected browser recovery changed the pause schedule: %+v", after)
+	}
+	if required, err := db.LuxMedReconnectRequired(ctx, watch.UserID); err != nil || required {
+		t.Fatalf("legacy browser recovery created an episode: required=%v err=%v", required, err)
+	}
 }
 
 func TestPausedLegacySignInErrorRecoversWithAlternativeProtectedFilter(t *testing.T) {

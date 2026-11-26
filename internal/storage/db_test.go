@@ -795,6 +795,52 @@ func TestUnblockAcceleratesOnlyConfirmedForbiddenDelivery(t *testing.T) {
 	})
 }
 
+func TestReconnectOnlyRequeuesCurrentSearches(t *testing.T) {
+	for _, mode := range []string{"pending password", "verified recovery"} {
+		t.Run(mode, func(t *testing.T) {
+			testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+				must := func(err error) {
+					t.Helper()
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42, Status: domain.UserStatusActive})
+				must(err)
+				today, _ := luxmed.SearchDateBounds(time.Now())
+				past := today.AddDate(0, 0, -1)
+				currentID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 12, DateTo: &today})
+				must(err)
+				expiredID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 34, DateTo: &past})
+				must(err)
+				must(db.MarkWatchChecked(ctx, currentID, false, "luxmed_authentication"))
+				must(db.MarkWatchChecked(ctx, expiredID, true, ""))
+				must(db.MarkWatchChecked(ctx, expiredID, false, "luxmed_authentication"))
+				before, err := db.Watch(ctx, expiredID)
+				must(err)
+				must(db.BeginLuxMedReconnectAfterSearch(ctx, user.ID))
+				if mode == "pending password" {
+					must(db.SavePendingLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Status: domain.AccountStatusActive}))
+				} else {
+					must(db.ResolveLuxMedReconnect(ctx, user.ID))
+				}
+				after, err := db.Watch(ctx, expiredID)
+				must(err)
+				if after.LastCheckedAt == nil || !after.LastCheckedAt.Equal(*before.LastCheckedAt) ||
+					after.LastSuccessAt == nil || !after.LastSuccessAt.Equal(*before.LastSuccessAt) ||
+					after.DateTo == nil || !after.DateTo.Equal(past) || after.ServiceID != 34 {
+					t.Fatalf("expired search lost schedule or filters: %+v", after)
+				}
+				due, err := db.DueWatches(ctx, 5)
+				must(err)
+				if len(due) != 1 || due[0].ID != currentID || due[0].LastCheckedAt != nil || due[0].ServiceID != 12 {
+					t.Fatalf("wrong searches requeued: %+v", due)
+				}
+			})
+		})
+	}
+}
+
 func TestReconnectRequiresCurrentActiveSearchInWarsaw(t *testing.T) {
 	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
 		must := func(err error) {

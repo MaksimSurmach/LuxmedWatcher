@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
 func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.User, error) {
@@ -179,13 +180,15 @@ func (db *DB) saveLuxMedAccount(ctx context.Context, account domain.LuxMedAccoun
 		return err
 	}
 	if verified {
-		if err := resolveLuxMedReconnect(ctx, tx, account.UserID, true); err != nil {
+		if err := db.resolveLuxMedReconnectTx(ctx, tx, account.UserID, true); err != nil {
 			return err
 		}
 	} else {
+		first, end := luxmed.SearchDateBounds(time.Now())
 		if _, err := tx.ExecContext(ctx, `
 			UPDATE watches SET last_checked_at=NULL WHERE user_id=$1 AND status=$2
-		`, account.UserID, domain.WatchStatusActive); err != nil {
+				AND `+db.currentSearchWindow("$3", "$4")+`
+		`, account.UserID, domain.WatchStatusActive, first.UTC(), end.UTC()); err != nil {
 			return err
 		}
 	}
@@ -291,26 +294,36 @@ func watchesByUser(ctx context.Context, db watchQueryer, userID int64) ([]domain
 }
 
 func (db *DB) ActiveWatchTelegramIDs(ctx context.Context) ([]int64, error) {
-	return db.activeWatchTelegramIDs(ctx, false)
+	return db.activeWatchTelegramIDs(ctx, false, nil)
 }
 
-func (db *DB) ReconnectWatchTelegramIDs(ctx context.Context) ([]int64, error) {
-	return db.activeWatchTelegramIDs(ctx, true)
+func (db *DB) ReconnectWatchTelegramIDs(ctx context.Context, browserIDs []int64) ([]int64, error) {
+	return db.activeWatchTelegramIDs(ctx, true, browserIDs)
 }
 
-func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool) ([]int64, error) {
+func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool, browserIDs []int64) ([]int64, error) {
+	args := []any{domain.UserStatusActive, domain.WatchStatusActive, reconnectOnly, domain.AccountStatusActive, domain.WatchStatusPaused}
+	credentials := `EXISTS (SELECT 1 FROM luxmed_accounts a WHERE a.user_id=u.id AND a.status=$4)`
+	if len(browserIDs) != 0 {
+		params := make([]string, 0, len(browserIDs))
+		for _, id := range browserIDs {
+			args = append(args, id)
+			params = append(params, "$"+strconv.Itoa(len(args)))
+		}
+		credentials += ` OR u.telegram_user_id IN (` + strings.Join(params, ",") + `)`
+	}
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT u.telegram_user_id
 		FROM users u
 		WHERE u.status=$1 AND u.role <> ''
 			AND (($3 AND (
 				EXISTS (SELECT 1 FROM luxmed_reconnect r WHERE r.user_id=u.id)
-				OR (EXISTS (SELECT 1 FROM luxmed_accounts a WHERE a.user_id=u.id AND a.status=$4)
+				OR ((`+credentials+`)
 					AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status IN ($2, $5) AND `+watchSignInError+`))
 			))
 				OR (NOT $3 AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status=$2)))
 		ORDER BY u.telegram_user_id
-	`, domain.UserStatusActive, domain.WatchStatusActive, reconnectOnly, domain.AccountStatusActive, domain.WatchStatusPaused)
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -327,6 +340,8 @@ func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool) ([
 }
 
 func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error) {
+	now := time.Now()
+	first, end := luxmed.SearchDateBounds(now)
 	due := db.dateTimeSQL("last_checked_at") + ` <= ` + db.dateTimeSQL("$2") + ` - check_interval_seconds / 86400.0`
 	if db.postgres {
 		due = `last_checked_at + check_interval_seconds * interval '1 second' <= $2`
@@ -334,10 +349,11 @@ func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error)
 	query := watchSelect() + `
 		WHERE status=$1 AND (last_checked_at IS NULL OR ` + due + `)
 		AND user_id IN (SELECT id FROM users WHERE status=$3)
+		AND ` + db.currentSearchWindow("$4", "$5") + `
 		ORDER BY COALESCE(last_checked_at, created_at), id`
-	args := []any{domain.WatchStatusActive, time.Now().UTC(), domain.UserStatusActive}
+	args := []any{domain.WatchStatusActive, now.UTC(), domain.UserStatusActive, first.UTC(), end.UTC()}
 	if limit > 0 {
-		query += ` LIMIT $4`
+		query += ` LIMIT $6`
 		args = append(args, limit)
 	}
 	rows, err := db.sql.QueryContext(ctx, query, args...)

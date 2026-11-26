@@ -203,6 +203,9 @@ func (r *Runner) checkWithAccount(ctx context.Context, requested domain.Watch, m
 	if watch.UserID != requested.UserID || watch.Status != domain.WatchStatusActive {
 		return 0, ErrInactive
 	}
+	if !luxmed.SearchWindowOpen(watch, time.Now()) {
+		return 0, nil
+	}
 	interval := max(time.Duration(watch.CheckIntervalSeconds)*time.Second, r.minimumInterval)
 	if manual {
 		interval = r.minimumInterval
@@ -313,6 +316,9 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		}
 	}
 	result, searchErr := client.SearchAppointments(ctx, watch)
+	if searchErr == nil && !result.Checked && !luxmed.SearchWindowOpen(watch, time.Now()) {
+		return 0, ErrInactive
+	}
 	appointments := result.Appointments
 	if errors.Is(searchErr, luxmed.ErrAuthentication) {
 		state.client = nil
@@ -523,7 +529,7 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	err := browser.Check(probeCtx)
 	cancel()
 	if err == nil {
-		needsTerms, readErr := r.db.LuxMedReconnectRequiresTerms(ctx, user.ID)
+		needsTerms, readErr := r.db.LuxMedReconnectRequiresTerms(ctx, user.ID, background)
 		if readErr != nil {
 			return false, readErr
 		}
@@ -832,7 +838,13 @@ func (s *Scheduler) maintainBrowserSessions(ctx context.Context) {
 }
 
 func (s *Scheduler) maintainReconnectSessions(ctx context.Context) []int64 {
-	ids, err := s.db.ReconnectWatchTelegramIDs(ctx)
+	assigned := make([]int64, 0, len(s.runner.browsers))
+	for id, browser := range s.runner.browsers {
+		if browser != nil {
+			assigned = append(assigned, id)
+		}
+	}
+	ids, err := s.db.ReconnectWatchTelegramIDs(ctx, assigned)
 	if err != nil && ctx.Err() == nil {
 		s.logger.Warn("load LuxMed accounts waiting for sign-in", "err", err)
 	}

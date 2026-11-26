@@ -61,18 +61,24 @@ func (db *DB) beginLuxMedReconnect(ctx context.Context, userID int64, requiresTe
 }
 
 func (db *DB) hasCurrentReconnectSearch(status, first, end string) string {
-	from, to := db.dateTimeSQL("date_from"), db.dateTimeSQL("date_to")
-	return `EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=` + status + `
-		AND (date_to IS NULL OR ` + to + ` >= ` + db.dateTimeSQL(first) + `)
-		AND (date_from IS NULL OR ` + from + ` < ` + db.dateTimeSQL(end) + `)
-		AND (date_from IS NULL OR date_to IS NULL OR ` + from + ` <= ` + to + `))`
+	return `EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=` + status +
+		` AND ` + db.currentSearchWindow(first, end) + `)`
 }
 
-func (db *DB) LuxMedReconnectRequiresTerms(ctx context.Context, userID int64) (bool, error) {
+func (db *DB) currentSearchWindow(first, end string) string {
+	from, to := db.dateTimeSQL("date_from"), db.dateTimeSQL("date_to")
+	return `(date_to IS NULL OR ` + to + ` >= ` + db.dateTimeSQL(first) + `)
+		AND (date_from IS NULL OR ` + from + ` < ` + db.dateTimeSQL(end) + `)
+		AND (date_from IS NULL OR date_to IS NULL OR ` + from + ` <= ` + to + `)`
+}
+
+func (db *DB) LuxMedReconnectRequiresTerms(ctx context.Context, userID int64, checkLegacy bool) (bool, error) {
 	var required bool
 	err := db.sql.QueryRowContext(ctx, `
 		SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1 AND requires_terms)
-	`, userID).Scan(&required)
+		    OR ($2 AND NOT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1)
+		        AND EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status IN ($3, $4) AND `+watchSignInError+`))
+	`, userID, checkLegacy, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&required)
 	return required, err
 }
 
@@ -214,7 +220,7 @@ func (db *DB) resolveLuxMedReconnect(ctx context.Context, userID int64, requeue 
 	}
 	defer tx.Rollback()
 
-	if err := resolveLuxMedReconnect(ctx, tx, userID, requeue); err != nil {
+	if err := db.resolveLuxMedReconnectTx(ctx, tx, userID, requeue); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -224,7 +230,7 @@ func (db *DB) resolveLuxMedReconnect(ctx context.Context, userID int64, requeue 
 	return nil
 }
 
-func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64, requeue bool) error {
+func (db *DB) resolveLuxMedReconnectTx(ctx context.Context, tx *sql.Tx, userID int64, requeue bool) error {
 	result, err := tx.ExecContext(ctx, `DELETE FROM luxmed_reconnect WHERE user_id=$1`, userID)
 	if err != nil {
 		return err
@@ -239,10 +245,12 @@ func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64, reque
 		}
 	}
 	// Sign-in errors can outlive a search that was paused before an episode opened.
+	first, end := luxmed.SearchDateBounds(time.Now())
+	current := `status=$2 AND ` + db.currentSearchWindow("$6", "$7")
 	_, err = tx.ExecContext(ctx, `
 		UPDATE watches
-		SET last_checked_at=CASE WHEN status=$2 AND $4 THEN NULL ELSE last_checked_at END, last_error=''
-		WHERE user_id=$1 AND status IN ($2, $3) AND (($4 AND $5 AND status=$2) OR `+watchSignInError+`)
-	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused, requeue, removed > 0)
+		SET last_checked_at=CASE WHEN $4 AND `+current+` THEN NULL ELSE last_checked_at END, last_error=''
+		WHERE user_id=$1 AND status IN ($2, $3) AND (($4 AND $5 AND `+current+`) OR `+watchSignInError+`)
+	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused, requeue, removed > 0, first.UTC(), end.UTC())
 	return err
 }
