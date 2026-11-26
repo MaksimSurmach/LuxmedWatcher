@@ -10,6 +10,7 @@ Open /?tab=history, /?tab=watches or add &scenario=empty|session|long|booking
 No Telegram, database or LUX MED account is needed."""
 import json, sys, pathlib
 from datetime import datetime, timedelta, timezone
+from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -100,6 +101,9 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code); self.send_header('Content-Type', ctype); self.send_header('Content-Length', str(len(body))); self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         u = urlparse(self.path); q = parse_qs(u.query)
+        if u.path == '/i18n.js':
+            dictionaries = {lang: json.loads((I18N / f'{lang}.json').read_bytes()) for lang in sorted(LANGS)}
+            return self.send(('export default ' + json.dumps(dictionaries)).encode(), TYPES['.js'])
         if u.path.startswith('/i18n/'):
             locale = u.path[6:]
             if locale not in LANGS: return self.send(b'', 'text/plain', 404)
@@ -109,6 +113,14 @@ class H(BaseHTTPRequestHandler):
         if WEB not in f.parents or not f.is_file(): return self.send(b'', 'text/plain', 404)
         body = f.read_bytes()
         if name == 'dashboard.html':
+            locale = pick(q, 'lang', LANGS, 'pl')
+            labels = json.loads((I18N / f'{locale}.json').read_bytes())
+            for field, value in {
+                'Locale': locale, 'JavaScript': labels['common.javascript_required'],
+                'Loading': labels['dashboard.loading'], 'Unavailable': labels['error.unavailable'],
+                'Retry': labels['common.retry'],
+            }.items():
+                body = body.replace(('{{.' + field + '}}').encode(), escape(value).encode())
             # Scenario and language travel in initData, then in the session token, because the page
             # sends no Referer and the API calls carry no query string.
             # Only allow-listed values reach the inline script, and '<' is escaped for the HTML context.

@@ -11,7 +11,6 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
-	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
 )
 
 func allowsFlowCallback(state *flow, data string) bool {
@@ -203,13 +202,13 @@ func (b *Bot) showIntervalStep(user domain.User, state *flow) {
 		}
 	}
 	rows := [][]tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.interval_default", interval.String()), "interval:default")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.interval_default", b.intervalText(user.Locale, interval)), "interval:default")),
 	}
 	if len(choices) > 0 {
 		rows = append(rows, choices)
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.cancel"), "cancel")))
-	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.interval", b.cfg.MinimumInterval.String()), tgbotapi.NewInlineKeyboardMarkup(rows...))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.interval", b.intervalText(user.Locale, b.cfg.MinimumInterval)), tgbotapi.NewInlineKeyboardMarkup(rows...))
 }
 
 func (b *Bot) previewWatch(user domain.User, state *flow, interval time.Duration) {
@@ -240,7 +239,7 @@ func (b *Bot) watchSummary(user domain.User, watch domain.Watch) string {
 	}
 	dates := tr("button.next_days", watch.NextDays)
 	if watch.DateFrom != nil && watch.DateTo != nil {
-		dates = watch.DateFrom.In(luxmed.Location()).Format(time.DateOnly) + " – " + watch.DateTo.In(luxmed.Location()).Format(time.DateOnly)
+		dates = appointmentDate(user.Locale, *watch.DateFrom) + " – " + appointmentDate(user.Locale, *watch.DateTo)
 	}
 	hours, days := tr("button.any_time"), tr("button.any_day")
 	if len(watch.TimeWindows) > 0 {
@@ -259,7 +258,7 @@ func (b *Bot) watchSummary(user domain.User, watch domain.Watch) string {
 			days = strings.Join(names, ", ")
 		}
 	}
-	return tr("flow.watch.preview", procedures.Name(user.Locale, watch.ServiceName), watch.CityName, doctor, truncateMessage(facilities, 400), dates, days, hours, (time.Duration(watch.CheckIntervalSeconds) * time.Second).String())
+	return tr("flow.watch.preview", watch.ServiceName, watch.CityName, doctor, truncateMessage(facilities, 400), dates, days, hours, b.intervalText(user.Locale, time.Duration(watch.CheckIntervalSeconds)*time.Second))
 }
 
 func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {

@@ -1,4 +1,4 @@
-import { initialLanguage, language, languages, loadLanguage, t } from '/language.js';
+import { initialLanguage, language, languages, setLanguage, t } from '/language.js';
 
 const telegram = window.Telegram?.WebApp;
 const main = document.querySelector('#main');
@@ -11,14 +11,33 @@ const icon = (name) => `<span class="icon" aria-hidden="true">${icons[name]}</sp
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 })[char]);
-const localDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Warsaw' });
-const dateOnly = (date) => date ? localDate.format(new Date(date)) : '';
-const dateText = (date) => shortDate.format(new Date(date));
+const timeZone = 'Europe/Warsaw';
+const localDate = new Intl.DateTimeFormat('en', { timeZone, year: 'numeric', month: '2-digit', day: '2-digit' });
+const clock = new Intl.DateTimeFormat('en', { timeZone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+
+function dateParts(value) {
+  const parts = localDate.formatToParts(new Date(value));
+  const part = (type) => parts.find((item) => item.type === type).value;
+  return { year: part('year'), month: part('month'), day: part('day') };
+}
+
+function dateOnly(value) {
+  if (!value) return '';
+  const { year, month, day } = dateParts(value);
+  return `${year}-${month}-${day}`;
+}
+
+function shortDate(value) {
+  const { month, day } = dateParts(value);
+  return { day: Number(day), month: months[Number(month) - 1] };
+}
+
+const dateText = (value) => t('calendar.short_date', shortDate(value));
 const text = (key, values) => escape(t(key, values));
 
 class DashboardError extends Error {
-  constructor(key, fallback = '') {
-    super(t(key) || fallback);
+  constructor(key) {
+    super(t(key));
     this.key = key;
   }
 }
@@ -28,8 +47,7 @@ function errorText(error) {
 }
 const tabs = ['home', 'watches', 'history', 'settings'];
 const titleFor = (tab) => t(`tabs.${tab}`);
-let shortDate;
-let clock;
+let months;
 let weekdays;
 let state;
 let apiToken;
@@ -42,13 +60,8 @@ let renderID = 0;
 for (const target of document.querySelectorAll('[data-icon]')) target.innerHTML = icon(target.dataset.icon);
 
 function renderLanguage() {
-  const timeZone = 'Europe/Warsaw';
-  shortDate = new Intl.DateTimeFormat(language, { timeZone, day: 'numeric', month: 'short' });
-  clock = new Intl.DateTimeFormat(language, { timeZone, hour: '2-digit', minute: '2-digit' });
-  const weekday = new Intl.DateTimeFormat(language, { timeZone, weekday: 'short' });
-  // 1 January 2024 was a Monday, matching the schedule’s weekday order.
-  weekdays = [t('editor.every_day'), ...Array.from({ length: 7 }, (_, index) =>
-    weekday.format(Date.UTC(2024, 0, index + 1)))];
+  months = t('calendar.months').split(',');
+  weekdays = [t('editor.every_day'), ...t('calendar.weekdays').split(',')];
   navigation.setAttribute('aria-label', t('dashboard.navigation'));
   for (const button of navigation.querySelectorAll('button')) {
     button.lastElementChild.textContent = titleFor(button.dataset.tab);
@@ -126,7 +139,12 @@ function accountSection(compact = false) {
 
 async function signIn() {
   const { url } = await api('connect');
-  const target = new URL(url);
+  let target;
+  try {
+    target = new URL(url);
+  } catch {
+    throw new DashboardError('error.link');
+  }
   if (target.origin !== location.origin || target.pathname !== '/') throw new DashboardError('error.link');
   target.searchParams.set('return', 'app');
   target.hash = location.hash;
@@ -194,7 +212,7 @@ const timeOf = (date) => `${dateText(date)}, ${clock.format(new Date(date))}`;
 function watchCard(watch) {
   const active = watch.Status === 'active';
   const dates = watch.DateFrom && watch.DateTo
-    ? `${dateText(watch.DateFrom)} — ${dateText(watch.DateTo)}`
+    ? `${escape(dateText(watch.DateFrom))} — ${escape(dateText(watch.DateTo))}`
     : text('watches.period_days', { days: watch.NextDays });
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
   const checkError = watch.LastError ? watchErrors.get(watch.LastError) ?? 'watches.check_error' : '';
@@ -283,8 +301,7 @@ function watches() {
   };
 }
 
-const dayKey = (date) => localDate.format(new Date(date));
-const longDay = () => new Intl.DateTimeFormat(language, { timeZone: 'Europe/Warsaw', weekday: 'short', day: 'numeric', month: 'long' });
+const longDay = () => new Intl.DateTimeFormat(language, { timeZone, weekday: 'short', day: 'numeric', month: 'long' });
 const isExpired = (slot, now) => slot.Status === 'expired' || new Date(slot.DateTime) <= now;
 
 function timeRow(slot, index, mixed, now) {
@@ -306,7 +323,7 @@ function slotGroups(slots, now) {
   const format = longDay();
   const days = new Map();
   slots.forEach((slot, index) => {
-    const day = dayKey(slot.DateTime);
+    const day = dateOnly(slot.DateTime);
     if (!days.has(day)) days.set(day, { label: format.format(new Date(slot.DateTime)), places: new Map() });
     const places = days.get(day).places;
     const place = `${slot.Facility}\n${slot.Address}`;
@@ -317,12 +334,16 @@ function slotGroups(slots, now) {
   return [...days.values()].map((day) => `<section class="day">
     <h2 class="day-title">${escape(day.label)}</h2>
     ${[...day.places.values()].map((rows) => {
-      rows.sort(([a], [b]) => Date.parse(a.DateTime) - Date.parse(b.DateTime));
-      const next = rows.find(([slot]) => !isExpired(slot, now));
+      rows.sort(([a], [b]) => {
+        const availability = Number(isExpired(a, now)) - Number(isExpired(b, now));
+        return availability || Date.parse(a.DateTime) - Date.parse(b.DateTime);
+      });
+      const [first] = rows[0];
+      const firstTime = Date.parse(first.DateTime);
       return {
         rows,
-        nextTime: next ? Date.parse(next[0].DateTime) : Infinity,
-        firstTime: Date.parse(rows[0][0].DateTime),
+        nextTime: isExpired(first, now) ? Infinity : firstTime,
+        firstTime,
       };
     }).sort((a, b) => a.nextTime - b.nextTime || a.firstTime - b.firstTime).map(({ rows }) => {
       const { Facility, Address } = rows[0][0];
@@ -530,7 +551,7 @@ async function editor(watch, focusPicks = false) {
   let facilities = new Set(watch?.FacilityIDs);
   const existingHours = new Map((watch?.TimeWindows ?? []).map((window) => [window.weekday, window]));
   const advancedOpen = Boolean(doctor || facilities.size);
-  show(title, `<form class="stack">
+  show(title, `<form class="stack" novalidate>
     <fieldset class="card stack"><legend>${text('editor.what')}</legend>
       <label class="field">${text('editor.city')}<select name="city" required>${cityOptions(options, city, t('editor.choose_city'))}</select></label>
       ${watch ? '' : `<section class="quick-services stack" tabindex="-1" aria-labelledby="recommendations-heading">
@@ -812,6 +833,13 @@ async function editor(watch, focusPicks = false) {
   form.onsubmit = (event) => {
     event.preventDefault();
     void run(form.querySelector('[type="submit"]'), async () => {
+      const invalid = Array.from(form.elements).find((field) => field.willValidate && !field.validity.valid);
+      if (invalid) {
+        const section = invalid.closest('details');
+        if (section) section.open = true;
+        invalid.focus();
+        throw new DashboardError('error.invalid_fields');
+      }
       if (!service) throw new DashboardError('editor.choose_service');
       const windows = selectedHours();
       const range = fields.dateMode.value === 'range';
@@ -835,7 +863,7 @@ async function editor(watch, focusPicks = false) {
 }
 
 function screenError(title, error, retry) {
-  show(title, `<div class="card stack"><p class="error">${escape(errorText(error))}</p>${retry ? `<button type="button" class="secondary">${text('common.retry') || 'Spróbuj ponownie'}</button>` : ''}</div>`);
+  show(title, `<div class="card stack"><p class="error">${escape(errorText(error))}</p>${retry ? `<button type="button" class="secondary">${text('common.retry')}</button>` : ''}</div>`);
   if (retry) main.querySelector('button').onclick = retry;
 }
 
@@ -860,26 +888,22 @@ async function switchTab(next) {
 
 async function update(next) {
   state = await api('load');
-  await loadLanguage(state.Locale);
+  setLanguage(state.Locale);
   renderLanguage();
   navigation.hidden = false;
   await switchTab(next);
 }
 
 async function start() {
-  try {
-    await loadLanguage(initialLanguage(telegram));
-  } catch {
-    screenError('Luxmed Watcher', new DashboardError('error.unavailable', 'Nie udało się wczytać aplikacji. Spróbuj ponownie.'), start);
-    return;
-  }
+  const params = new URLSearchParams(location.search);
+  setLanguage(initialLanguage(telegram, params.get('lang')));
   renderLanguage();
   if (!telegram?.initData) {
     screenError('Luxmed Watcher', new DashboardError('error.open_from_bot'));
     return;
   }
   show(titleFor('home'), `<p>${text('dashboard.loading')}</p>`, false);
-  const initial = new URLSearchParams(location.search).get('tab');
+  const initial = params.get('tab');
   try {
     ({ token: apiToken } = await api('auth'));
     await update(tabs.includes(initial) ? initial : 'home');
@@ -888,7 +912,6 @@ async function start() {
   }
 }
 
-telegram?.ready();
 telegram?.expand();
 telegram?.enableVerticalSwipes?.();
 

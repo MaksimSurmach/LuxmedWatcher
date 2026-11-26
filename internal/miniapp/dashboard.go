@@ -25,6 +25,7 @@ type DashboardConfig struct {
 	BotID           int64
 	MinimumInterval time.Duration
 	DefaultInterval time.Duration
+	SyncAppMenu     func(context.Context, int64)
 }
 
 type dashboard struct {
@@ -128,9 +129,6 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
-	for i := range watches {
-		watches[i].ServiceName = procedures.Name(user.Locale, watches[i].ServiceName)
-	}
 	reply(w, http.StatusOK, struct {
 		Watches        []domain.Watch
 		Locale         string
@@ -192,7 +190,7 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 			return
 		}
 		for _, item := range items {
-			slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, procedures.Name(user.Locale, item.ServiceName),
+			slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, item.ServiceName,
 				item.DoctorName, item.FacilityName, item.Address, item.Status})
 		}
 		offset = end
@@ -251,9 +249,6 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 	}
 	const pageSize = 24
 	items, err := procedures.Search(ctx, d.db, city.ID, user.Locale, input.Query, pageSize+1, input.Offset)
-	for i := range items {
-		items[i].Name = procedures.Name(user.Locale, items[i].Name)
-	}
 	dashboardResult(w, struct {
 		Items []domain.Procedure
 		More  bool
@@ -332,7 +327,7 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 				return
 			}
 			seen[item.ID] = true
-			*group.target = append(*group.target, domain.Service{ID: item.ID, Name: procedures.Name(user.Locale, service.Name)})
+			*group.target = append(*group.target, domain.Service{ID: item.ID, Name: service.Name})
 			if len(*group.target) == limit {
 				break
 			}
@@ -389,6 +384,9 @@ func (d *dashboard) settings(w http.ResponseWriter, r *http.Request, user domain
 	}
 	if err == nil {
 		err = d.db.SetUserPreferences(r.Context(), user.ID, input.Locale, city)
+	}
+	if err == nil && d.cfg.SyncAppMenu != nil {
+		d.cfg.SyncAppMenu(r.Context(), user.ID)
 	}
 	dashboardResult(w, nil, err)
 }

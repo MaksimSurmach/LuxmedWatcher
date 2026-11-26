@@ -5,9 +5,11 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/coder/websocket"
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
@@ -251,5 +254,57 @@ func TestSharedViewerAnnouncesCDPAndUsesPrivateWorkerScope(t *testing.T) {
 	defer conn.CloseNow()
 	if _, frame, err := conn.Read(t.Context()); err != nil || string(frame) != "frame" {
 		t.Fatalf("scoped websocket did not receive its frame: %q, %v", frame, err)
+	}
+}
+
+func TestGatewayServesLocalizedPagesAndBundledDictionaries(t *testing.T) {
+	t.Parallel()
+
+	handler := (&app{}).public(os.DirFS("../../tools/miniapp/web"), fstest.MapFS{})
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/i18n.js", nil))
+	const prefix = "export default "
+	if res.Code != http.StatusOK || !strings.HasPrefix(res.Body.String(), prefix) ||
+		!strings.HasPrefix(res.Header().Get("Content-Type"), "text/javascript") {
+		t.Fatalf("dictionary module: status %d, type %s", res.Code, res.Header().Get("Content-Type"))
+	}
+	var dictionaries map[string]map[string]string
+	if err := json.Unmarshal(res.Body.Bytes()[len(prefix):], &dictionaries); err != nil {
+		t.Fatal(err)
+	}
+	boot := httptest.NewRecorder()
+	handler.ServeHTTP(boot, httptest.NewRequest(http.MethodGet, "/boot.js", nil))
+	if boot.Code != http.StatusOK || !strings.HasPrefix(boot.Header().Get("Content-Type"), "text/javascript") {
+		t.Fatalf("boot module: status %d, type %s", boot.Code, boot.Header().Get("Content-Type"))
+	}
+	for _, locale := range i18n.SupportedLocales {
+		t.Run(locale, func(t *testing.T) {
+			for _, path := range []string{"/", "/app"} {
+				req := httptest.NewRequest(http.MethodGet, path+"?lang="+locale, nil)
+				req.Header.Set("Accept-Language", "en-US")
+				res := httptest.NewRecorder()
+				handler.ServeHTTP(res, req)
+				labels := dictionaries[locale]
+				body := res.Body.String()
+				if res.Code != http.StatusOK ||
+					!strings.Contains(body, `<html lang="`+locale+`">`) ||
+					!strings.Contains(body, `src="/boot.js"`) {
+					t.Errorf("%s: incorrect locale or missing boot script", path)
+				}
+				for _, key := range []string{"common.javascript_required", "dashboard.loading", "error.unavailable", "common.retry"} {
+					want := template.HTMLEscapeString(labels[key])
+					if want == "" || !strings.Contains(body, want) {
+						t.Errorf("%s: missing localized bootstrap label %s", path, key)
+					}
+				}
+			}
+		})
+	}
+	req := httptest.NewRequest(http.MethodGet, "/app", nil)
+	req.Header.Set("Accept-Language", "fr-FR, en-US;q=0.5, uk-UA;q=0.7, be;q=0")
+	res = httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	if !strings.Contains(res.Body.String(), `<html lang="uk">`) {
+		t.Error("expected the highest-ranked supported browser locale")
 	}
 }

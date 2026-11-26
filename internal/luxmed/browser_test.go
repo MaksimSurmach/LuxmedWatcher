@@ -50,8 +50,8 @@ func TestBrowserUsesWorkerWithoutPasswordOrPortalTokens(t *testing.T) {
 	if err != nil || len(cities) != 1 || cities[0].ID != 123 {
 		t.Fatalf("cities = %v, error = %v", cities, err)
 	}
-	link, err := browser.ViewerLink(t.Context())
-	if err != nil || link != "http://localhost:18769/connect#"+strings.Repeat("a", 64) {
+	link, err := browser.ViewerLink(t.Context(), "uk")
+	if err != nil || link != "http://localhost:18769/connect?lang=uk#"+strings.Repeat("a", 64) {
 		t.Fatalf("unexpected viewer link: %v", err)
 	}
 }

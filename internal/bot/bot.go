@@ -34,6 +34,7 @@ type Config struct {
 	PollTimeout      int
 	Browsers         map[int64]*luxmed.Browser
 	MiniApp          *luxmed.MiniApp
+	MenuClient       tgbotapi.HTTPClient
 }
 
 type Bot struct {
@@ -45,6 +46,7 @@ type Bot struct {
 	runner        *scheduler.Runner
 	manualChecks  chan struct{}
 	manualWorkers sync.WaitGroup
+	appMenuLocks  sync.Map // User ID to *sync.Mutex.
 	logger        *slog.Logger
 	newClient     func(bool) luxmed.Client
 	flowState     map[int64]*flow
@@ -153,7 +155,7 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	details := b.actionButton(user, "button.show_watch", fmt.Sprintf("watch:show:%d", watch.ID))
 	keyboard := [][]miniAppButton{{booking}, {details}}
 	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
-		results := newMiniAppButton(b.catalog.T(user.Locale, "button.slot_results"), b.cfg.MiniApp.DashboardURL()+"?tab=history")
+		results := newMiniAppButton(b.catalog.T(user.Locale, "button.slot_results"), b.dashboardURL(user, "history"))
 		results.WidgetAction = "app:history"
 		keyboard[1] = []miniAppButton{results}
 		keyboard = append(keyboard, []miniAppButton{details})
@@ -167,8 +169,8 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	card := widgetCard{
 		Locale:      user.Locale,
 		Title:       title,
-		Body:        truncateMessage(strings.Join(strings.Fields(procedures.WatchTitle(user.Locale, watch)), " "), 150),
-		Slot:        newWidgetSlot(histories[0]),
+		Body:        truncateMessage(procedures.WatchTitle(watch), 150),
+		Slot:        newWidgetSlot(user.Locale, histories[0]),
 		Actions:     keyboard[:2],
 		BookingHint: b.catalog.T(user.Locale, "notification.booking_hint"),
 		Failure:     b.catalog.T(user.Locale, "widget.error"),
@@ -188,10 +190,10 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 	var text strings.Builder
 	count := max(total, len(histories))
 	title := b.catalog.T(locale, "notification.title", count)
-	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(locale, watch), 240)))
+	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(watch), 240)))
 	preview := histories[:min(limit, len(histories))]
 	for _, item := range preview {
-		fmt.Fprintf(&text, "\n\n<b>%s</b>", item.DateTime.In(luxmed.Location()).Format("02.01.2006 · 15:04"))
+		fmt.Fprintf(&text, "\n\n<b>%s</b>", appointmentDateTime(locale, item.DateTime))
 		var details []string
 		for _, value := range []string{truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120)} {
 			if value != "" {
@@ -316,14 +318,14 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 			b.tryRedeemInvite(ctx, user, arg)
 			return
 		}
-		b.showStart(user, false)
+		b.showStart(ctx, user, false)
 	case "menu":
 		b.clearFlow(user.ID)
-		b.showStart(user, false)
+		b.showStart(ctx, user, false)
 	case "new":
 		b.startWatchFlow(ctx, user)
 	case "app":
-		b.showApp(user, "")
+		b.showApp(ctx, user, "")
 	case "connect":
 		b.showConnect(ctx, user)
 	case "watches":
@@ -483,19 +485,19 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 			b.send(user, b.catalog.T(user.Locale, "flow.invite.enter"), nil)
 			return
 		}
-		b.setAppMenu(user)
+		b.SyncAppMenu(ctx, user.ID)
 		b.send(user, b.catalog.T(user.Locale, "flow.language.saved"), mainKeyboard(b.catalog, user.Locale))
 	case data == "menu":
 		b.clearFlow(user.ID)
-		b.showStart(user, false)
+		b.showStart(ctx, user, false)
 	case data == "account":
 		b.showConnect(ctx, user)
 	case data == "connect:open":
 		b.showAccount(ctx, user)
 	case data == "app":
-		b.showApp(user, "")
+		b.showApp(ctx, user, "")
 	case data == "app:history":
-		b.showApp(user, "?tab=history")
+		b.showApp(ctx, user, "history")
 	case data == "new":
 		b.startWatchFlow(ctx, user)
 	case data == "watches":
@@ -1502,7 +1504,7 @@ func (b *Bot) sendProcedureOptions(user domain.User, title string, items []domai
 	lines = append(lines, strings.TrimSpace(title))
 
 	for i, proc := range items {
-		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, procedures.Name(user.Locale, proc.Name), proc.ID))
+		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, proc.Name, proc.ID))
 	}
 
 	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)
@@ -1676,7 +1678,7 @@ func (b *Bot) showWatch(ctx context.Context, user domain.User, watch domain.Watc
 	}
 	last := "–"
 	if watch.LastCheckedAt != nil {
-		last = watch.LastCheckedAt.In(luxmed.Location()).Format("2006-01-02 15:04")
+		last = appointmentDateTime(user.Locale, *watch.LastCheckedAt)
 	}
 	text := b.watchSummary(user, watch) + "\n" + b.catalog.T(user.Locale, "watch.status.checked",
 		b.catalog.T(user.Locale, "watch.status."+string(watch.Status)), last, count)
@@ -1718,7 +1720,7 @@ func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string
 	}
 	b.clearFlow(user.ID)
 	user.Status = domain.UserStatusActive
-	b.showStart(user, true)
+	b.showStart(ctx, user, true)
 }
 
 func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
