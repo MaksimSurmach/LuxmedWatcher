@@ -34,6 +34,7 @@ type Config struct {
 	PollTimeout      int
 	Browsers         map[int64]*luxmed.Browser
 	MiniApp          *luxmed.MiniApp
+	MenuClient       tgbotapi.HTTPClient
 }
 
 type Bot struct {
@@ -45,6 +46,7 @@ type Bot struct {
 	runner        *scheduler.Runner
 	manualChecks  chan struct{}
 	manualWorkers sync.WaitGroup
+	appMenuLocks  sync.Map // User ID to *sync.Mutex.
 	logger        *slog.Logger
 	newClient     func(bool) luxmed.Client
 	flowState     map[int64]*flow
@@ -316,14 +318,14 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 			b.tryRedeemInvite(ctx, user, arg)
 			return
 		}
-		b.showStart(user, false)
+		b.showStart(ctx, user, false)
 	case "menu":
 		b.clearFlow(user.ID)
-		b.showStart(user, false)
+		b.showStart(ctx, user, false)
 	case "new":
 		b.startWatchFlow(ctx, user)
 	case "app":
-		b.showApp(user, "")
+		b.showApp(ctx, user, "")
 	case "connect":
 		b.showConnect(ctx, user)
 	case "watches":
@@ -483,19 +485,19 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 			b.send(user, b.catalog.T(user.Locale, "flow.invite.enter"), nil)
 			return
 		}
-		b.setAppMenu(user)
+		b.SyncAppMenu(ctx, user.ID)
 		b.send(user, b.catalog.T(user.Locale, "flow.language.saved"), mainKeyboard(b.catalog, user.Locale))
 	case data == "menu":
 		b.clearFlow(user.ID)
-		b.showStart(user, false)
+		b.showStart(ctx, user, false)
 	case data == "account":
 		b.showConnect(ctx, user)
 	case data == "connect:open":
 		b.showAccount(ctx, user)
 	case data == "app":
-		b.showApp(user, "")
+		b.showApp(ctx, user, "")
 	case data == "app:history":
-		b.showApp(user, "history")
+		b.showApp(ctx, user, "history")
 	case data == "new":
 		b.startWatchFlow(ctx, user)
 	case data == "watches":
@@ -1711,7 +1713,7 @@ func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string
 	}
 	b.clearFlow(user.ID)
 	user.Status = domain.UserStatusActive
-	b.showStart(user, true)
+	b.showStart(ctx, user, true)
 }
 
 func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {

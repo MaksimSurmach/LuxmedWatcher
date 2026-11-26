@@ -42,7 +42,6 @@ function renderLanguage() {
   status.textContent = '';
 }
 
-telegram?.ready();
 telegram?.expand();
 window.visualViewport?.addEventListener('resize', () => {
   document.documentElement.style.setProperty('--visual-viewport-height', `${window.visualViewport.height}px`);

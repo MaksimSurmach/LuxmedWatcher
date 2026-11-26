@@ -20,7 +20,7 @@ func (a *app) public(web, vendor fs.FS) http.Handler {
 	mux.HandleFunc("GET /{$}", localizedPage(web, "index.html"))
 	mux.HandleFunc("GET /app", localizedPage(web, "dashboard.html"))
 	for _, file := range []string{
-		"app.js", "style.css", "dashboard.js", "dashboard.css", "language.js", "screencast.js",
+		"boot.js", "app.js", "style.css", "dashboard.js", "dashboard.css", "language.js", "screencast.js",
 	} {
 		mux.HandleFunc("GET /"+file, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, web, file)
@@ -105,9 +105,14 @@ func localizedPage(web fs.FS, file string) http.HandlerFunc {
 		}
 		var html bytes.Buffer
 		if err := page.Execute(&html, struct {
-			Locale     string
-			JavaScript string
-		}{Locale: locale, JavaScript: labels["common.javascript_required"]}); err != nil {
+			Locale, JavaScript, Loading, Unavailable, Retry string
+		}{
+			Locale:      locale,
+			JavaScript:  labels["common.javascript_required"],
+			Loading:     labels["dashboard.loading"],
+			Unavailable: labels["error.unavailable"],
+			Retry:       labels["common.retry"],
+		}); err != nil {
 			reply(w, http.StatusServiceUnavailable, nil)
 			return
 		}

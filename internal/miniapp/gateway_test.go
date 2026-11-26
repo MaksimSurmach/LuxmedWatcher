@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"html/template"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -271,6 +272,11 @@ func TestGatewayServesLocalizedPagesAndBundledDictionaries(t *testing.T) {
 	if err := json.Unmarshal(res.Body.Bytes()[len(prefix):], &dictionaries); err != nil {
 		t.Fatal(err)
 	}
+	boot := httptest.NewRecorder()
+	handler.ServeHTTP(boot, httptest.NewRequest(http.MethodGet, "/boot.js", nil))
+	if boot.Code != http.StatusOK || !strings.HasPrefix(boot.Header().Get("Content-Type"), "text/javascript") {
+		t.Fatalf("boot module: status %d, type %s", boot.Code, boot.Header().Get("Content-Type"))
+	}
 	for _, locale := range i18n.SupportedLocales {
 		t.Run(locale, func(t *testing.T) {
 			for _, path := range []string{"/", "/app"} {
@@ -278,11 +284,18 @@ func TestGatewayServesLocalizedPagesAndBundledDictionaries(t *testing.T) {
 				req.Header.Set("Accept-Language", "en-US")
 				res := httptest.NewRecorder()
 				handler.ServeHTTP(res, req)
-				label := dictionaries[locale]["common.javascript_required"]
-				if res.Code != http.StatusOK || label == "" ||
-					!strings.Contains(res.Body.String(), `<html lang="`+locale+`">`) ||
-					!strings.Contains(res.Body.String(), "<noscript>"+label+"</noscript>") {
-					t.Errorf("%s: incorrect locale or missing JavaScript notice", path)
+				labels := dictionaries[locale]
+				body := res.Body.String()
+				if res.Code != http.StatusOK ||
+					!strings.Contains(body, `<html lang="`+locale+`">`) ||
+					!strings.Contains(body, `src="/boot.js"`) {
+					t.Errorf("%s: incorrect locale or missing boot script", path)
+				}
+				for _, key := range []string{"common.javascript_required", "dashboard.loading", "error.unavailable", "common.retry"} {
+					want := template.HTMLEscapeString(labels[key])
+					if want == "" || !strings.Contains(body, want) {
+						t.Errorf("%s: missing localized bootstrap label %s", path, key)
+					}
 				}
 			}
 		})

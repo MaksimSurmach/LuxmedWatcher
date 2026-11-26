@@ -708,7 +708,6 @@ async function start() {
   }
 }
 
-telegram?.ready();
 telegram?.expand();
 telegram?.enableVerticalSwipes?.();
 

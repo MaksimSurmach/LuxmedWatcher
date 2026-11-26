@@ -9,11 +9,15 @@
   <title>Luxmed Watcher</title>
   <link rel="stylesheet" href="/dashboard.css">
   <script src="https://telegram.org/js/telegram-web-app.js?65"></script>
-  <script type="module" src="/dashboard.js"></script>
+  <script type="module" src="/boot.js"></script>
 </head>
 <body>
   <div class="shell">
     <header class="brand"><span class="brand-icon" data-icon="calendar"></span><span>Luxmed Watcher</span></header>
+    <section id="boot" data-entry="dashboard" data-boot-error="{{.Unavailable}}">
+      <p role="status">{{.Loading}}</p>
+      <a href="">{{.Retry}}</a>
+    </section>
     <main id="main" tabindex="-1"></main>
     <nav id="navigation" hidden>
       <button type="button" data-tab="home"><span data-icon="home"></span><span></span></button>

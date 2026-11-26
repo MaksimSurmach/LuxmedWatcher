@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/url"
 	"strconv"
+	"sync"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -35,8 +36,23 @@ func (b *Bot) registerCommands() {
 	}
 }
 
-func (b *Bot) setAppMenu(user domain.User) {
-	if b.cfg.MiniApp == nil || !user.IsActive() {
+// SyncAppMenu refreshes the persistent Telegram menu from the saved preferences.
+func (b *Bot) SyncAppMenu(ctx context.Context, userID int64) {
+	if b.cfg.MiniApp == nil {
+		return
+	}
+	lock, _ := b.appMenuLocks.LoadOrStore(userID, &sync.Mutex{})
+	menu := lock.(*sync.Mutex)
+	menu.Lock()
+	defer menu.Unlock()
+
+	// Serialize writes to the same Telegram menu and read the locale after acquiring its lock.
+	user, err := b.db.UserByID(ctx, userID)
+	if err != nil {
+		b.logger.Warn("load Telegram chat menu preferences failed")
+		return
+	}
+	if !user.IsActive() || user.TelegramChatID <= 0 || user.TelegramChatID != user.TelegramUserID {
 		return
 	}
 	button, err := json.Marshal(struct {
@@ -52,7 +68,11 @@ func (b *Bot) setAppMenu(user domain.User) {
 		b.logger.Warn("encode Telegram chat menu failed")
 		return
 	}
-	_, err = b.api.MakeRequest("setChatMenuButton", tgbotapi.Params{
+	api := *b.api
+	if b.cfg.MenuClient != nil {
+		api.Client = b.cfg.MenuClient
+	}
+	_, err = api.MakeRequest("setChatMenuButton", tgbotapi.Params{
 		"chat_id":     strconv.FormatInt(user.TelegramChatID, 10),
 		"menu_button": string(button),
 	})
@@ -69,23 +89,23 @@ func (b *Bot) dashboardURL(user domain.User, tab string) string {
 	return b.cfg.MiniApp.DashboardURL() + "?" + query.Encode()
 }
 
-func (b *Bot) showApp(user domain.User, tab string) {
+func (b *Bot) showApp(ctx context.Context, user domain.User, tab string) {
 	if b.cfg.MiniApp == nil {
 		b.showMenu(user)
 		return
 	}
-	b.setAppMenu(user)
+	b.SyncAppMenu(ctx, user.ID)
 	b.sendMiniApp(user, "flow.browser.dashboard", "button.open_app", b.dashboardURL(user, tab))
 }
 
-func (b *Bot) showStart(user domain.User, invited bool) {
+func (b *Bot) showStart(ctx context.Context, user domain.User, invited bool) {
 	const title = "Luxmed Watcher"
 	if !user.IsActive() {
 		b.setFlow(user.ID, &flow{Kind: flowInvite})
 		b.sendOnboarding(user, title, b.catalog.T(user.Locale, "flow.invite.enter"), widgetKeyboard(languageKeyboard()))
 		return
 	}
-	b.setAppMenu(user)
+	b.SyncAppMenu(ctx, user.ID)
 	body := b.catalog.T(user.Locale, "widget.start")
 	if b.cfg.Browsers != nil {
 		body += "\n\n" + b.catalog.T(user.Locale, "widget.start_connect")

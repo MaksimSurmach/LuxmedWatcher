@@ -25,6 +25,7 @@ type DashboardConfig struct {
 	BotID           int64
 	MinimumInterval time.Duration
 	DefaultInterval time.Duration
+	SyncAppMenu     func(context.Context, int64)
 }
 
 type dashboard struct {
@@ -334,6 +335,9 @@ func (d *dashboard) settings(w http.ResponseWriter, r *http.Request, user domain
 	}
 	if err == nil {
 		err = d.db.SetUserPreferences(r.Context(), user.ID, input.Locale, city)
+	}
+	if err == nil && d.cfg.SyncAppMenu != nil {
+		d.cfg.SyncAppMenu(r.Context(), user.ID)
 	}
 	dashboardResult(w, nil, err)
 }

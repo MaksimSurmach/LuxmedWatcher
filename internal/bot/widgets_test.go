@@ -3,6 +3,7 @@ package bot
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -185,13 +186,13 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		locale, title, more, date string
+		locale, title, more, date, days string
 	}{
-		{"pl", "Znalezione terminy LUX MED: ", "Więcej w historii: ", "02.07.2026 · 01:30"},
-		{"en", "LUX MED appointments found: ", "More in history: ", "Jul 2, 2026 · 01:30"},
-		{"ru", "Найдено слотов LUX MED: ", "Ещё в истории: ", "02.07.2026 · 01:30"},
-		{"be", "Знойдзена слотаў LUX MED: ", "Яшчэ ў гісторыі: ", "02.07.2026 · 01:30"},
-		{"uk", "Знайдено слотів LUX MED: ", "Ще в історії: ", "02.07.2026 · 01:30"},
+		{"pl", "Znalezione terminy LUX MED: ", "Więcej w historii: ", "02.07.2026 · 01:30", "Dni: "},
+		{"en", "LUX MED appointments found: ", "More in history: ", "Jul 2, 2026 · 01:30", "Days: "},
+		{"ru", "Найдено слотов LUX MED: ", "Ещё в истории: ", "02.07.2026 · 01:30", "Дней: "},
+		{"be", "Даступныя варыянты запісу ў LUX MED: ", "Яшчэ варыянтаў у гісторыі: ", "02.07.2026 · 01:30", "Дзён: "},
+		{"uk", "Доступні варіанти запису в LUX MED: ", "Ще варіантів в історії: ", "02.07.2026 · 01:30", "Днів: "},
 	}
 	for _, tc := range tests {
 		t.Run(tc.locale, func(t *testing.T) {
@@ -245,8 +246,9 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 				if count > 1 && !strings.Contains(text, fmt.Sprint(tc.more, count-1)) {
 					t.Errorf("count %d: unexpected additional results in %q", count, text)
 				}
-				if got := b.catalog.T(tc.locale, "button.next_days", count); !strings.HasSuffix(got, fmt.Sprint(count)) {
-					t.Errorf("count %d: unexpected search period %q", count, got)
+				want := fmt.Sprint(tc.days, count)
+				if got := b.catalog.T(tc.locale, "button.next_days", count); got != want {
+					t.Errorf("count %d: search period %q, want %q", count, got, want)
 				}
 			}
 			if _, err := b.NotifyAppointments(t.Context(), user, watch, history, 5); err != nil {
@@ -274,5 +276,55 @@ func TestBotLanguageSurvivesTelegramProfileUpdates(t *testing.T) {
 				t.Fatalf("language after next Telegram message = %q, error = %v", got.Locale, err)
 			}
 		})
+	}
+}
+
+func TestAppMenuUsesSavedLanguageForLabelAndLaunchURL(t *testing.T) {
+	t.Parallel()
+
+	type menu struct {
+		Text   string
+		WebApp struct{ URL string } `json:"web_app"`
+	}
+	menus := make(chan menu, 2)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botfake/setChatMenuButton" {
+			t.Errorf("unexpected Telegram method: %s", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		var button menu
+		if err := json.Unmarshal([]byte(r.Form.Get("menu_button")), &button); err != nil {
+			t.Error(err)
+		}
+		if r.Form.Get("chat_id") != "101" {
+			t.Errorf("unexpected chat ID: %s", r.Form.Get("chat_id"))
+		}
+		menus <- button
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	})
+	var err error
+	b.cfg.MiniApp, err = luxmed.NewMiniApp("http://localhost", "https://app.example", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	for _, tc := range []struct{ locale, label string }{
+		{locale: "pl", label: "Otwórz aplikację"},
+		{locale: "uk", label: "Відкрити застосунок"},
+	} {
+		if err := b.db.SetUserPreferences(t.Context(), user.ID, tc.locale, domain.City{}); err != nil {
+			t.Fatal(err)
+		}
+		b.SyncAppMenu(t.Context(), user.ID)
+		select {
+		case got := <-menus:
+			if got.Text != tc.label || got.WebApp.URL != "https://app.example/app?lang="+tc.locale {
+				t.Errorf("menu after saving %s: %+v", tc.locale, got)
+			}
+		default:
+			t.Fatalf("menu was not synced after saving %s", tc.locale)
+		}
 	}
 }
