@@ -96,7 +96,7 @@ async function api(action, data = {}) {
   if (response.status === 409 && action === 'credentials') throw new DashboardError('account.login_failed');
   if (response.status === 409) throw new DashboardError('error.connect_first');
   if (response.status === 400) throw new DashboardError('error.invalid_fields');
-  if (response.status === 404) throw new DashboardError('error.stale');
+  if (response.status === 404 || response.status === 412) throw new DashboardError('error.stale');
   throw new DashboardError('error.unavailable');
 }
 
@@ -129,14 +129,15 @@ function accountSection(compact = false) {
       <p class="account-status" data-state="${account}" role="status">${text(`account.${account}`)}</p>
     </div>
     <div class="account-actions">
-      ${state.SavedLogin
+      ${state.HasCredentials
         ? `<button type="button" class="secondary" id="forget-credentials">${text('account.forget')}</button>`
         : `<button type="button" class="secondary" id="connect">${text('account.chrome')} ${icon('link')}</button>`}
       <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
     </div>
+    ${compact || state.SavedLogin ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
     <details>
-      <summary>${text(state.SavedLogin ? 'account.change_credentials' : 'account.save_credentials')}</summary>
-      <form id="credentials" class="stack">
+      <summary>${text(state.SavedLogin ? 'account.change_credentials' : 'account.password_mode')}</summary>
+      <form id="credentials" method="post" class="stack">
         <label class="field">${text('account.login')}<input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="254" required></label>
         <label class="field">${text('account.password')}<input name="password" type="password" autocomplete="current-password" maxlength="1024" required></label>
         <p class="muted">${text('account.encryption')}</p>
@@ -144,7 +145,6 @@ function accountSection(compact = false) {
       </form>
     </details>
     <p class="muted error" data-account-error role="status"></p>
-    ${compact || state.SavedLogin ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
   </section>`;
 }
 
@@ -175,6 +175,7 @@ function bindAccount() {
       } finally {
         form.elements.password.value = '';
       }
+      state.HasCredentials = true;
       state.SavedLogin = true;
       account = 'connected';
       await switchTab(tab);
@@ -183,6 +184,7 @@ function bindAccount() {
   const forget = main.querySelector('#forget-credentials');
   if (forget) forget.onclick = () => void run(forget, async () => {
     await api('forget-credentials');
+    state.HasCredentials = false;
     state.SavedLogin = false;
     account = 'unchecked';
     await switchTab(tab);

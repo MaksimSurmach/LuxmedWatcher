@@ -1,4 +1,5 @@
 {
+  "account.password_mode": "Sign in with a password",
   "account.chrome": "Sign in with Chrome",
   "account.save_credentials": "Save login and password",
   "account.change_credentials": "Change saved login and password",

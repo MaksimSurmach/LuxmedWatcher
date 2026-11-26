@@ -1,4 +1,5 @@
 {
+  "account.password_mode": "Вход по логину и паролю",
   "account.chrome": "Войти через Chrome",
   "account.save_credentials": "Сохранить логин и пароль",
   "account.change_credentials": "Изменить сохранённые данные",

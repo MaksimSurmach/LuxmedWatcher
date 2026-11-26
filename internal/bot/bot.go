@@ -248,6 +248,9 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	if state != nil && user.IsActive() && (state.Kind == flowAccountPass && update.Message.Command() != "cancel" || state.Kind == flowAccountLogin && !update.Message.IsCommand()) {
 		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(update.Message.Chat.ID, update.Message.MessageID)); err != nil {
 			b.logger.Warn("could not delete Telegram credential message")
+			b.clearFlow(user.ID)
+			b.send(user, b.catalog.T(user.Locale, "flow.account.delete_failed"), nil)
+			return
 		}
 		value := update.Message.Text
 		if state.Kind == flowAccountLogin {
@@ -383,7 +386,7 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		err := b.db.SaveCredentials(ctx, b.cryptor, user.ID, luxmed.Credentials{Login: state.Login, Password: text})
+		err := b.db.SaveCredentials(ctx, b.cryptor, user, luxmed.Credentials{Login: state.Login, Password: text})
 		b.clearFlow(user.ID)
 		if err != nil {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
@@ -493,6 +496,13 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 		}
 		b.showAccount(ctx, user)
 	case data == "connect:chrome":
+		if b.cfg.Browsers[user.TelegramUserID] == nil {
+			return
+		}
+		if err := b.db.ForgetCredentials(ctx, user.ID); err != nil {
+			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
+			return
+		}
 		b.showAccount(ctx, user)
 	case data == "app":
 		b.showApp(ctx, user, "")

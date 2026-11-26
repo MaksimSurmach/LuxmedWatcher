@@ -722,7 +722,12 @@ func TestCredentialMigrationAndModeSwitch(t *testing.T) {
 		}
 		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
 		must(err)
-		must(db.SaveCredentials(ctx, key, user.ID, creds))
+		must(db.SaveCredentials(ctx, key, user, creds))
+		current, err := db.UserByID(ctx, user.ID)
+		must(err)
+		if err := db.ConfirmBrowserLogin(ctx, current); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("browser link with a saved password: %v", err)
+		}
 		_, err = db.LoginAccount(ctx, user.ID, true)
 		must(err)
 		ids, err := db.ActiveBrowserWatchTelegramIDs(ctx)
@@ -731,6 +736,18 @@ func TestCredentialMigrationAndModeSwitch(t *testing.T) {
 			t.Fatal("password mode scheduled browser renewal")
 		}
 		must(db.ForgetCredentials(ctx, user.ID))
+		if err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("late save after forgetting: %v", err)
+		}
+		current, err = db.UserByID(ctx, user.ID)
+		must(err)
+		must(db.ConfirmBrowserLogin(ctx, current))
+		if err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("late save after choosing Chrome: %v", err)
+		}
+		if _, err := db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatal("credentials restored after opt-out", err)
+		}
 		watch, err := db.Watch(ctx, id)
 		must(err)
 		if watch.Status != domain.WatchStatusActive {

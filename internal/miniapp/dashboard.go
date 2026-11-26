@@ -143,20 +143,21 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
-	_, err = d.db.LoginAccount(r.Context(), user.ID, true)
+	stored, err := d.db.LuxMedAccount(r.Context(), user.ID)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		dashboardResult(w, nil, err)
 		return
 	}
 	reply(w, http.StatusOK, struct {
 		SavedLogin     bool
+		HasCredentials bool
 		Watches        []domain.Watch
 		Locale         string
 		CityID         *int
 		CityName       string
 		MinimumMinutes int
 		DefaultMinutes int
-	}{err == nil, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
+	}{stored.UseSavedLogin, err == nil, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
 		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute)})
 }
@@ -483,7 +484,7 @@ func (d *dashboard) saveCredentials(w http.ResponseWriter, r *http.Request, user
 		dashboardResult(w, nil, err)
 		return
 	}
-	dashboardResult(w, nil, d.db.SaveCredentials(ctx, d.cfg.Cryptor, user.ID, creds))
+	dashboardResult(w, nil, d.db.SaveCredentials(ctx, d.cfg.Cryptor, user, creds))
 }
 
 func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -508,9 +509,12 @@ func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user dom
 		reply(w, http.StatusUnauthorized, nil)
 		return
 	}
+	if err := d.db.ConfirmBrowserLogin(r.Context(), user); err != nil {
+		dashboardResult(w, nil, err)
+		return
+	}
 	link, err := d.connect(r.Context(), user.TelegramUserID)
 	if err == nil {
-		err = d.db.ForgetCredentials(r.Context(), user.ID)
 		link += "&lang=" + i18n.Normalize(user.Locale, "pl")
 	}
 	dashboardResult(w, map[string]string{"url": link}, err)
@@ -526,6 +530,8 @@ func decodeDashboard(w http.ResponseWriter, r *http.Request, target any) bool {
 
 func dashboardResult(w http.ResponseWriter, value any, err error) {
 	switch {
+	case errors.Is(err, storage.ErrCredentialsChanged):
+		reply(w, http.StatusPreconditionFailed, nil)
 	case errors.Is(err, sql.ErrNoRows):
 		reply(w, http.StatusNotFound, nil)
 	case errors.Is(err, luxmed.ErrAuthentication):

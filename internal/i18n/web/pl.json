@@ -1,4 +1,5 @@
 {
+  "account.password_mode": "Logowanie za pomocą loginu i hasła",
   "account.chrome": "Zaloguj się przez Chrome",
   "account.save_credentials": "Zapisz login i hasło",
   "account.change_credentials": "Zmień zapisane dane logowania",

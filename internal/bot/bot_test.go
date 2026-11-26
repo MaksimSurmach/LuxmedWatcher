@@ -126,6 +126,27 @@ func TestCredentialsAreStoredOnlyAfterAuthentication(t *testing.T) {
 	}
 }
 
+func TestFailedCredentialMessageDeletionStopsSignIn(t *testing.T) {
+	var explained bool
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/deleteMessage") {
+			http.Error(w, `{"ok":false,"description":"denied"}`, http.StatusForbidden)
+			return
+		}
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			explained = strings.Contains(r.FormValue("text"), "Delete it in the chat")
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "fixture"})
+	b.newClient = func(bool) luxmed.Client { t.Fatal("unexpected authentication"); return nil }
+	b.handleUpdate(t.Context(), tgbotapi.Update{Message: &tgbotapi.Message{MessageID: 1, Text: "test password", From: &tgbotapi.User{ID: 42}, Chat: &tgbotapi.Chat{ID: 42, Type: "private"}}})
+	if !explained || b.getFlow(user.ID) != nil {
+		t.Fatal("failed deletion did not stop and explain sign-in")
+	}
+}
+
 type watchCatalogClient struct{ authClient }
 
 func (watchCatalogClient) GetCities(context.Context) ([]domain.City, error) {

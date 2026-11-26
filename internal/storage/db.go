@@ -43,7 +43,7 @@ func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.
 
 func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at
+		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at, credential_revision
 		FROM users WHERE telegram_user_id=$1
 	`, telegramID)
 	return scanUser(row)
@@ -51,7 +51,7 @@ func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.Us
 
 func (db *DB) UserByID(ctx context.Context, id int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at
+		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at, credential_revision
 		FROM users WHERE id=$1
 	`, id)
 	return scanUser(row)
@@ -148,8 +148,14 @@ func HashInviteCode(code string) string {
 }
 
 func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
-	_, err := db.sql.ExecContext(ctx, `
-		INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status, use_saved_login)
+	return upsertLuxMedAccount(ctx, db.sql, account)
+}
+
+func upsertLuxMedAccount(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, account domain.LuxMedAccount) error {
+	_, err := exec.ExecContext(ctx, `
+        INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status, use_saved_login)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT(user_id) DO UPDATE SET
 			login=excluded.login,
@@ -195,22 +201,29 @@ func (db *DB) UpdateLuxMedAccountAuth(ctx context.Context, account domain.LuxMed
 }
 
 func (db *DB) ForgetCredentials(ctx context.Context, userID int64) error {
-	_, err := db.sql.ExecContext(ctx, "DELETE FROM luxmed_accounts WHERE user_id=$1", userID)
-	return err
+	return db.removeCredentials(ctx, userID, false)
 }
 
 func (db *DB) DeleteLuxMedAccount(ctx context.Context, userID int64) error {
+	return db.removeCredentials(ctx, userID, true)
+}
+
+func (db *DB) removeCredentials(ctx context.Context, userID int64, pauseWatches bool) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM luxmed_accounts WHERE user_id=$1`, userID); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET credential_revision=credential_revision+1 WHERE id=$1", userID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE watches SET status=$1, updated_at=$2 WHERE user_id=$3 AND status=$4`,
-		domain.WatchStatusPaused, time.Now().UTC(), userID, domain.WatchStatusActive); err != nil {
+	if _, err := tx.ExecContext(ctx, "DELETE FROM luxmed_accounts WHERE user_id=$1", userID); err != nil {
 		return err
+	}
+	if pauseWatches {
+		if _, err := tx.ExecContext(ctx, `UPDATE watches SET status=$1, updated_at=$2 WHERE user_id=$3 AND status=$4`, domain.WatchStatusPaused, time.Now().UTC(), userID, domain.WatchStatusActive); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -1004,7 +1017,7 @@ type scanner interface {
 func scanUser(row scanner) (domain.User, error) {
 	var u domain.User
 	var preferredCityID sql.NullInt64
-	err := row.Scan(&u.ID, &u.TelegramUserID, &u.TelegramChatID, &u.Username, &u.DisplayName, &u.Locale, &preferredCityID, &u.PreferredCityName, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastSeenAt)
+	err := row.Scan(&u.ID, &u.TelegramUserID, &u.TelegramChatID, &u.Username, &u.DisplayName, &u.Locale, &preferredCityID, &u.PreferredCityName, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastSeenAt, &u.CredentialRevision)
 	if preferredCityID.Valid {
 		id := int(preferredCityID.Int64)
 		u.PreferredCityID = &id

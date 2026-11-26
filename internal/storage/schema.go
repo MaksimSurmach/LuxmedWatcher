@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS users (
 	telegram_username TEXT NOT NULL DEFAULT '',
 	display_name TEXT NOT NULL DEFAULT '',
 	locale TEXT NOT NULL,
+	credential_revision BIGINT NOT NULL DEFAULT 0,
 	preferred_city_id INTEGER,
 	preferred_city_name TEXT NOT NULL DEFAULT '',
 	status TEXT NOT NULL,

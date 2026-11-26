@@ -2,22 +2,55 @@ package storage
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 )
 
-func (db *DB) SaveCredentials(ctx context.Context, key *security.Cryptor, userID int64, creds security.Credentials) error {
-	sealed, err := key.SealCredentials(userID, creds)
+var ErrCredentialsChanged = errors.New("account changed during sign-in")
+
+func (db *DB) SaveCredentials(ctx context.Context, key *security.Cryptor, owner domain.User, creds security.Credentials) error {
+	sealed, err := key.SealCredentials(owner.ID, creds)
+	if err != nil {
+		return err
+	}
+	// Verification calls LUX MED outside the transaction. A later opt-out or
+	// logout takes precedence even when no credentials existed before that call.
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	err = requireOneRow(tx.ExecContext(ctx, `UPDATE users SET credential_revision=credential_revision+1
+        WHERE id=$1 AND credential_revision=$2 AND status=$3 AND role <> ''`, owner.ID, owner.CredentialRevision, domain.UserStatusActive))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrCredentialsChanged
+	}
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
-	return db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
-		UserID: userID, EncryptedPassword: sealed, UseSavedLogin: true,
+	if err := upsertLuxMedAccount(ctx, tx, domain.LuxMedAccount{
+		UserID: owner.ID, EncryptedPassword: sealed, UseSavedLogin: true,
 		LastLoginAt: &now, Status: domain.AccountStatusActive,
-	})
+	}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// A viewer link from an older tab cannot remove a saved login. Choosing Chrome
+// while a first-time password verification is running cancels that pending save.
+func (db *DB) ConfirmBrowserLogin(ctx context.Context, owner domain.User) error {
+	err := requireOneRow(db.sql.ExecContext(ctx, `UPDATE users SET credential_revision=credential_revision+1
+        WHERE id=$1 AND credential_revision=$2 AND NOT EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1)`, owner.ID, owner.CredentialRevision))
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrCredentialsChanged
+	}
+	return err
 }
 
 // Earlier versions stored the login in plaintext and encrypted only the password.

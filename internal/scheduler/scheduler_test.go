@@ -143,7 +143,11 @@ func TestRejectedCredentialsAreNotRetried(t *testing.T) {
 	client := &fakeLuxMed{authErr: luxmed.ErrAuthentication}
 	runner.newClient = func(bool) luxmed.Client { return client }
 
-	if err := db.SaveCredentials(ctx, runner.cryptor, watch.UserID, luxmed.Credentials{Login: "saved", Password: "password"}); err != nil {
+	owner, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveCredentials(ctx, runner.cryptor, owner, luxmed.Credentials{Login: "saved", Password: "password"}); err != nil {
 		t.Fatal(err)
 	}
 	runner.UseBrowsers(map[int64]*luxmed.Browser{42: {}})
