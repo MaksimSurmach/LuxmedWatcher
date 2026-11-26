@@ -134,12 +134,7 @@ type dashboardHistoryCursor struct {
 }
 
 func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.User) {
-	watches, err := d.db.WatchesByUser(r.Context(), user.ID)
-	if err != nil {
-		reply(w, http.StatusServiceUnavailable, nil)
-		return
-	}
-	reconnect, err := d.db.LuxMedReconnectRequired(r.Context(), user.ID)
+	watches, reconnect, err := d.db.WatchesWithReconnectState(r.Context(), user.ID)
 	if err != nil {
 		reply(w, http.StatusServiceUnavailable, nil)
 		return

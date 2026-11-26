@@ -166,7 +166,7 @@ function bindAccount() {
     state.ReconnectRequired = latest.ReconnectRequired;
     account = state.ReconnectRequired ? 'search_paused' : result.state;
     if (connected && (tab === 'home' || tab === 'watches')) {
-      await switchTab(tab);
+      await switchTab(tab, { reload: false });
       return;
     }
     connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
@@ -885,7 +885,7 @@ function screenError(title, error, retry) {
   if (retry) main.querySelector('button').onclick = retry;
 }
 
-async function switchTab(next) {
+async function switchTab(next, { reload = next === 'home' || next === 'watches' } = {}) {
   clearTimeout(flashTimer);
   announcement.textContent = '';
   tab = next;
@@ -895,23 +895,33 @@ async function switchTab(next) {
     else button.removeAttribute('aria-current');
   }
   try {
+    if (reload) {
+      show(titleFor(next), `<p>${text('dashboard.loading')}</p>`, false);
+      const latest = await api('load');
+      if (id !== renderID) return;
+      applySnapshot(latest);
+    }
     if (tab === 'home') home();
     if (tab === 'watches') watches();
     if (tab === 'history') await historyScreen(id);
     if (tab === 'settings') await settingsScreen(id);
   } catch (error) {
-    if (id === renderID) screenError(titleFor(next), error, () => switchTab(next));
+    if (id === renderID) screenError(titleFor(next), error, () => switchTab(next, { reload }));
   }
 }
 
-async function update(next) {
-  state = await api('load');
+function applySnapshot(latest) {
+  state = latest;
   if (state.ReconnectRequired) account = 'search_paused';
   else if (account === 'search_paused') account = 'unchecked';
   setLanguage(state.Locale);
   renderLanguage();
+}
+
+async function update(next) {
+  applySnapshot(await api('load'));
   navigation.hidden = false;
-  await switchTab(next);
+  await switchTab(next, { reload: false });
 }
 
 async function start() {

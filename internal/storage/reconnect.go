@@ -10,19 +10,41 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 )
 
+const reconnectRequiredQuery = `SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1)`
+
 func (db *DB) LuxMedReconnectRequired(ctx context.Context, userID int64) (bool, error) {
 	var required bool
-	err := db.sql.QueryRowContext(ctx, `
-		SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1)
-	`, userID).Scan(&required)
+	err := db.sql.QueryRowContext(ctx, reconnectRequiredQuery, userID).Scan(&required)
 	return required, err
+}
+
+func (db *DB) WatchesWithReconnectState(ctx context.Context, userID int64) ([]domain.Watch, bool, error) {
+	tx, err := db.sql.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelRepeatableRead, ReadOnly: true})
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+
+	watches, err := watchesByUser(ctx, tx, userID)
+	if err != nil {
+		return nil, false, err
+	}
+	var required bool
+	if err := tx.QueryRowContext(ctx, reconnectRequiredQuery, userID).Scan(&required); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	return watches, required, nil
 }
 
 func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) error {
 	_, err := db.sql.ExecContext(ctx, `
-		INSERT INTO luxmed_reconnect (user_id) VALUES ($1)
+		INSERT INTO luxmed_reconnect (user_id)
+		SELECT $1 WHERE EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=$2)
 		ON CONFLICT (user_id) DO NOTHING
-	`, userID)
+	`, userID, domain.WatchStatusActive)
 	return err
 }
 
@@ -37,10 +59,11 @@ func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, no
 	err := db.sql.QueryRowContext(ctx, `
 		INSERT INTO luxmed_reconnect_delivery (user_id, attempts, claim_id)
 		SELECT user_id, 1, $3 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified
+		    AND EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=$4)
 		ON CONFLICT (user_id) DO UPDATE SET attempts=luxmed_reconnect_delivery.attempts+1, retry_at=NULL, claim_id=excluded.claim_id
 		WHERE `+db.dateTimeSQL("luxmed_reconnect_delivery.retry_at")+` <= `+db.dateTimeSQL("$2")+`
 		RETURNING attempts
-	`, userID, now.UTC(), claim.ID).Scan(&claim.Attempt)
+	`, userID, now.UTC(), claim.ID, domain.WatchStatusActive).Scan(&claim.Attempt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ReconnectDeliveryClaim{}, nil
 	}

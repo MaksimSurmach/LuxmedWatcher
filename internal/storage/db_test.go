@@ -559,6 +559,8 @@ func TestReconnectDeliveryCounterMigration(t *testing.T) {
 		}
 		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
 		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
 		must(db.BeginLuxMedReconnect(ctx, user.ID))
 
 		now := time.Now().UTC()
@@ -755,6 +757,8 @@ func TestReconnectJournalReplayIsScopedToDeliveryClaim(t *testing.T) {
 		must(db.SetReconnectJournalDirectory(directory))
 		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
 		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
 		must(db.BeginLuxMedReconnect(ctx, user.ID))
 		now := time.Now().UTC()
 		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
@@ -796,6 +800,52 @@ func TestReconnectJournalReplayIsScopedToDeliveryClaim(t *testing.T) {
 		must(err)
 		if afterReplay.Attempt != 0 {
 			t.Fatalf("old rejection made an unrelated delivery retryable: %+v", afterReplay)
+		}
+	})
+}
+
+func TestWatchesAndReconnectStateStayConsistentDuringRecovery(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		if err != nil {
+			t.Fatal(err)
+		}
+		watchID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		const cycles = 40
+		changes := make(chan error, 1)
+		go func() {
+			for range cycles {
+				if err := db.BeginLuxMedReconnect(ctx, user.ID); err != nil {
+					changes <- err
+					return
+				}
+				if err := db.MarkWatchChecked(ctx, watchID, false, "luxmed_authentication"); err != nil {
+					changes <- err
+					return
+				}
+				if err := db.ResolveLuxMedReconnect(ctx, user.ID); err != nil {
+					changes <- err
+					return
+				}
+			}
+			changes <- nil
+		}()
+		for range cycles * 2 {
+			watches, required, err := db.WatchesWithReconnectState(ctx, user.ID)
+			if err != nil || len(watches) != 1 || watches[0].ID != watchID {
+				t.Errorf("load snapshot: watches=%+v err=%v", watches, err)
+				break
+			}
+			if !required && watches[0].LastError == "luxmed_authentication" {
+				t.Error("snapshot mixed a recovered session with a stale sign-in error")
+				break
+			}
+		}
+		if err := <-changes; err != nil {
+			t.Fatal(err)
 		}
 	})
 }

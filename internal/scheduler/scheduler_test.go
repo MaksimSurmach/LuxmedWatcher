@@ -1066,3 +1066,75 @@ func TestPasswordAuthenticationResolvesReconnectBeforeFirstSearchResult(t *testi
 		})
 	}
 }
+
+func TestSessionProbeRechecksActiveSearchesBeforeOpeningOrSending(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		stop            domain.WatchStatus
+		existingEpisode bool
+		anotherActive   bool
+	}{
+		{name: "last search paused", stop: domain.WatchStatusPaused},
+		{name: "last search deleted", stop: domain.WatchStatusDeleted},
+		{name: "existing warning and last search paused", stop: domain.WatchStatusPaused, existingEpisode: true},
+		{name: "another search remains active", stop: domain.WatchStatusPaused, anotherActive: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			sends := 0
+			runner, db, watch := testRunner(t, reconnectNotifierFunc{send: func() error {
+				sends++
+				return nil
+			}})
+			if test.existingEpisode {
+				if err := db.BeginLuxMedReconnect(ctx, watch.UserID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.anotherActive {
+				if _, err := db.CreateWatch(ctx, domain.Watch{UserID: watch.UserID}); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			probing, respond := make(chan struct{}), make(chan struct{})
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				close(probing)
+				select {
+				case <-respond:
+					w.WriteHeader(http.StatusUnauthorized)
+				case <-req.Context().Done():
+				}
+			}))
+			t.Cleanup(server.Close)
+			releaseResponse := sync.OnceFunc(func() { close(respond) })
+			defer releaseResponse()
+			browser, err := luxmed.NewBrowser(server.URL, "http://localhost:18769")
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			done := make(chan error, 1)
+			go func() { done <- runner.renewBrowserSession(ctx, 42, browser) }()
+			select {
+			case <-probing:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			if err := db.SetWatchStatus(ctx, watch.ID, test.stop); err != nil {
+				t.Fatal(err)
+			}
+			releaseResponse()
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+
+			required, err := db.LuxMedReconnectRequired(ctx, watch.UserID)
+			if err != nil || required != (test.existingEpisode || test.anotherActive) ||
+				(sends == 1) != test.anotherActive || sends > 1 {
+				t.Fatalf("after the probe: reconnect=%v sends=%d err=%v", required, sends, err)
+			}
+		})
+	}
+}

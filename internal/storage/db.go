@@ -251,7 +251,15 @@ func watchParameters(watch domain.Watch) []any {
 }
 
 func (db *DB) WatchesByUser(ctx context.Context, userID int64) ([]domain.Watch, error) {
-	rows, err := db.sql.QueryContext(ctx, watchSelect()+` WHERE user_id=$1 AND status <> $2 ORDER BY created_at DESC`, userID, domain.WatchStatusDeleted)
+	return watchesByUser(ctx, db.sql, userID)
+}
+
+type watchQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func watchesByUser(ctx context.Context, db watchQueryer, userID int64) ([]domain.Watch, error) {
+	rows, err := db.QueryContext(ctx, watchSelect()+` WHERE user_id=$1 AND status <> $2 ORDER BY created_at DESC`, userID, domain.WatchStatusDeleted)
 	if err != nil {
 		return nil, err
 	}

@@ -513,6 +513,9 @@ func TestTelegramBrowserAccountCheckResolvesReconnect(t *testing.T) {
 	ctx := t.Context()
 	b := testBot(t)
 	user := createUser(t, b, 10, domain.UserStatusActive)
+	if _, err := b.db.CreateWatch(ctx, domain.Watch{UserID: user.ID}); err != nil {
+		t.Fatal(err)
+	}
 	if err := b.db.BeginLuxMedReconnect(ctx, user.ID); err != nil {
 		t.Fatal(err)
 	}
