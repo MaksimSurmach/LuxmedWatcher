@@ -53,6 +53,7 @@ type Bot struct {
 	flowMu          sync.Mutex
 	flowState       map[int64]*flow
 	credentialFlows map[int64]*flow
+	deleteWarnings  map[int64][]*credentialDeleteWarning
 }
 
 type flowKind string
@@ -93,7 +94,8 @@ type flow struct {
 }
 
 func New(api *tgbotapi.BotAPI, db *storage.DB, catalog *i18n.Catalog, cryptor *security.Cryptor, cfg Config, logger *slog.Logger) *Bot {
-	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow), credentialFlows: make(map[int64]*flow), manualChecks: make(chan struct{}, 3),
+	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow), credentialFlows: make(map[int64]*flow),
+		deleteWarnings: make(map[int64][]*credentialDeleteWarning), manualChecks: make(chan struct{}, 3),
 		newClient: func(raw bool) luxmed.Client { return luxmed.NewHTTPClient(raw) }}
 }
 
@@ -253,6 +255,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	}
 	message := update.Message
 	telegramID := message.From.ID
+	defer b.deliverDeleteWarnings(telegramID, b.readyDeleteWarning(telegramID))
 	state := b.getFlow(telegramID)
 	command := b.messageCommand(message, state)
 	if command == "cancel" && b.cancelLogin(ctx, telegramID, state) {
@@ -458,6 +461,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		(b.cfg.Browsers != nil && b.cfg.Browsers[cb.From.ID] == nil) {
 		return
 	}
+	defer b.deliverDeleteWarnings(cb.From.ID, b.readyDeleteWarning(cb.From.ID))
 	data := cb.Data
 	cancelingLogin := data == "cancel" && b.cancelLogin(ctx, cb.From.ID, b.getFlow(cb.From.ID))
 	attempt := b.selectChrome(cb.From.ID, data)

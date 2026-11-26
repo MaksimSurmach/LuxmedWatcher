@@ -1491,8 +1491,9 @@ func TestCredentialDeleteFailureKeepsInputProtectedUntilWarningArrives(t *testin
 	loginMessage(b, ctx, user, "first repeat", 1)
 	b.workers.Wait()
 	state := b.getFlow(user.TelegramUserID)
-	if state == nil || state.Kind != flowAccountCheck || state.notice == nil ||
-		state.notice.key != "flow.account.delete_failed" {
+	warning := b.readyDeleteWarning(user.TelegramUserID)
+	if state == nil || state.Kind != flowAccountCheck || warning == nil ||
+		warning.key != "flow.account.delete_failed" {
 		t.Fatal("double failure cleared password protection")
 	}
 	loginMessage(b, ctx, user, "second repeat", 2)
@@ -1636,5 +1637,66 @@ func TestTelegramPasswordReconnectPreservesPendingWatchConfirmation(t *testing.T
 	if err != nil || len(watches) != 1 || watches[0].CityID != watch.CityID ||
 		watches[0].ServiceID != watch.ServiceID || watches[0].NextDays != watch.NextDays {
 		t.Fatalf("password reconnect lost the watch draft or confirmation: count=%d err=%v", len(watches), err)
+	}
+}
+
+func TestCredentialDeleteWarningRetriesAfterStartingNewSearch(t *testing.T) {
+	ctx := t.Context()
+	resultStarted := make(chan struct{})
+	releaseResult := make(chan struct{})
+	unblock := sync.OnceFunc(func() { close(releaseResult) })
+	var deletes, warnings atomic.Int32
+	var resultOnce sync.Once
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/deleteMessage"):
+			deletes.Add(1)
+			w.WriteHeader(http.StatusForbidden)
+			return
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			text := r.FormValue("text")
+			if strings.Contains(text, "Delete it in the chat") {
+				if warnings.Add(1) == 1 {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+			} else if strings.Contains(text, "account saved") {
+				resultOnce.Do(func() { close(resultStarted) })
+				<-releaseResult
+			}
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	defer func() {
+		unblock()
+		b.workers.Wait()
+	}()
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	if err := b.db.UpsertCities(ctx, []domain.City{{ID: 7, Name: "Fixture city"}}); err != nil {
+		t.Fatal(err)
+	}
+	b.newClient = func(bool) luxmed.Client { return authClient{} }
+	b.submitLogin(ctx, user, luxmed.Credentials{Login: "fixture", Password: "synthetic"})
+	select {
+	case <-resultStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("login result did not start")
+	}
+	loginMessage(b, ctx, user, "repeated fixture", 1)
+	loginMessage(b, ctx, user, "/new", 2)
+	search := b.getFlow(user.TelegramUserID)
+	if search == nil || search.Kind != flowWatchCity || warnings.Load() != 0 {
+		t.Fatal("new search did not start while the warning waited for the previous result")
+	}
+
+	unblock()
+	b.workers.Wait()
+	if warnings.Load() != 1 || b.readyDeleteWarning(user.TelegramUserID) == nil {
+		t.Fatal("failed warning was not retained after starting a new search")
+	}
+	loginMessage(b, ctx, user, "ordinary search text", 3)
+	if warnings.Load() != 2 || deletes.Load() != 1 || b.readyDeleteWarning(user.TelegramUserID) != nil ||
+		b.getFlow(user.TelegramUserID) != search {
+		t.Fatal("warning retry deleted ordinary text, changed the search, or remained queued after delivery")
 	}
 }

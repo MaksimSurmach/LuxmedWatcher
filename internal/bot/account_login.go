@@ -117,11 +117,21 @@ func (b *Bot) retryLoginNotice(telegramID int64, state *flow) {
 	}
 }
 
+type credentialDeleteWarning struct {
+	user    domain.User
+	flow    *flow
+	key     string // Set after the previous login replies finish, under flowMu.
+	sending bool   // Protected by flowMu.
+}
+
 func (b *Bot) stopLoginAfterDeleteFailure(ctx context.Context, telegramID int64, previous *flow, locale string) {
 	if previous.warningPending {
 		return
 	}
 	state := &flow{Kind: flowAccountCheck, warningPending: true}
+	warning := &credentialDeleteWarning{
+		user: domain.User{TelegramChatID: telegramID, Locale: locale}, flow: state,
+	}
 	verification := previous.verification
 	b.flowMu.Lock()
 	// Cancel before waiting for any already-started Telegram response.
@@ -129,6 +139,7 @@ func (b *Bot) stopLoginAfterDeleteFailure(ctx context.Context, telegramID int64,
 		previous.cancel()
 	}
 	b.replaceCredentialFlowLocked(telegramID, state)
+	b.deleteWarnings[telegramID] = append(b.deleteWarnings[telegramID], warning)
 	var cancelDone <-chan struct{}
 	if verification != nil {
 		cancelDone = verification.cancelDone
@@ -136,39 +147,79 @@ func (b *Bot) stopLoginAfterDeleteFailure(ctx context.Context, telegramID int64,
 	b.flowMu.Unlock()
 
 	warn := func(saved bool) {
-		var next *flow
-		defer func() { b.finishLogin(telegramID, state, next, false) }()
-		if ctx.Err() != nil || b.getFlow(telegramID) != state {
-			return
-		}
 		key := "flow.account.delete_failed"
 		if saved {
 			key = "flow.account.delete_failed_saved"
 		}
-		next = b.deliverLoginNotice(&loginNotice{
-			user: domain.User{TelegramChatID: telegramID, Locale: locale}, key: key, saved: saved,
-		})
+		b.flowMu.Lock()
+		warning.key = key
+		b.flowMu.Unlock()
+		if ctx.Err() != nil {
+			b.finishLogin(telegramID, state, nil, false)
+			return
+		}
+		b.deliverDeleteWarnings(telegramID, warning)
 	}
 	if verification == nil {
 		warn(previous.notice != nil && previous.notice.saved)
 		return
 	}
 	b.workers.Go(func() {
-		select {
-		case <-ctx.Done():
-			b.finishLogin(telegramID, state, nil, false)
-			return
-		case <-verification.done:
-		}
+		<-verification.done
 		// A cancellation reply may also have started before the deletion failed.
 		if cancelDone != nil {
-			select {
-			case <-ctx.Done():
-			case <-cancelDone:
-			}
+			<-cancelDone
 		}
 		warn(verification.err == nil)
 	})
+}
+
+// Capture the retry before handling an update so a new warning gets one attempt
+// now and waits for another interaction if Telegram rejects it.
+func (b *Bot) readyDeleteWarning(telegramID int64) *credentialDeleteWarning {
+	b.flowMu.Lock()
+	defer b.flowMu.Unlock()
+	queue := b.deleteWarnings[telegramID]
+	if len(queue) != 0 && queue[0].key != "" && !queue[0].sending {
+		return queue[0]
+	}
+	return nil
+}
+
+func (b *Bot) deliverDeleteWarnings(telegramID int64, warning *credentialDeleteWarning) {
+	for warning != nil {
+		b.flowMu.Lock()
+		queue := b.deleteWarnings[telegramID]
+		if len(queue) == 0 || queue[0] != warning || warning.key == "" || warning.sending {
+			b.flowMu.Unlock()
+			return
+		}
+		warning.sending = true
+		key := warning.key
+		b.flowMu.Unlock()
+
+		sent := b.send(warning.user, b.catalog.T(warning.user.Locale, key), nil)
+
+		b.flowMu.Lock()
+		warning.sending = false
+		if !sent {
+			b.flowMu.Unlock()
+			return
+		}
+		queue = b.deleteWarnings[telegramID]
+		if b.credentialFlows[telegramID] == warning.flow {
+			b.replaceCredentialFlowLocked(telegramID, nil)
+		}
+		queue[0] = nil
+		if len(queue) == 1 {
+			delete(b.deleteWarnings, telegramID)
+			b.flowMu.Unlock()
+			return
+		}
+		b.deleteWarnings[telegramID] = queue[1:]
+		warning = queue[1]
+		b.flowMu.Unlock()
+	}
 }
 
 type loginVerification struct {
