@@ -23,17 +23,20 @@ type credentialAttemptKey struct {
 type credentialOwner struct {
 	mu         sync.Mutex
 	generation uint64
+	pending    *CredentialAttempt
 	active     *CredentialAttempt
+	completed  *CredentialAttempt
 }
 
 // CredentialAttempt identifies a single candidate without retaining its plaintext.
 // The receipt remains available briefly after commit for a matching Chrome click.
 type CredentialAttempt struct {
-	state      *credentialOwner
-	generation uint64
-	ctx        context.Context
-	cancel     context.CancelFunc
-	candidate  *credentialCandidate // Protected by state.mu.
+	state          *credentialOwner
+	originRevision int64
+	generation     uint64
+	ctx            context.Context
+	cancel         context.CancelFunc
+	candidate      *credentialCandidate // Protected by state.mu.
 }
 
 type credentialCandidate struct {
@@ -45,11 +48,13 @@ type credentialCandidate struct {
 // ChromeChoice captures the attempt visible to the requesting interface before
 // acknowledging the action or waiting for the database.
 type ChromeChoice struct {
-	telegramID int64
-	state      *credentialOwner
-	generation uint64
-	attempt    *CredentialAttempt
-	stale      bool
+	telegramID    int64
+	state         *credentialOwner
+	generation    uint64
+	attempt       *CredentialAttempt
+	stale         bool
+	shownRevision *int64
+	switchMode    bool
 }
 
 func (db *DB) credentialOwner(telegramID int64) *credentialOwner {
@@ -60,10 +65,11 @@ func (db *DB) credentialOwner(telegramID int64) *credentialOwner {
 	return state.(*credentialOwner)
 }
 
-func (db *DB) StartCredentialAttempt(ctx context.Context, telegramID int64, id string) (*CredentialAttempt, error) {
+func (db *DB) StartCredentialAttempt(ctx context.Context, user domain.User, id string) (*CredentialAttempt, error) {
 	if id == "" {
 		id = rand.Text()
 	}
+	telegramID := user.TelegramUserID
 	state := db.credentialOwner(telegramID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -72,13 +78,13 @@ func (db *DB) StartCredentialAttempt(ctx context.Context, telegramID int64, id s
 	if _, exists := db.credentialAttempts.Load(lookup); exists {
 		return nil, ErrCredentialsChanged
 	}
-	if state.active != nil && state.active.ctx.Err() == nil {
+	if state.pending != nil && state.pending.ctx.Err() == nil ||
+		state.active != nil && state.active.ctx.Err() == nil {
 		return nil, ErrCredentialAttemptBusy
 	}
 	probe, cancel := context.WithCancel(ctx)
-	state.generation++
-	attempt := &CredentialAttempt{state: state, generation: state.generation, ctx: probe, cancel: cancel}
-	state.active = attempt
+	attempt := &CredentialAttempt{state: state, originRevision: user.CredentialRevision, ctx: probe, cancel: cancel}
+	state.pending = attempt
 	db.credentialAttempts.Store(lookup, attempt)
 	db.expireCredentialAttempt(lookup, attempt)
 	return attempt, nil
@@ -102,12 +108,16 @@ func (db *DB) PrepareCredentialAttempt(
 	}
 	attempt.state.mu.Lock()
 	defer attempt.state.mu.Unlock()
-	if attempt.candidate != nil {
+	if attempt.state.pending != attempt || attempt.originRevision != owner.CredentialRevision {
 		return ErrCredentialsChanged
 	}
 	if err := attempt.ctx.Err(); err != nil {
 		return err
 	}
+	attempt.state.generation++
+	attempt.generation = attempt.state.generation
+	attempt.state.pending = nil
+	attempt.state.active = attempt
 	attempt.candidate = &credentialCandidate{owner: owner, previous: previous, sealed: sealed}
 	return nil
 }
@@ -120,13 +130,24 @@ func (db *DB) SaveCredentialAttempt(ctx context.Context, attempt *CredentialAtte
 	if !current || candidate == nil {
 		return "", ErrCredentialsChanged
 	}
-	return db.saveSealedCredentials(ctx, candidate.owner, candidate.sealed)
+	sealed, err := db.saveSealedCredentials(ctx, candidate.owner, candidate.sealed)
+	if err == nil {
+		attempt.state.mu.Lock()
+		if attempt.state.generation == attempt.generation {
+			attempt.state.completed = attempt
+		}
+		attempt.state.mu.Unlock()
+	}
+	return sealed, err
 }
 
 func (attempt *CredentialAttempt) Finish() {
 	attempt.cancel()
 	attempt.state.mu.Lock()
 	defer attempt.state.mu.Unlock()
+	if attempt.state.pending == attempt {
+		attempt.state.pending = nil
+	}
 	if attempt.state.active == attempt {
 		attempt.state.active = nil
 	}
@@ -136,6 +157,9 @@ func (db *DB) CancelActiveCredentialAttempt(telegramID int64) {
 	state := db.credentialOwner(telegramID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
+	if state.pending != nil {
+		state.pending.cancel()
+	}
 	if state.active != nil {
 		state.active.cancel()
 	}
@@ -147,6 +171,12 @@ func (db *DB) SelectBrowserLogin(telegramID int64, id string) *ChromeChoice {
 	defer state.mu.Unlock()
 
 	attempt := state.active
+	if id == "" && state.pending != nil {
+		state.pending.cancel()
+		if attempt == nil {
+			attempt = state.pending
+		}
+	}
 	generation := state.generation
 	var stale bool
 	if id != "" {
@@ -158,12 +188,16 @@ func (db *DB) SelectBrowserLogin(telegramID int64, id string) *ChromeChoice {
 			db.expireCredentialAttempt(lookup, canceled)
 		}
 		if attempt.cancel != nil {
-			generation = attempt.generation
+			if attempt.candidate != nil {
+				generation = attempt.generation
+			} else {
+				stale = state.active != nil || (state.pending != nil && state.pending != attempt)
+			}
 		} else {
 			// A click may arrive before its password request. Its tombstone
 			// blocks that ID, while a different active save keeps its priority.
 			attempt = nil
-			stale = state.active != nil
+			stale = state.pending != nil || state.active != nil
 		}
 	}
 	if attempt != nil {
@@ -172,9 +206,48 @@ func (db *DB) SelectBrowserLogin(telegramID int64, id string) *ChromeChoice {
 	return &ChromeChoice{telegramID: telegramID, state: state, generation: generation, attempt: attempt, stale: stale}
 }
 
+// SelectBrowserLoginAtRevision applies a Telegram button to the mode it showed.
+// An unversioned legacy button has no authority over an overlapping save.
+func (db *DB) SelectBrowserLoginAtRevision(telegramID int64, revision *int64, switchMode bool) *ChromeChoice {
+	state := db.credentialOwner(telegramID)
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	choice := &ChromeChoice{
+		telegramID: telegramID, state: state, generation: state.generation,
+		shownRevision: revision, switchMode: switchMode,
+	}
+	if revision == nil {
+		choice.stale = state.pending != nil || state.active != nil
+		return choice
+	}
+	if state.pending != nil && state.pending.originRevision == *revision {
+		state.pending.cancel()
+		choice.attempt = state.pending
+	}
+	for _, attempt := range []*CredentialAttempt{state.active, state.completed} {
+		if attempt == nil || attempt.originRevision != *revision {
+			continue
+		}
+		if attempt.candidate != nil && attempt.generation != state.generation {
+			continue
+		}
+		attempt.cancel()
+		choice.attempt = attempt
+		break
+	}
+	return choice
+}
+
 func (db *DB) expireCredentialAttempt(key credentialAttemptKey, attempt *CredentialAttempt) {
 	// Both dashboard requests have a 19-second client budget.
 	time.AfterFunc(30*time.Second, func() {
 		db.credentialAttempts.CompareAndDelete(key, attempt)
+		if attempt.state != nil {
+			attempt.state.mu.Lock()
+			if attempt.state.completed == attempt {
+				attempt.state.completed = nil
+			}
+			attempt.state.mu.Unlock()
+		}
 	})
 }

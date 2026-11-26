@@ -2,9 +2,7 @@ package bot
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -167,18 +165,21 @@ func (b *Bot) showConnect(ctx context.Context, user domain.User) {
 		b.showAccount(ctx, user)
 		return
 	}
-	b.clearFlow(user.ID)
-	account, err := b.db.LuxMedAccount(ctx, user.ID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	revision, saved, stored, err := b.db.BrowserLoginMode(ctx, user.ID)
+	if err != nil {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
-	actions := make([][]miniAppButton, 0, 4)
-	if !account.UseSavedLogin {
-		actions = append(actions, []miniAppButton{b.actionButton(user, "button.chrome", "connect:chrome")})
+	mode, label := "chrome", "button.chrome"
+	if saved {
+		mode, label = "switch", "button.chrome_switch"
 	}
-	actions = append(actions, []miniAppButton{b.actionButton(user, "button.saved_login", "connect:password")})
-	if err == nil {
+	action := "connect:" + mode + ":" + strconv.FormatInt(revision, 10)
+	actions := [][]miniAppButton{
+		{b.actionButton(user, label, action)},
+		{b.actionButton(user, "button.saved_login", "connect:password")},
+	}
+	if stored {
 		actions = append(actions, []miniAppButton{b.actionButton(user, "button.delete_credentials", "connect:forget")})
 	}
 	actions = append(actions, []miniAppButton{b.actionButton(user, "button.menu", "menu")})

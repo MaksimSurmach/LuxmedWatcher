@@ -1,5 +1,6 @@
 {
   "button.chrome": "Sign in with Chrome",
+  "button.chrome_switch": "Switch to Chrome and keep saved credentials",
   "button.saved_login": "Save login and password",
   "button.delete_credentials": "Delete saved credentials",
   "widget.login_method": "Choose how to sign in.",

@@ -376,3 +376,48 @@ func TestIncompleteLoginCanRecoverDuringScheduledSearch(t *testing.T) {
 		t.Fatalf("search did not recover with the saved password: attempts=%d err=%v", client.logins, err)
 	}
 }
+
+func TestRejectedPasswordSubmissionKeepsAcceptedChromeChoice(t *testing.T) {
+	for _, busy := range []bool{true, false} {
+		name := "stale revision"
+		if busy {
+			name = "runner busy"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			runner, db, watch := testRunner(t, nil)
+			user, err := db.UserByID(ctx, watch.UserID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			choice := db.SelectBrowserLoginAtRevision(user.TelegramUserID, &user.CredentialRevision, false)
+			submitted := user
+			expected := storage.ErrCredentialsChanged
+			if busy {
+				state, _ := runner.acquireAccount(user.ID, false)
+				if state == nil {
+					t.Fatal("could not acquire test account")
+				}
+				defer runner.releaseAccount(state)
+				expected = luxmed.ErrBrowserBusy
+			} else {
+				submitted.CredentialSaveRevision++
+			}
+			creds := luxmed.Credentials{Login: "fixture", Password: "synthetic"}
+			if err := runner.SaveCredentialsForAttempt(ctx, submitted, creds, "rejected"); !errors.Is(err, expected) {
+				t.Fatalf("submission returned %v, want %v", err, expected)
+			}
+			if err := db.ChooseBrowserLogin(ctx, user, choice); err != nil {
+				t.Fatalf("a rejected submission invalidated the accepted Chrome click: %v", err)
+			}
+			current, err := db.UserByID(ctx, user.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			retry := db.SelectBrowserLogin(user.TelegramUserID, "rejected")
+			if err := db.ChooseBrowserLogin(ctx, current, retry); err != nil {
+				t.Fatalf("a rejected submission blocked reopening the current Chrome mode: %v", err)
+			}
+		})
+	}
+}

@@ -3,6 +3,8 @@ package bot
 import (
 	"context"
 	"errors"
+	"strconv"
+	"strings"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -20,24 +22,43 @@ func (state *flow) receivesCredential(message *tgbotapi.Message) bool {
 		return !message.IsCommand()
 	case flowAccountPass, flowAccountCheck:
 		command := message.Command()
-		return command != "cancel" && command != "logout_luxmed"
+		return command != "cancel" && command != "logout_luxmed" && command != "connect"
 	default:
 		return false
 	}
 }
 
-// Cancel before reading the database or acknowledging the callback. Both can
-// block behind the password write or a Telegram network request.
+func chromeButton(action string) (revision *int64, switchMode, ok bool) {
+	if action == "connect:open" || action == "connect:chrome" {
+		return nil, false, true
+	}
+	name, value, found := strings.Cut(action, ":")
+	if !found || name != "connect" {
+		return nil, false, false
+	}
+	mode, number, found := strings.Cut(value, ":")
+	if !found || (mode != "chrome" && mode != "switch") {
+		return nil, false, false
+	}
+	rev, err := strconv.ParseInt(number, 10, 64)
+	if err != nil || rev < 0 {
+		return nil, false, false
+	}
+	return &rev, mode == "switch", true
+}
+
+// Capture the choice before reading the database or acknowledging the callback.
 func (b *Bot) selectChrome(telegramID int64, action string) *storage.ChromeChoice {
-	if (action != "connect:chrome" && action != "connect:open") || b.cfg.Browsers[telegramID] == nil {
+	revision, switchMode, ok := chromeButton(action)
+	if !ok || b.cfg.Browsers[telegramID] == nil {
 		return nil
 	}
-	return b.db.SelectBrowserLogin(telegramID, "")
+	return b.db.SelectBrowserLoginAtRevision(telegramID, revision, switchMode)
 }
 
 func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed.Credentials) {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
-	attempt, err := b.db.StartCredentialAttempt(ctx, user.TelegramUserID, "")
+	attempt, err := b.db.StartCredentialAttempt(ctx, user, "")
 	if err != nil {
 		cancel()
 		key := "errors.generic"

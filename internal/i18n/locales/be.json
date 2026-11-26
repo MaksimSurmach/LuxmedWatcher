@@ -1,5 +1,6 @@
 {
   "button.chrome": "Увайсці праз Chrome",
+  "button.chrome_switch": "Перайсці на Chrome і захаваць даныя ўваходу",
   "button.saved_login": "Захаваць лагін і пароль",
   "button.delete_credentials": "Выдаліць захаваныя даныя ўваходу",
   "widget.login_method": "Выберыце спосаб уваходу.",

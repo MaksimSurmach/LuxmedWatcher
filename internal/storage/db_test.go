@@ -1342,7 +1342,7 @@ func TestCredentialTransitionsKeepModeAccessAndWatchesTogether(t *testing.T) {
 func beginCredentialAttempt(
 	db *DB, ctx context.Context, key *security.Cryptor, user domain.User, creds security.Credentials, id string,
 ) (*CredentialAttempt, context.Context, error) {
-	attempt, err := db.StartCredentialAttempt(ctx, user.TelegramUserID, id)
+	attempt, err := db.StartCredentialAttempt(ctx, user, id)
 	if err != nil {
 		return nil, ctx, err
 	}

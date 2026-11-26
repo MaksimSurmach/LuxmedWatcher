@@ -53,7 +53,7 @@ func (r *Runner) SaveCredentials(ctx context.Context, user domain.User, creds lu
 }
 
 func (r *Runner) SaveCredentialsForAttempt(ctx context.Context, user domain.User, creds luxmed.Credentials, id string) error {
-	attempt, err := r.db.StartCredentialAttempt(ctx, user.TelegramUserID, id)
+	attempt, err := r.db.StartCredentialAttempt(ctx, user, id)
 	if errors.Is(err, storage.ErrCredentialAttemptBusy) {
 		return luxmed.ErrBrowserBusy
 	}

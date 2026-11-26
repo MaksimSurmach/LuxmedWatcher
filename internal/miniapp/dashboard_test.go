@@ -174,7 +174,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 			return luxmed.ErrAuthentication
 		}
 		if id != "" {
-			attempt, err := db.StartCredentialAttempt(ctx, user.TelegramUserID, id)
+			attempt, err := db.StartCredentialAttempt(ctx, user, id)
 			if err != nil {
 				return err
 			}
@@ -201,7 +201,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chatAttempt, err := db.StartCredentialAttempt(ctx, owner.TelegramUserID, "")
+	chatAttempt, err := db.StartCredentialAttempt(ctx, current, "")
 	if err != nil {
 		t.Fatal(err)
 	}

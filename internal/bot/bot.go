@@ -247,7 +247,8 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		(b.cfg.Browsers != nil && b.cfg.Browsers[update.Message.From.ID] == nil) {
 		return
 	}
-	if update.Message.Command() == "logout_luxmed" {
+	switch update.Message.Command() {
+	case "logout_luxmed", "connect":
 		b.db.CancelActiveCredentialAttempt(update.Message.From.ID)
 	}
 	user, err := b.upsertUser(ctx, update.Message)
@@ -338,6 +339,7 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 	case "app":
 		b.showApp(ctx, user, "")
 	case "connect":
+		b.clearFlow(user.ID)
 		b.showConnect(ctx, user)
 	case "watches":
 		b.showWatches(ctx, user)
@@ -493,11 +495,10 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 			b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
 			b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
 		}
-	case data == "connect:open" || data == "connect:chrome":
+	case attempt != nil || data == "connect:open" || data == "connect:chrome":
 		if b.cfg.Browsers[user.TelegramUserID] == nil {
 			return
 		}
-		b.clearFlow(user.ID)
 		err := b.db.ChooseBrowserLogin(ctx, user, attempt)
 		if errors.Is(err, storage.ErrCredentialsChanged) {
 			b.showConnect(ctx, user)
@@ -507,6 +508,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
+		b.clearFlow(user.ID)
 		b.showAccount(ctx, user)
 	case data == "connect:forget":
 		if b.cfg.Browsers[user.TelegramUserID] == nil {

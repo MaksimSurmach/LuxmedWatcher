@@ -59,6 +59,10 @@ func (b *Bot) handleWidgetQuery(ctx context.Context, query *widgetQuery) {
 }
 
 func validWidgetAction(action string) bool {
+	if _, _, ok := chromeButton(action); ok {
+		return true
+	}
+
 	switch action {
 	case "account", "app", "app:history", "connect:chrome", "connect:forget", "connect:open", "connect:password", "history", "menu", "new", "settings", "settings:language", "watches":
 		return true

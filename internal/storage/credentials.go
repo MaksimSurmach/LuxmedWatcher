@@ -126,18 +126,60 @@ func (db *DB) ChooseBrowserLogin(ctx context.Context, user domain.User, choice *
 	if choice.generation != choice.state.generation {
 		return ErrCredentialsChanged
 	}
-	if choice.attempt == nil || choice.attempt.candidate == nil {
-		return db.ConfirmBrowserLogin(ctx, user)
+	if choice.switchMode {
+		if choice.shownRevision == nil || user.CredentialRevision != *choice.shownRevision {
+			return ErrCredentialsChanged
+		}
+		return db.switchToBrowserLogin(ctx, user)
 	}
-	candidate := choice.attempt.candidate
-	if candidate.owner.ID != user.ID || candidate.previous.UseSavedLogin {
-		return db.ConfirmBrowserLogin(ctx, user)
+	if choice.attempt != nil && choice.attempt.candidate != nil {
+		candidate := choice.attempt.candidate
+		if candidate.owner.ID == user.ID && !candidate.previous.UseSavedLogin {
+			err := db.chooseChromeDuringSave(ctx, candidate)
+			if !errors.Is(err, ErrCredentialsChanged) {
+				return err
+			}
+		}
 	}
-	err := db.chooseChromeDuringSave(ctx, candidate)
-	if errors.Is(err, ErrCredentialsChanged) {
-		return db.ConfirmBrowserLogin(ctx, user)
+	if choice.shownRevision != nil && user.CredentialRevision != *choice.shownRevision {
+		return ErrCredentialsChanged
 	}
-	return err
+	return db.ConfirmBrowserLogin(ctx, user)
+}
+
+// BrowserLoginMode reads the mode and revision together for a sign-in menu.
+func (db *DB) BrowserLoginMode(ctx context.Context, userID int64) (revision int64, saved, stored bool, err error) {
+	err = db.sql.QueryRowContext(ctx, `
+		SELECT credential_revision,
+		       EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login),
+		       EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1)
+		FROM users WHERE id=$1
+	`, userID).Scan(&revision, &saved, &stored)
+	return
+}
+
+func (db *DB) switchToBrowserLogin(ctx context.Context, owner domain.User) error {
+	return db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
+		err := requireOneRow(tx.ExecContext(ctx, `
+			UPDATE luxmed_accounts SET use_saved_login=FALSE WHERE user_id=$1 AND use_saved_login
+		`, owner.ID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrCredentialsChanged
+		}
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE users SET credential_revision=credential_revision+1,
+			                 credential_save_revision=credential_save_revision+1 WHERE id=$1
+		`, owner.ID); err != nil {
+			return err
+		}
+		if err := db.finalizeLuxMedAccountSave(ctx, tx, owner.ID, false); err != nil {
+			return err
+		}
+		return db.setModeAccessStatus(ctx, tx, owner.ID, LuxMedAccessUnchecked)
+	})
 }
 
 func (db *DB) chooseChromeDuringSave(ctx context.Context, candidate *credentialCandidate) error {
