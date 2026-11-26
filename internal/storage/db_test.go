@@ -6,9 +6,11 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -545,4 +547,47 @@ func TestLegacySQLiteAppointmentTimeMigration(t *testing.T) {
 			t.Fatalf("current appointment = %v, want %v", unchanged.DateTime, wall)
 		}
 	}
+}
+
+func TestUpcomingHistoryPagesNearestFirst(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 31, TelegramChatID: 32, Locale: "pl",
+			Status: domain.UserStatusActive, Role: domain.UserRoleUser})
+		if err != nil {
+			t.Fatal(err)
+		}
+		watchID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, Name: "Echo", CityID: 1, CityName: "Warszawa",
+			ServiceID: 2, ServiceName: "Echo", DoctorMode: domain.DoctorModeAny, FacilityMode: domain.FacilityModeAll,
+			NextDays: 14, CheckIntervalSeconds: 120})
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Date(2026, 12, 1, 8, 0, 0, 0, time.UTC)
+		// Inserted out of order: two past times and three upcoming ones.
+		for i, hours := range []int{-48, 72, 24, -2, 48} {
+			if _, _, err := db.UpsertAppointmentHistory(ctx, watchID, domain.Appointment{
+				Fingerprint: fmt.Sprintf("slot-%d", i), DateTime: now.Add(time.Duration(hours) * time.Hour),
+				ServiceID: 2, ServiceName: "Echo", FacilityID: 4, FacilityName: "LuxMed", CityID: 1, CityName: "Warszawa",
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		var got []int
+		ids, err := db.UpcomingHistoryIDs(ctx, user.ID, now, 6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for offset := 0; offset < len(ids); offset += 2 {
+			page, err := db.HistoryByIDs(ctx, user.ID, ids[offset:min(offset+2, len(ids))])
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, item := range page {
+				got = append(got, int(item.DateTime.Sub(now).Hours()))
+			}
+		}
+		if want := []int{24, 48, 72, -2, -48}; !slices.Equal(got, want) {
+			t.Fatalf("hours from now across pages = %v, want %v", got, want)
+		}
+	})
 }

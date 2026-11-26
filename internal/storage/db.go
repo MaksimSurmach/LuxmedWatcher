@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -363,6 +364,74 @@ func (db *DB) AppointmentHistoryByID(ctx context.Context, id int64) (domain.Appo
 
 func (db *DB) RecentHistory(ctx context.Context, userID int64, limit, offset int) ([]domain.AppointmentHistory, error) {
 	return db.WatchHistory(ctx, userID, 0, limit, offset)
+}
+
+// UpcomingHistoryIDs captures the order for a history view. Future available slots
+// come first, followed by past and unavailable slots.
+func (db *DB) UpcomingHistoryIDs(ctx context.Context, userID int64, asOf time.Time, limit int) ([]int64, error) {
+	when := db.dateTimeSQL("date_time")
+	rows, err := db.sql.QueryContext(ctx, `
+		SELECT id FROM (
+			SELECT id, `+when+` AS slot_time,
+				CASE WHEN `+when+` > `+db.dateTimeSQL("$2")+` AND status <> $3 THEN 0 ELSE 1 END AS unavailable
+			FROM appointment_history
+			WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1) AND status <> $4
+		) ranked
+		ORDER BY unavailable, CASE WHEN unavailable = 0 THEN slot_time END ASC, slot_time DESC, id ASC
+		LIMIT $5
+	`, userID, asOf.UTC(), domain.HistoryStatusExpired, domain.HistoryStatusHidden, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// HistoryByIDs loads current slot data in the requested order, omitting hidden or removed slots.
+func (db *DB) HistoryByIDs(ctx context.Context, userID int64, ids []int64) ([]domain.AppointmentHistory, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	args := []any{userID, domain.HistoryStatusHidden}
+	params := make([]string, 0, len(ids))
+	for _, id := range ids {
+		args = append(args, id)
+		params = append(params, "$"+strconv.Itoa(len(args)))
+	}
+	rows, err := db.sql.QueryContext(ctx, historySelect()+`
+		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1) AND status <> $2
+			AND id IN (`+strings.Join(params, ",")+`)
+	`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byID := make(map[int64]domain.AppointmentHistory, len(ids))
+	for rows.Next() {
+		item, err := scanHistory(rows)
+		if err != nil {
+			return nil, err
+		}
+		byID[item.ID] = item
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	items := make([]domain.AppointmentHistory, 0, len(byID))
+	for _, id := range ids {
+		if item, ok := byID[id]; ok {
+			items = append(items, item)
+		}
+	}
+	return items, nil
 }
 
 func (db *DB) WatchHistory(ctx context.Context, userID, watchID int64, limit, offset int) ([]domain.AppointmentHistory, error) {

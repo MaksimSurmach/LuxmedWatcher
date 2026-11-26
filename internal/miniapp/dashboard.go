@@ -29,12 +29,13 @@ type DashboardConfig struct {
 }
 
 type dashboard struct {
-	cfg      DashboardConfig
-	key      ed25519.PublicKey
-	sessions sessions
-	db       *storage.DB
-	browsers map[int64]*luxmed.Browser
-	connect  func(context.Context, int64) (string, error)
+	cfg          DashboardConfig
+	key          ed25519.PublicKey
+	sessions     sessions
+	historyViews historyViews
+	db           *storage.DB
+	browsers     map[int64]*luxmed.Browser
+	connect      func(context.Context, int64) (string, error)
 }
 
 func Dashboard(cfg DashboardConfig, db *storage.DB, browsers map[int64]*luxmed.Browser, app *luxmed.MiniApp) http.Handler {
@@ -117,6 +118,11 @@ type dashboardHistory struct {
 	Status   domain.HistoryStatus
 }
 
+type dashboardHistoryCursor struct {
+	View   string
+	Offset int
+}
+
 func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.User) {
 	watches, err := d.db.WatchesByUser(r.Context(), user.ID)
 	if err != nil {
@@ -136,29 +142,72 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 }
 
 func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.User) {
-	var input struct{ Offset int }
+	const (
+		pageSize      = 24
+		maxPageOffset = 10_000
+	)
+	var input struct {
+		Offset int
+		After  *dashboardHistoryCursor
+	}
 	if !decodeDashboard(w, r, &input) {
 		return
 	}
-	if input.Offset < 0 || input.Offset > 10_000 {
+	if input.Offset < 0 || input.Offset > maxPageOffset {
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
-	const pageSize = 24
-	items, err := d.db.RecentHistory(r.Context(), user.ID, pageSize+1, input.Offset)
-	if err != nil {
-		reply(w, http.StatusServiceUnavailable, nil)
-		return
+	now := time.Now()
+	var ids []int64
+	view := ""
+	offset := input.Offset
+	if input.After != nil {
+		if input.Offset != 0 || input.After.View == "" || input.After.Offset <= 0 {
+			reply(w, http.StatusBadRequest, nil)
+			return
+		}
+		view, offset = input.After.View, input.After.Offset
+		var ok bool
+		ids, ok = d.historyViews.load(view, user.ID, now)
+		if !ok || offset >= len(ids) {
+			reply(w, http.StatusNotFound, nil)
+			return
+		}
+	} else {
+		var err error
+		ids, err = d.db.UpcomingHistoryIDs(r.Context(), user.ID, now, maxPageOffset+pageSize)
+		if err != nil {
+			reply(w, http.StatusServiceUnavailable, nil)
+			return
+		}
 	}
-	slots := make([]dashboardHistory, 0, min(pageSize, len(items)))
-	for _, item := range items[:min(pageSize, len(items))] {
-		slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, item.ServiceName,
-			item.DoctorName, item.FacilityName, item.Address, item.Status})
+	slots := make([]dashboardHistory, 0, pageSize)
+	for len(slots) < pageSize && offset < len(ids) {
+		end := min(offset+pageSize-len(slots), len(ids))
+		items, err := d.db.HistoryByIDs(r.Context(), user.ID, ids[offset:end])
+		if err != nil {
+			reply(w, http.StatusServiceUnavailable, nil)
+			return
+		}
+		for _, item := range items {
+			slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, item.ServiceName,
+				item.DoctorName, item.FacilityName, item.Address, item.Status})
+		}
+		offset = end
+	}
+	more := offset < len(ids)
+	var next *dashboardHistoryCursor
+	if more {
+		if view == "" {
+			view = d.historyViews.save(user.ID, now, ids)
+		}
+		next = &dashboardHistoryCursor{View: view, Offset: offset}
 	}
 	reply(w, http.StatusOK, struct {
 		Slots []dashboardHistory
 		More  bool
-	}{slots, len(items) > pageSize})
+		Next  *dashboardHistoryCursor `json:",omitempty"`
+	}{slots, more, next})
 }
 
 func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, user domain.User) {
