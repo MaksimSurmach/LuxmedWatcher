@@ -304,13 +304,12 @@ function watches() {
 const longDay = () => new Intl.DateTimeFormat(language, { timeZone, weekday: 'short', day: 'numeric', month: 'long' });
 const isExpired = (slot, now) => slot.Status === 'expired' || new Date(slot.DateTime) <= now;
 
-function timeRow(slot, index, mixed, now) {
-  const date = new Date(slot.DateTime);
-  const when = clock.format(date);
+function timeRow({ slot, index, available, time }, mixed, now) {
+  const when = clock.format(time);
   const doctor = slot.Doctor || t('history.no_doctor');
   const service = mixed && slot.Service ? `<span class="service">${escape(slot.Service)}</span>` : '';
-  if (isExpired(slot, now)) {
-    const reason = date <= now ? 'history.expired' : 'history.unavailable';
+  if (!available) {
+    const reason = time <= now ? 'history.expired' : 'history.unavailable';
     return `<li><div class="slot-row expired" tabindex="-1" data-expired-slot="${index}">
       <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}<small>${text(reason)}</small></span></div></li>`;
   }
@@ -323,38 +322,43 @@ function slotGroups(slots, now) {
   const format = longDay();
   const days = new Map();
   slots.forEach((slot, index) => {
-    const day = dateOnly(slot.DateTime);
-    if (!days.has(day)) days.set(day, { label: format.format(new Date(slot.DateTime)), places: new Map() });
-    const places = days.get(day).places;
+    const key = dateOnly(slot.DateTime);
+    const time = Date.parse(slot.DateTime);
+    const available = !isExpired(slot, now);
+    if (!days.has(key)) days.set(key, { key, label: format.format(time), places: new Map(), available: false });
+    const day = days.get(key);
+    day.available ||= available;
     const place = `${slot.Facility}\n${slot.Address}`;
-    if (!places.has(place)) places.set(place, []);
-    places.get(place).push([slot, index]);
+    if (!day.places.has(place)) day.places.set(place, []);
+    day.places.get(place).push({ slot, index, available, time });
   });
-  // Days keep the server's order: upcoming nearest first, then past times.
-  return [...days.values()].map((day) => `<section class="day">
+  // Reorder the display without changing the slots or cursor used for pagination.
+  const orderedDays = [...days.values()].sort((a, b) => {
+    const availability = Number(b.available) - Number(a.available);
+    return availability || (a.available ? a.key.localeCompare(b.key) : b.key.localeCompare(a.key));
+  });
+  return orderedDays.map((day) => `<section class="day">
     <h2 class="day-title">${escape(day.label)}</h2>
     ${[...day.places.values()].map((rows) => {
-      rows.sort(([a], [b]) => {
-        const availability = Number(isExpired(a, now)) - Number(isExpired(b, now));
-        return availability || Date.parse(a.DateTime) - Date.parse(b.DateTime);
+      rows.sort((a, b) => {
+        const availability = Number(b.available) - Number(a.available);
+        return availability || a.time - b.time;
       });
-      const [first] = rows[0];
-      const firstTime = Date.parse(first.DateTime);
+      const first = rows[0];
       return {
         rows,
-        nextTime: isExpired(first, now) ? Infinity : firstTime,
-        firstTime,
+        nextTime: first.available ? first.time : Infinity,
+        firstTime: first.time,
       };
     }).sort((a, b) => a.nextTime - b.nextTime || a.firstTime - b.firstTime).map(({ rows }) => {
-      const { Facility, Address } = rows[0][0];
+      const { Facility, Address, Service } = rows[0].slot;
       // One address per block; the service moves to each time when the block mixes services.
-      const services = new Set(rows.map(([slot]) => slot.Service));
+      const services = new Set(rows.map(({ slot }) => slot.Service));
       const mixed = services.size > 1;
-      const Service = mixed ? '' : rows[0][0].Service;
       return `<div class="place">
         <h3>${escape(Address || Facility)}</h3>
-        <p class="meta">${escape([Facility !== Address ? Facility : '', Service].filter(Boolean).join(' · '))}</p>
-        <ul class="times">${rows.map(([slot, index]) => timeRow(slot, index, mixed, now)).join('')}</ul></div>`;
+        <p class="meta">${escape([Facility !== Address ? Facility : '', mixed ? '' : Service].filter(Boolean).join(' · '))}</p>
+        <ul class="times">${rows.map((row) => timeRow(row, mixed, now)).join('')}</ul></div>`;
     }).join('')}</section>`).join('');
 }
 
