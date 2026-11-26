@@ -1528,3 +1528,113 @@ func TestConnectMenuDoesNotCancelMiniAppCredentialAttempt(t *testing.T) {
 		t.Fatalf("showing the login menu prevented the Mini App save: %v", err)
 	}
 }
+
+func TestCredentialDeleteWarningFollowsInFlightLoginResult(t *testing.T) {
+	for _, saved := range []bool{false, true} {
+		name := "rejected password"
+		if saved {
+			name = "saved password"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			started := make(chan struct{})
+			release := make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			var deletes, sends atomic.Int32
+			var warning atomic.Value
+			b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case strings.HasSuffix(r.URL.Path, "/deleteMessage"):
+					if deletes.Add(1) == 1 {
+						w.WriteHeader(http.StatusForbidden)
+						return
+					}
+				case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+					switch sends.Add(1) {
+					case 1:
+						close(started)
+						<-release
+					case 2:
+						warning.Store(r.FormValue("text"))
+					}
+				}
+				fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+			})
+			defer func() {
+				unblock()
+				b.workers.Wait()
+			}()
+			user := createUser(t, b, 42, domain.UserStatusActive)
+			b.newClient = func(bool) luxmed.Client {
+				if saved {
+					return authClient{}
+				}
+				return authClient{err: luxmed.ErrAuthentication}
+			}
+			b.submitLogin(ctx, user, luxmed.Credentials{Login: "fixture", Password: "synthetic"})
+			select {
+			case <-started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("login result did not start sending")
+			}
+			loginMessage(b, ctx, user, "repeated fixture", 1)
+			if current := b.getFlow(user.TelegramUserID); current == nil || !current.warningPending || sends.Load() != 1 {
+				t.Fatal("deletion warning passed the earlier login result")
+			}
+			loginMessage(b, ctx, user, "another fixture", 2)
+			if deletes.Load() != 2 {
+				t.Fatal("repeated input was not deleted while the earlier result was sending")
+			}
+			unblock()
+			b.workers.Wait()
+
+			key := "flow.account.delete_failed"
+			if saved {
+				key = "flow.account.delete_failed_saved"
+			}
+			if warning.Load() != b.catalog.T(user.Locale, key) || b.getFlow(user.TelegramUserID) != nil {
+				t.Fatalf("deletion warning did not report the actual result and close the login flow: %v", warning.Load())
+			}
+		})
+	}
+}
+
+func TestTelegramPasswordReconnectPreservesPendingWatchConfirmation(t *testing.T) {
+	ctx := t.Context()
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session" {
+			t.Errorf("unexpected browser request: %s", r.URL.Path)
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(worker.Close)
+	b := testBot(t)
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+	b.newClient = func(bool) luxmed.Client { return authClient{} }
+	watch := domain.Watch{UserID: user.ID, CityID: 5, ServiceID: 6, NextDays: 7}
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowWatchConfirm, Watch: watch, Confirmation: "draft"})
+	b.handleAction(ctx, user.TelegramUserID, "confirm:draft", nil)
+	if watches, err := b.db.WatchesByUser(ctx, user.ID); err != nil || len(watches) != 0 {
+		t.Fatalf("watch saved before reconnect: count=%d err=%v", len(watches), err)
+	}
+
+	b.handleAction(ctx, user.TelegramUserID, "account", nil)
+	b.handleAction(ctx, user.TelegramUserID, "connect:password", nil)
+	loginMessage(b, ctx, user, "fixture login", 1)
+	loginMessage(b, ctx, user, "synthetic password", 2)
+	b.workers.Wait()
+	if _, err := b.db.LoginAccount(ctx, user.ID, true); err != nil {
+		t.Fatalf("password reconnect failed: %v", err)
+	}
+	b.handleAction(ctx, user.TelegramUserID, "confirm:draft", nil)
+	watches, err := b.db.WatchesByUser(ctx, user.ID)
+	if err != nil || len(watches) != 1 || watches[0].CityID != watch.CityID ||
+		watches[0].ServiceID != watch.ServiceID || watches[0].NextDays != watch.NextDays {
+		t.Fatalf("password reconnect lost the watch draft or confirmation: count=%d err=%v", len(watches), err)
+	}
+}

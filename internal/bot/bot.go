@@ -39,19 +39,20 @@ type Config struct {
 }
 
 type Bot struct {
-	api          *tgbotapi.BotAPI
-	db           *storage.DB
-	catalog      *i18n.Catalog
-	cryptor      *security.Cryptor
-	cfg          Config
-	runner       *scheduler.Runner
-	manualChecks chan struct{}
-	workers      sync.WaitGroup
-	appMenuLocks sync.Map // User ID to *sync.Mutex.
-	logger       *slog.Logger
-	newClient    func(bool) luxmed.Client
-	flowMu       sync.Mutex
-	flowState    map[int64]*flow
+	api             *tgbotapi.BotAPI
+	db              *storage.DB
+	catalog         *i18n.Catalog
+	cryptor         *security.Cryptor
+	cfg             Config
+	runner          *scheduler.Runner
+	manualChecks    chan struct{}
+	workers         sync.WaitGroup
+	appMenuLocks    sync.Map // User ID to *sync.Mutex.
+	logger          *slog.Logger
+	newClient       func(bool) luxmed.Client
+	flowMu          sync.Mutex
+	flowState       map[int64]*flow
+	credentialFlows map[int64]*flow
 }
 
 type flowKind string
@@ -81,6 +82,7 @@ type flow struct {
 	cancel               context.CancelFunc
 	verification         *loginVerification
 	notice               *loginNotice
+	warningPending       bool
 	Login                string
 	CitySettings         bool
 	ProcedureSearchQuery string
@@ -91,7 +93,7 @@ type flow struct {
 }
 
 func New(api *tgbotapi.BotAPI, db *storage.DB, catalog *i18n.Catalog, cryptor *security.Cryptor, cfg Config, logger *slog.Logger) *Bot {
-	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow), manualChecks: make(chan struct{}, 3),
+	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow), credentialFlows: make(map[int64]*flow), manualChecks: make(chan struct{}, 3),
 		newClient: func(raw bool) luxmed.Client { return luxmed.NewHTTPClient(raw) }}
 }
 
@@ -266,7 +268,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	if credentialMessage {
 		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(telegramID, message.MessageID)); err != nil {
 			b.logger.Warn("could not delete Telegram credential message")
-			b.stopLoginAfterDeleteFailure(telegramID, i18n.Normalize(message.From.LanguageCode, b.cfg.DefaultLocale))
+			b.stopLoginAfterDeleteFailure(ctx, telegramID, state, i18n.Normalize(message.From.LanguageCode, b.cfg.DefaultLocale))
 			return
 		}
 		if state.Kind == flowAccountCheck {
@@ -371,7 +373,9 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 	case "help":
 		b.send(user, b.catalog.T(user.Locale, "help.text"), mainKeyboard(b.catalog, user.Locale))
 	case "cancel":
-		b.clearFlow(user.TelegramUserID)
+		if !b.clearCredentialFlow(user.TelegramUserID) {
+			b.clearFlow(user.TelegramUserID)
+		}
 		b.showMenu(user)
 	case "logout_luxmed":
 		b.clearFlow(user.TelegramUserID)
@@ -568,7 +572,9 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 		b.setFlow(user.TelegramUserID, &flow{Kind: flowWatchCity, CitySettings: true})
 		b.showCityPicker(ctx, user, true, 0)
 	case data == "cancel":
-		b.clearFlow(user.TelegramUserID)
+		if !b.clearCredentialFlow(user.TelegramUserID) {
+			b.clearFlow(user.TelegramUserID)
+		}
 		b.showMenu(user)
 	case data == "city:search" || data == "prefcity:search":
 		state := b.getFlow(user.TelegramUserID)
@@ -1825,9 +1831,14 @@ func (b *Bot) send(user domain.User, text string, markup any) bool {
 func (b *Bot) setFlow(telegramID int64, state *flow) {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	if current := b.flowState[telegramID]; current != nil && current.cancel != nil && current != state {
-		current.cancel()
+	if state != nil {
+		switch state.Kind {
+		case flowAccountLogin, flowAccountPass, flowAccountCheck:
+			b.replaceCredentialFlowLocked(telegramID, state)
+			return
+		}
 	}
+	b.replaceCredentialFlowLocked(telegramID, nil)
 	if state == nil {
 		delete(b.flowState, telegramID)
 		return
@@ -1838,6 +1849,9 @@ func (b *Bot) setFlow(telegramID int64, state *flow) {
 func (b *Bot) getFlow(telegramID int64) *flow {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
+	if state := b.credentialFlows[telegramID]; state != nil {
+		return state
+	}
 	return b.flowState[telegramID]
 }
 

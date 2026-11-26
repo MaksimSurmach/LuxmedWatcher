@@ -95,6 +95,7 @@ type loginNotice struct {
 	user  domain.User
 	key   string
 	retry *flow
+	saved bool
 }
 
 func (b *Bot) deliverLoginNotice(notice *loginNotice) *flow {
@@ -116,21 +117,65 @@ func (b *Bot) retryLoginNotice(telegramID int64, state *flow) {
 	}
 }
 
-func (b *Bot) stopLoginAfterDeleteFailure(telegramID int64, locale string) {
-	// Replacing the flow cancels verification before attempting the warning.
-	state := &flow{Kind: flowAccountCheck, notice: &loginNotice{
-		user: domain.User{TelegramChatID: telegramID, Locale: locale},
-		key:  "flow.account.delete_failed",
-	}}
-	b.setFlow(telegramID, state)
-	b.retryLoginNotice(telegramID, state)
+func (b *Bot) stopLoginAfterDeleteFailure(ctx context.Context, telegramID int64, previous *flow, locale string) {
+	if previous.warningPending {
+		return
+	}
+	state := &flow{Kind: flowAccountCheck, warningPending: true}
+	verification := previous.verification
+	b.flowMu.Lock()
+	// Cancel before waiting for any already-started Telegram response.
+	if previous.cancel != nil {
+		previous.cancel()
+	}
+	b.replaceCredentialFlowLocked(telegramID, state)
+	var cancelDone <-chan struct{}
+	if verification != nil {
+		cancelDone = verification.cancelDone
+	}
+	b.flowMu.Unlock()
+
+	warn := func(saved bool) {
+		var next *flow
+		defer func() { b.finishLogin(telegramID, state, next, false) }()
+		if ctx.Err() != nil || b.getFlow(telegramID) != state {
+			return
+		}
+		key := "flow.account.delete_failed"
+		if saved {
+			key = "flow.account.delete_failed_saved"
+		}
+		next = b.deliverLoginNotice(&loginNotice{
+			user: domain.User{TelegramChatID: telegramID, Locale: locale}, key: key, saved: saved,
+		})
+	}
+	if verification == nil {
+		warn(previous.notice != nil && previous.notice.saved)
+		return
+	}
+	b.workers.Go(func() {
+		select {
+		case <-ctx.Done():
+			b.finishLogin(telegramID, state, nil, false)
+			return
+		case <-verification.done:
+		}
+		// A cancellation reply may also have started before the deletion failed.
+		if cancelDone != nil {
+			select {
+			case <-ctx.Done():
+			case <-cancelDone:
+			}
+		}
+		warn(verification.err == nil)
+	})
 }
 
 type loginVerification struct {
-	user            domain.User
-	done            chan struct{}
-	err             error // Published by closing done.
-	cancelRequested bool  // Protected by flowMu.
+	user       domain.User
+	done       chan struct{}
+	err        error         // Published by closing done.
+	cancelDone chan struct{} // Protected by flowMu.
 }
 
 func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed.Credentials) {
@@ -184,7 +229,7 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 			key = "flow.account.verification_pending"
 		}
 		if b.ownsLogin(user.TelegramUserID, pending, false) {
-			retry = b.deliverLoginNotice(&loginNotice{user: user, key: key})
+			retry = b.deliverLoginNotice(&loginNotice{user: user, key: key, saved: true})
 		}
 	})
 }
@@ -196,19 +241,21 @@ func (b *Bot) cancelLogin(ctx context.Context, telegramID int64, pending *flow) 
 	}
 	verification := pending.verification
 	b.flowMu.Lock()
-	if b.flowState[telegramID] != pending {
+	if b.credentialFlows[telegramID] != pending {
 		b.flowMu.Unlock()
 		return false
 	}
-	if verification.cancelRequested {
+	if verification.cancelDone != nil {
 		b.flowMu.Unlock()
 		return true
 	}
-	verification.cancelRequested = true
+	done := make(chan struct{})
+	verification.cancelDone = done
 	pending.cancel()
 	b.flowMu.Unlock()
 
 	b.workers.Go(func() {
+		defer close(done)
 		var next *flow
 		defer func() {
 			if ctx.Err() != nil {
@@ -228,7 +275,7 @@ func (b *Bot) cancelLogin(ctx context.Context, telegramID int64, pending *flow) 
 		if verification.err == nil {
 			key = "flow.account.already_saved"
 		}
-		next = b.deliverLoginNotice(&loginNotice{user: verification.user, key: key})
+		next = b.deliverLoginNotice(&loginNotice{user: verification.user, key: key, saved: verification.err == nil})
 	})
 	return true
 }
@@ -236,37 +283,36 @@ func (b *Bot) cancelLogin(ctx context.Context, telegramID int64, pending *flow) 
 func (b *Bot) ownsLogin(telegramID int64, pending *flow, canceled bool) bool {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	return b.flowState[telegramID] == pending && pending.verification.cancelRequested == canceled
+	return b.credentialFlows[telegramID] == pending && (pending.verification.cancelDone != nil) == canceled
 }
 
 // Keep scrubbing input until the result (or cancellation result) has been sent.
 func (b *Bot) finishLogin(telegramID int64, pending, retry *flow, canceled bool) {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	if b.flowState[telegramID] != pending || (pending.verification != nil && pending.verification.cancelRequested != canceled) {
+	if b.credentialFlows[telegramID] != pending || (pending.verification != nil && (pending.verification.cancelDone != nil) != canceled) {
 		return
 	}
-	if retry == nil {
-		delete(b.flowState, telegramID)
-	} else {
-		b.flowState[telegramID] = retry
-	}
+	b.replaceCredentialFlowLocked(telegramID, retry)
 }
 
-func (b *Bot) clearCredentialFlow(telegramID int64) {
+func (b *Bot) clearCredentialFlow(telegramID int64) bool {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	state := b.flowState[telegramID]
-	if state == nil {
-		return
+	return b.replaceCredentialFlowLocked(telegramID, nil)
+}
+
+func (b *Bot) replaceCredentialFlowLocked(telegramID int64, next *flow) bool {
+	previous := b.credentialFlows[telegramID]
+	if previous != nil && previous != next && previous.cancel != nil {
+		previous.cancel()
 	}
-	switch state.Kind {
-	case flowAccountLogin, flowAccountPass, flowAccountCheck:
-		if state.cancel != nil {
-			state.cancel()
-		}
-		delete(b.flowState, telegramID)
+	if next == nil {
+		delete(b.credentialFlows, telegramID)
+	} else {
+		b.credentialFlows[telegramID] = next
 	}
+	return previous != nil
 }
 
 func (b *Bot) saveLogin(user domain.User, creds luxmed.Credentials, attempt *storage.CredentialAttempt) error {

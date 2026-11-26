@@ -73,6 +73,7 @@
   "flow.browser.logout": "Wyszukiwania wstrzymane. Aby zakończyć sesję przeglądarki, wyloguj się w LUX MED.",
   "flow.account.login": "W tej instalacji dane logowania przechodzą przez Telegram. Wyślij login LUX MED, aby zweryfikować i zapisać zaszyfrowany login i hasło, lub wybierz /cancel.",
   "flow.account.delete_failed": "Logowanie przerwane. Telegram nie usunął wiadomości. Usuń ją z czatu.",
+  "flow.account.delete_failed_saved": "Dane logowania do LUX MED zostały już zapisane. Telegram nie usunął wiadomości. Usuń ją z czatu.",
   "flow.account.password": "Wyślij hasło LUX MED.",
   "flow.account.removed": "Konto LUX MED odłączone. Wyszukiwania są wstrzymane.",
   "flow.account.canceled": "Logowanie anulowane. Ta próba nie zapisała danych logowania.",
