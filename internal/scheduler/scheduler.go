@@ -497,10 +497,18 @@ type BrowserSessionCheck struct {
 	NoSavedSearches     bool
 }
 
+type sessionProbePurpose int
+
+const (
+	manualSessionProbe sessionProbePurpose = iota
+	backgroundSessionProbe
+	watchResumeProbe
+)
+
 // CheckBrowserSession confirms a manual sign-in and restores saved active searches.
 func (r *Runner) CheckBrowserSession(ctx context.Context, user domain.User) (BrowserSessionCheck, error) {
 	browser := r.browsers[user.TelegramUserID]
-	return r.probeBrowserSession(ctx, user, browser, false)
+	return r.probeBrowserSession(ctx, user, browser, manualSessionProbe)
 }
 
 func (r *Runner) renewBrowserSession(ctx context.Context, telegramID int64, browser *luxmed.Browser) error {
@@ -508,14 +516,34 @@ func (r *Runner) renewBrowserSession(ctx context.Context, telegramID int64, brow
 	if err != nil {
 		return fmt.Errorf("load LuxMed browser session owner: %w", err)
 	}
-	_, err = r.probeBrowserSession(ctx, user, browser, true)
+	_, err = r.probeBrowserSession(ctx, user, browser, backgroundSessionProbe)
 	return err
 }
 
-func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, browser *luxmed.Browser, background bool) (BrowserSessionCheck, error) {
+// CheckWatchAccount checks the configured sign-in mode before resuming a search.
+func (r *Runner) CheckWatchAccount(ctx context.Context, user domain.User) error {
+	_, err := r.probeBrowserSession(ctx, user, r.browsers[user.TelegramUserID], watchResumeProbe)
+	return err
+}
+
+func (r *Runner) probeBrowserSession(
+	ctx context.Context, user domain.User, browser *luxmed.Browser, purpose sessionProbePurpose,
+) (BrowserSessionCheck, error) {
 	if !user.IsActive() {
 		return BrowserSessionCheck{}, nil
 	}
+	background := purpose == backgroundSessionProbe
+	savedAccountSuffices := purpose == watchResumeProbe
+	var account domain.LuxMedAccount
+	var err error
+	useBrowser := browser != nil || r.browsers != nil
+	if savedAccountSuffices {
+		_, err = r.db.LoginAccount(ctx, user.ID, useBrowser)
+		if !errors.Is(err, sql.ErrNoRows) || !useBrowser {
+			return BrowserSessionCheck{}, err
+		}
+	}
+
 	state, _ := r.acquireAccount(user.ID, false)
 	if state == nil {
 		return BrowserSessionCheck{}, luxmed.ErrBrowserBusy
@@ -523,11 +551,13 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	defer r.releaseAccount(state)
 	state.useCredentialRevision(user.CredentialRevision)
 
-	account, err := r.db.LoginAccount(ctx, user.ID, browser != nil || r.browsers != nil)
-	saved := err == nil
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return BrowserSessionCheck{}, fmt.Errorf("load LuxMed sign-in mode: %w", err)
+	if !savedAccountSuffices {
+		account, err = r.db.LoginAccount(ctx, user.ID, useBrowser)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return BrowserSessionCheck{}, fmt.Errorf("load LuxMed sign-in mode: %w", err)
+		}
 	}
+	saved := err == nil
 	if saved || browser == nil {
 		if background {
 			if state.recoveryPending {

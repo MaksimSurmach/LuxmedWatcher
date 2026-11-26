@@ -479,7 +479,17 @@ func (db *DB) SetWatchStatus(ctx context.Context, id int64, status domain.WatchS
 }
 
 func (db *DB) SetUserWatchStatus(ctx context.Context, userID, id int64, status domain.WatchStatus) error {
-	res, err := db.sql.ExecContext(ctx, `
+	return setUserWatchStatus(ctx, db.sql, userID, id, status)
+}
+
+func (db *DB) ResumeWatchForMode(ctx context.Context, owner domain.User, id int64) error {
+	return db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
+		return setUserWatchStatus(ctx, tx, owner.ID, id, domain.WatchStatusActive)
+	})
+}
+
+func setUserWatchStatus(ctx context.Context, exec sqlExecutor, userID, id int64, status domain.WatchStatus) error {
+	res, err := exec.ExecContext(ctx, `
 		UPDATE watches SET status=$1, updated_at=$2 WHERE id=$3 AND user_id=$4 AND status <> $5
 	`, status, time.Now().UTC(), id, userID, domain.WatchStatusDeleted)
 	return requireOneRow(res, err)

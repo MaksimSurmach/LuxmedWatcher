@@ -139,6 +139,17 @@ func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
 	return browser.Check(ctx)
 }
 
+func (b *Bot) checkResumeAccount(ctx context.Context, user domain.User) error {
+	if b.runner != nil {
+		return b.runner.CheckWatchAccount(ctx, user)
+	}
+	_, err := b.db.LoginAccount(ctx, user.ID, b.cfg.Browsers != nil)
+	if errors.Is(err, sql.ErrNoRows) && b.cfg.Browsers != nil {
+		return b.checkAccount(ctx, user)
+	}
+	return err
+}
+
 func accountCheckMessage(err error) string {
 	switch {
 	case errors.Is(err, sql.ErrNoRows):

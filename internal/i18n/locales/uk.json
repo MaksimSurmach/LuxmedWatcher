@@ -75,6 +75,8 @@
   "flow.account.delete_failed": "Вхід зупинено. Telegram не видалив ваше повідомлення. Видаліть його в чаті.",
   "flow.account.password": "Надішліть пароль LUX MED.",
   "flow.account.removed": "Акаунт LUX MED відключено. Пошуки призупинено.",
+  "flow.account.canceled": "Вхід скасовано. Ця спроба не зберегла дані входу.",
+  "flow.account.already_saved": "Дані входу LUX MED уже було збережено до скасування.",
   "flow.account.saved": "Акаунт LUX MED збережено.",
   "flow.account.verification_pending": "Дані LUX MED збережено. Доступ буде перевірено під час наступного дозволеного пошуку.",
   "flow.city_not_found": "Місто не знайдено. Спробуйте інше написання.",

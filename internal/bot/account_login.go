@@ -91,6 +91,13 @@ func (b *Bot) selectChrome(telegramID int64, action string) *storage.ChromeChoic
 	return b.db.SelectBrowserLogin(telegramID, "", *revisions, mode == "switch")
 }
 
+type loginVerification struct {
+	user            domain.User
+	done            chan struct{}
+	err             error // Published by closing done.
+	cancelRequested bool  // Protected by flowMu.
+}
+
 func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed.Credentials) {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 	attempt, err := b.db.StartCredentialAttempt(ctx, user, "")
@@ -103,18 +110,23 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 		b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
 		return
 	}
-	pending := &flow{Kind: flowAccountCheck, cancel: cancel}
+	verification := &loginVerification{user: user, done: make(chan struct{})}
+	pending := &flow{Kind: flowAccountCheck, cancel: cancel, verification: verification}
 	b.setFlow(user.TelegramUserID, pending)
 	b.workers.Go(func() {
+		defer close(verification.done)
 		defer cancel()
-		err := b.saveLogin(user, creds, attempt)
-		canceled := parent.Err() != nil || errors.Is(ctx.Err(), context.Canceled) ||
-			errors.Is(err, storage.ErrCredentialsChanged)
 		var retry *flow
-		if err != nil && !canceled {
-			retry = &flow{Kind: flowAccountPass, Login: creds.Login}
-		}
-		if !b.completeLogin(user.TelegramUserID, pending, retry) || canceled {
+		defer func() {
+			if parent.Err() != nil {
+				retry = nil
+			}
+			b.finishLogin(user.TelegramUserID, pending, retry, false)
+		}()
+		err := b.saveLogin(user, creds, attempt)
+		verification.err = err
+		if parent.Err() != nil || errors.Is(ctx.Err(), context.Canceled) ||
+			errors.Is(err, storage.ErrCredentialsChanged) || !b.ownsLogin(user.TelegramUserID, pending, false) {
 			return
 		}
 		if err != nil {
@@ -127,30 +139,78 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 			case errors.Is(err, luxmed.ErrBrowserBusy):
 				key = "watch.browser_busy"
 			}
-			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
+			if b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale)) {
+				retry = &flow{Kind: flowAccountPass, Login: creds.Login}
+			}
 			return
 		}
 		key := "flow.account.saved"
 		if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err == nil && required {
 			key = "flow.account.verification_pending"
 		}
-		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+		if b.ownsLogin(user.TelegramUserID, pending, false) {
+			b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+		}
 	})
 }
 
-// Completion changes the flow only if it still owns the verification slot.
-func (b *Bot) completeLogin(telegramID int64, pending, retry *flow) bool {
+// cancelLogin cancels the chat's exact verification before any database access.
+func (b *Bot) cancelLogin(ctx context.Context, telegramID int64, pending *flow) bool {
+	if pending == nil || pending.verification == nil {
+		return false
+	}
+	verification := pending.verification
+	b.flowMu.Lock()
+	if b.flowState[telegramID] != pending {
+		b.flowMu.Unlock()
+		return false
+	}
+	if verification.cancelRequested {
+		b.flowMu.Unlock()
+		return true
+	}
+	verification.cancelRequested = true
+	pending.cancel()
+	b.flowMu.Unlock()
+
+	b.workers.Go(func() {
+		defer b.finishLogin(telegramID, pending, nil, true)
+		select {
+		case <-ctx.Done():
+			return
+		case <-verification.done:
+		}
+		if ctx.Err() != nil || !b.ownsLogin(telegramID, pending, true) {
+			return
+		}
+		key := "flow.account.canceled"
+		if verification.err == nil {
+			key = "flow.account.already_saved"
+		}
+		user := verification.user
+		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+	})
+	return true
+}
+
+func (b *Bot) ownsLogin(telegramID int64, pending *flow, canceled bool) bool {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	if b.flowState[telegramID] != pending {
-		return false
+	return b.flowState[telegramID] == pending && pending.verification.cancelRequested == canceled
+}
+
+// Keep scrubbing input until the result (or cancellation result) has been sent.
+func (b *Bot) finishLogin(telegramID int64, pending, retry *flow, canceled bool) {
+	b.flowMu.Lock()
+	defer b.flowMu.Unlock()
+	if b.flowState[telegramID] != pending || pending.verification.cancelRequested != canceled {
+		return
 	}
 	if retry == nil {
 		delete(b.flowState, telegramID)
 	} else {
 		b.flowState[telegramID] = retry
 	}
-	return true
 }
 
 func (b *Bot) saveLogin(user domain.User, creds luxmed.Credentials, attempt *storage.CredentialAttempt) error {

@@ -79,6 +79,7 @@ const (
 type flow struct {
 	Kind                 flowKind
 	cancel               context.CancelFunc
+	verification         *loginVerification
 	Login                string
 	CitySettings         bool
 	ProcedureSearchQuery string
@@ -251,6 +252,9 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	telegramID := message.From.ID
 	state := b.getFlow(telegramID)
 	command := b.messageCommand(message, state)
+	if command == "cancel" && b.cancelLogin(ctx, telegramID, state) {
+		return
+	}
 	switch command {
 	case "logout_luxmed", "connect":
 		b.db.CancelActiveCredentialAttempt(telegramID)
@@ -1628,7 +1632,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "pause":
 		state = domain.WatchStatusPaused
 	case "resume":
-		if err := b.checkAccount(ctx, user); err != nil {
+		if err := b.checkResumeAccount(ctx, user); err != nil {
 			key := accountCheckMessage(err)
 			markup := b.withAccountRecovery(user, key, watchKeyboard(b.catalog, user.Locale, watch))
 			b.send(user, b.catalog.T(user.Locale, key), markup)
@@ -1661,7 +1665,12 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	default:
 		return
 	}
-	if err := b.db.SetUserWatchStatus(ctx, user.ID, id, state); err != nil {
+	if state == domain.WatchStatusActive {
+		err = b.db.ResumeWatchForMode(ctx, user, id)
+	} else {
+		err = b.db.SetUserWatchStatus(ctx, user.ID, id, state)
+	}
+	if err != nil {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
@@ -1796,14 +1805,16 @@ func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
 	b.send(user, b.catalog.T(user.Locale, "flow.invite.code", code), nil)
 }
 
-func (b *Bot) send(user domain.User, text string, markup any) {
+func (b *Bot) send(user domain.User, text string, markup any) bool {
 	msg := tgbotapi.NewMessage(user.TelegramChatID, truncateMessage(text, 4000))
 	if markup != nil {
 		msg.ReplyMarkup = markup
 	}
 	if _, err := b.api.Send(msg); err != nil {
 		b.logger.Warn("send Telegram message failed")
+		return false
 	}
+	return true
 }
 
 func (b *Bot) setFlow(telegramID int64, state *flow) {
