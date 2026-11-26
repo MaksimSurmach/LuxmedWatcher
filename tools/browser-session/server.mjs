@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
 import { allowedPortalResources, fetchCatalog } from './portal-api.mjs';
-import { checkPortal, observeSession, portalOrigin } from './session.mjs';
+import { observeSession, portalOrigin, portalSessionState, probePortal } from './session.mjs';
 import { renderViewerPage } from './viewer-copy.mjs';
 
 const viewerOrigin = new URL(process.env.LUXMED_VIEWER_URL).origin;
@@ -35,12 +35,12 @@ function reply(res, status, body = '', retryAfter) {
 
 async function portalReady(force = false) {
   if (!force && Date.now() < readyUntil && new URL(page.url()).origin === portalOrigin) {
-    return 'ready';
+    return { status: 200 };
   }
-  const status = await checkPortal(page);
-  reportSession(status);
-  readyUntil = status === 'ready' ? Date.now() + 60_000 : 0;
-  return status;
+  const result = await probePortal(page);
+  reportSession(portalSessionState(result.status));
+  readyUntil = result.status === 200 ? Date.now() + 60_000 : 0;
+  return result;
 }
 
 const api = createServer(async (req, res) => {
@@ -65,9 +65,8 @@ const api = createServer(async (req, res) => {
     }
     busy = true;
     try {
-      const status = await portalReady();
-      if (status === 'needs_login') return reply(res, 401);
-      if (status !== 'ready') return reply(res, 503);
+      const { status, retryAfter } = await portalReady();
+      if (status !== 200) return reply(res, status, '', retryAfter);
       if (url.pathname === '/session') return reply(res, 200);
       const result = await fetchCatalog(page, url.pathname + url.search);
       if (result.status === 401) readyUntil = 0;

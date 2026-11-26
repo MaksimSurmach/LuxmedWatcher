@@ -56,26 +56,43 @@ function onPage(url, origin, path) {
   return url.origin === origin && (url.pathname === path || url.pathname.startsWith(`${path}/`));
 }
 
+export function portalSessionState(status) {
+  if (status === 200) return 'ready';
+  if (status === 401) return 'needs_login';
+  return 'unavailable';
+}
+
 export async function checkPortal(page, origin = portalOrigin) {
+  return portalSessionState((await probePortal(page, origin)).status);
+}
+
+function throttledNavigation(response) {
+  const retryAfter = response.headers()['retry-after'];
+  return { status: 429, ...(retryAfter && { retryAfter }) };
+}
+
+export async function probePortal(page, origin = portalOrigin) {
   let reservationLoaded = false;
-  let loginConfirmed = false;
-  let reportLogin;
-  const loginNavigation = new Promise(resolve => { reportLogin = resolve; });
+  let navigationResult;
+  let finishNavigation;
+  const navigationFinished = new Promise(resolve => { finishNavigation = resolve; });
   const observeNavigation = (response) => {
     try {
       const request = response.request();
-      if (!request.isNavigationRequest() || request.frame() !== page.mainFrame()) return;
+      if (navigationResult || !request.isNavigationRequest() || request.frame() !== page.mainFrame()) return;
       const route = new URL(response.url());
       const status = response.status();
-      if (onPage(route, origin, reservation) && (response.ok() || (status >= 300 && status < 400))) {
+      const isReservation = onPage(route, origin, reservation);
+      if (isReservation && (response.ok() || (status >= 300 && status < 400))) {
         reservationLoaded = true;
       }
-      if ((onPage(route, origin, reservation) && status === 401) ||
-          (reservationLoaded && onPage(route, origin, login) &&
-           (response.ok() || status === 401))) {
-        loginConfirmed = true;
-        reportLogin('needs_login');
+      if (isReservation && status === 429) {
+        navigationResult = throttledNavigation(response);
+      } else if ((isReservation && status === 401) ||
+                 (reservationLoaded && onPage(route, origin, login) && (response.ok() || status === 401))) {
+        navigationResult = { status: 401 };
       }
+      if (navigationResult) finishNavigation(navigationResult);
     } catch {
       // A detached frame cannot establish the portal session state.
     }
@@ -83,31 +100,35 @@ export async function checkPortal(page, origin = portalOrigin) {
   page.on('response', observeNavigation);
   try {
     const response = await page.goto(`${origin}${reservation}`, { waitUntil: 'domcontentloaded', timeout: 15_000 });
-    if (loginConfirmed) return 'needs_login';
+    if (navigationResult) return navigationResult;
     const navigation = response && new URL(response.url());
     if (navigation?.origin === origin && response.status() === 401) {
-      return 'needs_login';
+      return { status: 401 };
+    }
+    if (navigation && onPage(navigation, origin, reservation) && response.status() === 429) {
+      return throttledNavigation(response);
     }
     if (!response?.ok()) {
-      return 'unavailable';
+      return { status: 503 };
     }
 
     if (onPage(navigation, origin, login)) {
-      return 'needs_login';
+      return { status: 401 };
     }
     if (!onPage(navigation, origin, reservation)) {
-      return 'unavailable';
+      return { status: 503 };
     }
 
     reservationLoaded = true;
     const form = page.getByPlaceholder('Wpisz lub wybierz z listy', { exact: true });
     return await Promise.race([
-      loginNavigation,
-      form.waitFor({ timeout: 10_000 }).then(() =>
-        onPage(new URL(page.url()), origin, reservation) ? 'ready' : 'unavailable'),
+      navigationFinished,
+      form.waitFor({ timeout: 10_000 }).then(() => ({
+        status: onPage(new URL(page.url()), origin, reservation) ? 200 : 503,
+      })),
     ]);
   } catch {
-    return loginConfirmed ? 'needs_login' : 'unavailable';
+    return navigationResult ?? { status: 503 };
   } finally {
     page.off('response', observeNavigation);
   }
