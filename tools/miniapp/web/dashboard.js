@@ -216,6 +216,7 @@ function setAutoBook(button, watch, enabled) {
 // Auto-booking acts on the user's behalf, so it needs an explicit confirmation of what it will do.
 function autoBookDialog(button, watch) {
   const dialog = document.querySelector('#booking');
+  openSession(dialog);
   dialog.querySelector('h2').textContent = t('watches.autobook_title');
   dialog.querySelector('dl').innerHTML = `<div><dt>${escape(watch.ServiceName || watch.Name)}</dt><dd>${escape(watch.CityName)}</dd></div>`;
   const note = dialog.querySelector('#booking-note');
@@ -308,6 +309,15 @@ function slotGroups(slots) {
     }).join('')}</section>`).join('');
 }
 
+// The booking dialog is shared; each opening gets a session so late answers can tell
+// whether the dialog still shows their request.
+let dialogSession = 0;
+function openSession(dialog) {
+  dialog.dataset.session = String(++dialogSession);
+  return dialog.dataset.session;
+}
+const current = (dialog, session) => dialog.open && dialog.dataset.session === session;
+
 function bookingDialog(slot) {
   const dialog = document.querySelector('#booking');
   const date = new Date(slot.DateTime);
@@ -326,21 +336,39 @@ function bookingDialog(slot) {
   open.hidden = false;
   open.lastElementChild.hidden = Boolean(state.Booking);
   open.firstChild.textContent = `${t(state.Booking ? 'history.book_confirm' : 'history.confirm_open')} `;
+  const session = openSession(dialog);
   open.onclick = state.Booking ? () => void run(open, async () => {
     // The server answers with the provider's decision: confirmed, or the time is already taken.
-    const { Status } = await api('book', { ID: slot.ID });
+    let Status;
+    try {
+      ({ Status } = await api('book', { ID: slot.ID }));
+    } catch (error) {
+      if (current(dialog, session)) note.textContent = error.message;
+      else flash(error.message);
+      return;
+    }
     const confirmed = Status === 'confirmed';
-    note.className = 'note outcome';
-    note.dataset.kind = confirmed ? 'confirmed' : 'taken';
-    note.setAttribute('role', 'status');
-    note.textContent = confirmed
+    const outcome = confirmed
       ? t('history.book_confirmed', { time: `${longDay().format(date)}, ${clock.format(date)}`, address: slot.Address || slot.Facility })
       : t('history.book_taken');
     slot.Status = 'expired';
+    // A late answer must not rewrite a dialog that now shows another time: announce it
+    // and refresh the list once no dialog is open.
+    if (!current(dialog, session)) {
+      flash(outcome);
+      if (tab !== 'history') return;
+      if (!dialog.open) void switchTab('history');
+      else dialog.addEventListener('close', () => void switchTab('history'), { once: true });
+      return;
+    }
+    note.className = 'note outcome';
+    note.dataset.kind = confirmed ? 'confirmed' : 'taken';
+    note.setAttribute('role', 'status');
+    note.textContent = outcome;
     open.hidden = true;
     dialog.querySelector('#booking-cancel').textContent = t('common.close');
-    dialog.onclose = () => { dialog.onclose = null; void switchTab('history'); };
-  }, note) : () => {
+    dialog.addEventListener('close', () => void switchTab('history'), { once: true });
+  }) : () => {
     dialog.close();
     if (telegram?.openLink) telegram.openLink(portal);
     else window.open(portal, '_blank', 'noopener');
