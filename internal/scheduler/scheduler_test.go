@@ -1479,6 +1479,60 @@ func (c *termsProbeClient) CheckTermsAccess(ctx context.Context, watch domain.Wa
 	return c.probe(ctx, watch)
 }
 
+func TestActiveLegacyRecoveryStaysQueuedAfterTerms503(t *testing.T) {
+	ctx := t.Context()
+	_, db, watch := testRunner(t, nil)
+	watch.CityID, watch.ServiceID, watch.CheckIntervalSeconds = 1, 12, 3600
+	if err := db.UpdateWatch(ctx, watch); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkWatchChecked(ctx, watch.ID, false, "luxmed_authentication"); err != nil {
+		t.Fatal(err)
+	}
+	var status atomic.Int32
+	status.Store(http.StatusServiceUnavailable)
+	var termsCalls atomic.Int32
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path == "/session" {
+			return
+		}
+		termsCalls.Add(1)
+		if status.Load() == http.StatusOK {
+			fmt.Fprint(w, `{"termsForService":{"termsForDays":[]}}`)
+			return
+		}
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(int(status.Load()))
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := func() *Scheduler {
+		runner := NewRunner(db, nil, nil, 0, time.Hour, false)
+		runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
+		return New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}
+	start().maintainReconnectSessions(ctx)
+	pending, err := db.Watch(ctx, watch.ID)
+	if err != nil || pending.LastError != "luxmed_authentication" || termsCalls.Load() != 1 {
+		t.Fatalf("terms 503 lost pending verification: watch=%+v calls=%d err=%v", pending, termsCalls.Load(), err)
+	}
+	if required, err := db.LuxMedReconnectRequired(ctx, watch.UserID); err != nil || required {
+		t.Fatalf("terms 503 opened an episode: required=%v err=%v", required, err)
+	}
+
+	status.Store(http.StatusOK)
+	if ids := start().maintainReconnectSessions(ctx); !slices.Equal(ids, []int64{42}) {
+		t.Fatalf("pending verification was lost on restart: %v", ids)
+	}
+	verified, err := db.Watch(ctx, watch.ID)
+	if err != nil || verified.LastError != "" || verified.LastSuccessAt == nil || termsCalls.Load() != 2 {
+		t.Fatalf("terms success did not clear pending verification: watch=%+v calls=%d err=%v", verified, termsCalls.Load(), err)
+	}
+}
+
 func TestAssignedBrowserVerifiesPausedLegacyErrorWithoutPasswordOrEpisode(t *testing.T) {
 	ctx := t.Context()
 	runner, db, watch := testRunner(t, nil)

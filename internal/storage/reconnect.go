@@ -12,7 +12,8 @@ import (
 )
 
 const reconnectRequiredQuery = `SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1)`
-const watchSignInError = `last_error IN ('luxmed_authentication', 'luxmed_account_missing')`
+const signInErrorsSQL = `('luxmed_authentication', 'luxmed_account_missing')`
+const watchSignInError = `last_error IN ` + signInErrorsSQL
 
 func (db *DB) LuxMedReconnectRequired(ctx context.Context, userID int64) (bool, error) {
 	var required bool

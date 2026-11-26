@@ -916,10 +916,12 @@ function hasPendingAccess(snapshot) {
 
 function applySnapshot(latest, checkedAccount = ['connected', 'verification_pending'].includes(account) ? account : 'unchecked') {
   state = latest;
-  if (checkedAccount === 'verification_pending') {
+  if (state.ReconnectRequired) {
+    account = 'search_paused';
+  } else if (checkedAccount === 'verification_pending') {
     account = hasPendingAccess(latest) ? checkedAccount : 'connected';
   } else {
-    account = state.ReconnectRequired ? 'search_paused' : checkedAccount;
+    account = checkedAccount;
   }
   setLanguage(state.Locale);
   renderLanguage();

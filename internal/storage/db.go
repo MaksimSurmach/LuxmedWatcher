@@ -392,23 +392,26 @@ func (db *DB) SetUserWatchStatus(ctx context.Context, userID, id int64, status d
 }
 
 func (db *DB) MarkWatchChecked(ctx context.Context, id int64, success bool, errText string) error {
-	_, err := db.sql.ExecContext(ctx, markWatchCheckedQuery, time.Now().UTC(), success, errText, id)
+	_, err := db.sql.ExecContext(ctx, markWatchChecked+watchCheckError+` WHERE id=$4`, time.Now().UTC(), success, errText, id)
 	return err
 }
 
-const markWatchCheckedQuery = `
+const markWatchChecked = `
 	UPDATE watches
-	SET last_checked_at=$1, last_success_at=CASE WHEN $2 THEN $1 ELSE last_success_at END,
-	    last_error=CASE WHEN $2 THEN '' ELSE $3 END, updated_at=$1
-	WHERE id=$4
+	SET last_checked_at=$1, last_success_at=CASE WHEN $2 THEN $1 ELSE last_success_at END, updated_at=$1, last_error=
 `
+const watchCheckError = `CASE WHEN $2 THEN '' ELSE $3 END`
 
 func (db *DB) MarkWatchCheckedIfUnchanged(ctx context.Context, watch domain.Watch, success bool, errText string) error {
-	query := markWatchCheckedQuery + ` AND status=$5 AND updated_at=$6`
+	// Protected verification clears a sign-in error before writing the search result.
+	// While the error is still present it keeps the account queued for verification.
+	update := markWatchChecked + ` CASE WHEN ` + watchSignInError + ` AND $3 NOT IN ` + signInErrorsSQL +
+		` THEN last_error ELSE ` + watchCheckError + ` END WHERE id=$4 AND status=$5`
+	query := update + ` AND updated_at=$6`
 	args := []any{time.Now().UTC(), success, errText, watch.ID, domain.WatchStatusActive, watch.UpdatedAt}
 	if !db.postgres {
 		// Older SQLite rows stored UTC timestamps in Go's default format.
-		query = markWatchCheckedQuery + ` AND status=$5 AND updated_at IN ($6, $7)`
+		query = update + ` AND updated_at IN ($6, $7)`
 		args = append(args, watch.UpdatedAt.UTC().String())
 	}
 	return requireOneRow(db.sql.ExecContext(ctx, query, args...))
