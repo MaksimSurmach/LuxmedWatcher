@@ -327,7 +327,7 @@ func TestAppointmentNotificationEscapesHTMLAndShowsRemainingSlots(t *testing.T) 
 	}, 3, 10)
 	for _, value := range []string{
 		"<b>Appointment times found · 3</b>", "A &lt; B &amp; C", "&lt;b&gt;Example&lt;/b&gt;", "A &amp; B",
-		"Street 12", "<i>More in history: 2</i>", "Check the time and book in the LUX MED portal.",
+		"Street 12", "<i>More options: 2</i>", "Check the time and book in the LUX MED portal.",
 	} {
 		if !strings.Contains(text, value) {
 			t.Errorf("notification missing %q in %q", value, text)

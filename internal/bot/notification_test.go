@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -8,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
@@ -22,7 +24,7 @@ func slot(city, clinic, address, doctor string, day, hour, minute int) domain.Ap
 func TestNotificationSingleSlot(t *testing.T) {
 	b := testBot(t)
 	text, shown := b.appointmentNotification("en", domain.Watch{Name: "W"}, []domain.AppointmentHistory{slot("Krakow", "Clinic A", "Main 1", "Dr A", 5, 9, 30)}, 1, 10)
-	if shown != 1 || strings.Contains(text, "More in history") {
+	if shown != 1 || strings.Contains(text, "More options") {
 		t.Fatalf("shown=%d text=%q", shown, text)
 	}
 	for _, want := range []string{"<b>Krakow</b>\nClinic A\nMain 1\n<b>05.01.2030</b>\n09:30 · Dr A"} {
@@ -74,7 +76,7 @@ func TestNotificationLongListShowsCountPreviewAndFitsTelegram(t *testing.T) {
 		items = append(items, slot("Krakow", strings.Repeat("C", 120), strings.Repeat("S", 100), strings.Repeat("D", 80), 1+i, 9, 0))
 	}
 	text, shown := b.appointmentNotification("en", domain.Watch{Name: strings.Repeat("N", 300)}, items, 40, 10)
-	if shown != previewNotificationSlots || !strings.Contains(text, "LuxMed appointments found: 40") || !strings.Contains(text, "More in history: 35") {
+	if shown != previewNotificationSlots || !strings.Contains(text, "Appointment times found · 40") || !strings.Contains(text, "More options: 35") {
 		t.Errorf("shown=%d text=%q", shown, text)
 	}
 	// Even a short list must stay below Telegram's limit by dropping what does not fit.
@@ -85,7 +87,7 @@ func TestNotificationLongListShowsCountPreviewAndFitsTelegram(t *testing.T) {
 		items[i].FacilityName = strings.Repeat("P", 120) + string(rune('a'+i))
 	}
 	text, shown = b.appointmentNotification("en", domain.Watch{Name: strings.Repeat("N", 300)}, items, 10, 10)
-	if utf8.RuneCountInString(text) > 4096 || shown == 0 || !strings.Contains(text, "More in history") && shown < 10 {
+	if utf8.RuneCountInString(text) > 4096 || shown == 0 || !strings.Contains(text, "More options") && shown < 10 {
 		t.Errorf("shown=%d length=%d", shown, utf8.RuneCountInString(text))
 	}
 }
@@ -134,5 +136,131 @@ func TestMultiSlotNotificationUsesTextAndAllOptionsListsAddresses(t *testing.T) 
 	b.handleHistoryPage(ctx, user, fmt.Sprintf("history:%d:0", watchID))
 	if len(sent) != 2 || !strings.Contains(sent[1], "Main 1") || !strings.Contains(sent[1], "Side 2") {
 		t.Fatalf("history lacks addresses: %q", sent)
+	}
+}
+
+func TestAllOptionsCallbackShowsAvailableSlotsInWatchOrder(t *testing.T) {
+	ctx := t.Context()
+	type message struct {
+		text     string
+		keyboard tgbotapi.InlineKeyboardMarkup
+	}
+	sent := make(chan message, 8)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/botfake/sendMessage" {
+			if err := r.ParseForm(); err != nil {
+				t.Error(err)
+			}
+			msg := message{text: r.Form.Get("text")}
+			if err := json.Unmarshal([]byte(r.Form.Get("reply_markup")), &msg.keyboard); err != nil {
+				t.Error(err)
+			}
+			sent <- msg
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":7}}`)
+	})
+	nextMessage := func() message {
+		t.Helper()
+		select {
+		case msg := <-sent:
+			return msg
+		default:
+			t.Fatal("expected a Telegram message")
+			return message{}
+		}
+	}
+	button := func(msg message, label string) string {
+		t.Helper()
+		for _, row := range msg.keyboard.InlineKeyboard {
+			for _, item := range row {
+				if item.Text == label && item.CallbackData != nil {
+					return *item.CallbackData
+				}
+			}
+		}
+		return ""
+	}
+
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	watch := domain.Watch{UserID: user.ID, Name: "Selected", CityID: 1, ServiceID: 12, CheckIntervalSeconds: 300}
+	var err error
+	watch.ID, err = b.db.CreateWatch(ctx, watch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherID, err := b.db.CreateWatch(ctx, watch)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insert := func(watchID int64, name string, at time.Time) domain.AppointmentHistory {
+		t.Helper()
+		h, _, err := b.db.UpsertAppointmentHistory(ctx, watchID, domain.Appointment{
+			Fingerprint: name, DateTime: at, CityName: "Warsaw", FacilityName: "Clinic",
+			DoctorName: "Dr A", Address: name,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	now := time.Now().Truncate(time.Second)
+	expired := insert(watch.ID, "Expired listing", now.Add(72*time.Hour))
+	if err := b.db.MarkMissingAppointments(ctx, watch.ID, expired.LastSeenAt.Add(time.Millisecond), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	insert(watch.ID, "Past appointment", now.Add(-time.Hour))
+	hidden := insert(watch.ID, "Hidden listing", now.Add(30*time.Minute))
+	if err := b.db.HideAppointmentHistory(ctx, user.ID, hidden.ID); err != nil {
+		t.Fatal(err)
+	}
+	insert(otherID, "Other watch", now.Add(30*time.Minute))
+
+	items := make([]domain.AppointmentHistory, 0, 11)
+	for i := range 11 {
+		items = append(items, insert(watch.ID, fmt.Sprintf("Street %02d", i+1), now.Add(time.Duration(i+1)*time.Hour)))
+	}
+	if _, err := b.NotifyAppointments(ctx, user, watch, items[:3], 3); err != nil {
+		t.Fatal(err)
+	}
+	if button(nextMessage(), "All options") != "" {
+		t.Fatal("complete short list exposed All options")
+	}
+	if _, err := b.NotifyAppointments(ctx, user, watch, items[:10], len(items)); err != nil {
+		t.Fatal(err)
+	}
+	notification := nextMessage()
+	action := button(notification, "All options")
+	if action == "" || !strings.Contains(notification.text, b.catalog.T(user.Locale, "notification.title", 11)) ||
+		!strings.Contains(notification.text, "Street 05") || strings.Contains(notification.text, "Street 06") {
+		t.Fatalf("unexpected long notification: %q (action %q)", notification.text, action)
+	}
+	click := func(action string) {
+		t.Helper()
+		if action == "" {
+			t.Fatal("expected a callback")
+		}
+		b.handleCallback(ctx, &tgbotapi.CallbackQuery{
+			ID: "test", Data: action, From: &tgbotapi.User{ID: user.TelegramUserID},
+			Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"}},
+		})
+	}
+	click(action)
+	first := nextMessage()
+	lastIndex := -1
+	for i := range 5 {
+		index := strings.Index(first.text, fmt.Sprintf("Street %02d", i+1))
+		if index <= lastIndex {
+			t.Fatalf("first page is missing the earliest slots in order: %q", first.text)
+		}
+		lastIndex = index
+	}
+	for _, excluded := range []string{"Expired listing", "Past appointment", "Other watch", "Hidden listing", "Street 06"} {
+		if strings.Contains(first.text, excluded) {
+			t.Errorf("unexpected %q on first page: %q", excluded, first.text)
+		}
+	}
+	click(button(first, "Next"))
+	if msg := nextMessage(); !strings.Contains(msg.text, "Street 06") || strings.Contains(msg.text, "Street 01") {
+		t.Errorf("unexpected second page: %q", msg.text)
 	}
 }

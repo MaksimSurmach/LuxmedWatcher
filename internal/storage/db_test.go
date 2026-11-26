@@ -546,3 +546,75 @@ func TestLegacySQLiteAppointmentTimeMigration(t *testing.T) {
 		}
 	}
 }
+
+func TestAddressFallbackPreservesLegacyNotification(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 101, TelegramChatID: 101})
+		if err != nil {
+			t.Fatal(err)
+		}
+		watchID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		app := domain.Appointment{Fingerprint: "legacy", Address: "Łączna 1", DateTime: time.Now().Add(time.Hour)}
+		legacy, _, err := db.UpsertAppointmentHistory(ctx, watchID, app)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.MarkNotified(ctx, watchID, legacy.ID, legacy.Fingerprint, 7, domain.NotificationStatusSent, ""); err != nil {
+			t.Fatal(err)
+		}
+
+		app.LegacyFingerprint = legacy.Fingerprint
+		app.Fingerprint, app.Address = "address-two", "Łączna 2"
+		other, created, err := db.UpsertAppointmentHistory(ctx, watchID, app)
+		if err != nil || !created || other.ID == legacy.ID || other.LastNotifiedAt != nil {
+			t.Fatalf("second address did not get an independent history row: %+v (new=%v, err=%v)", other, created, err)
+		}
+
+		app.Fingerprint, app.Address = "address-one", " ŁĄCZNA   1 "
+		same, created, err := db.UpsertAppointmentHistory(ctx, watchID, app)
+		if err != nil || created || same.ID != legacy.ID || same.LastNotifiedAt == nil || same.SeenCount != 2 {
+			t.Fatalf("legacy notification was not retained: %+v (new=%v, err=%v)", same, created, err)
+		}
+
+		app.Fingerprint, app.Address = "address-two", "Łączna 2"
+		again, created, err := db.UpsertAppointmentHistory(ctx, watchID, app)
+		if err != nil || created || again.ID != other.ID || again.SeenCount != 2 {
+			t.Fatalf("second address was not deduplicated: %+v (new=%v, err=%v)", again, created, err)
+		}
+	})
+}
+
+func TestAvailableWatchOptions(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 101, TelegramChatID: 101})
+		if err != nil {
+			t.Fatal(err)
+		}
+		watchID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		now := time.Now().Truncate(time.Second)
+		for _, fixture := range []struct {
+			fingerprint string
+			offset      time.Duration
+		}{{"later", 2 * time.Hour}, {"past", -time.Hour}, {"earliest", time.Hour}} {
+			if _, _, err := db.UpsertAppointmentHistory(ctx, watchID, domain.Appointment{
+				Fingerprint: fixture.fingerprint, DateTime: now.Add(fixture.offset),
+			}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		items, err := db.AvailableWatchOptions(ctx, user.ID, watchID, now, 5, 0)
+		if err != nil || len(items) != 2 || items[0].Fingerprint != "earliest" || items[1].Fingerprint != "later" {
+			t.Fatalf("available options = %+v, err = %v", items, err)
+		}
+		items, err = db.AvailableWatchOptions(ctx, user.ID+1, watchID, now, 5, 0)
+		if err != nil || len(items) != 0 {
+			t.Fatalf("another user could list watch options: %+v, err = %v", items, err)
+		}
+	})
+}

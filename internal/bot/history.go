@@ -20,14 +20,18 @@ func (b *Bot) handleHistoryPage(ctx context.Context, user domain.User, data stri
 	}
 	watchID, idErr := strconv.ParseInt(parts[1], 10, 64)
 	page, pageErr := strconv.Atoi(parts[2])
-	if idErr == nil && watchID >= 0 && pageErr == nil && page >= 0 && page <= 10000 {
-		b.showHistoryPage(ctx, user, watchID, page)
+	validWatch := watchID > 0 || (parts[0] == "history" && watchID == 0)
+	if idErr == nil && validWatch && pageErr == nil && page >= 0 && page <= 10000 {
+		b.showHistoryPage(ctx, user, parts[0], watchID, page)
 	}
 }
 
 func (b *Bot) hideHistory(ctx context.Context, user domain.User, data string) {
 	parts := strings.Split(data, ":")
-	if len(parts) != 4 {
+	view := "history"
+	if len(parts) == 5 && parts[4] == "options" {
+		view = parts[4]
+	} else if len(parts) != 4 {
 		return
 	}
 	id, err := strconv.ParseInt(parts[1], 10, 64)
@@ -38,15 +42,20 @@ func (b *Bot) hideHistory(ctx context.Context, user domain.User, data string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
-	b.handleHistoryPage(ctx, user, "history:"+parts[2]+":"+parts[3])
+	b.handleHistoryPage(ctx, user, view+":"+parts[2]+":"+parts[3])
 }
 
-func (b *Bot) showHistoryPage(ctx context.Context, user domain.User, watchID int64, page int) {
+func (b *Bot) showHistoryPage(ctx context.Context, user domain.User, view string, watchID int64, page int) {
 	const pageSize = 5
+	now := time.Now()
 	var items []domain.AppointmentHistory
 	var err error
-	if watchID == 0 {
-		items, err = b.db.RecentHistory(ctx, user.ID, pageSize+1, page*pageSize)
+	empty := "history.empty"
+	hideSuffix := ""
+	if view == "options" {
+		items, err = b.db.AvailableWatchOptions(ctx, user.ID, watchID, now, pageSize+1, page*pageSize)
+		empty = "options.empty"
+		hideSuffix = ":options"
 	} else {
 		items, err = b.db.WatchHistory(ctx, user.ID, watchID, pageSize+1, page*pageSize)
 	}
@@ -56,24 +65,23 @@ func (b *Bot) showHistoryPage(ctx context.Context, user domain.User, watchID int
 	}
 	if len(items) == 0 {
 		if page > 0 {
-			b.send(user, b.catalog.T(user.Locale, "history.empty"), tgbotapi.NewInlineKeyboardMarkup(
-				tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.previous"), fmt.Sprintf("history:%d:%d", watchID, page-1))),
+			b.send(user, b.catalog.T(user.Locale, empty), tgbotapi.NewInlineKeyboardMarkup(
+				tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.previous"), fmt.Sprintf("%s:%d:%d", view, watchID, page-1))),
 			))
 			return
 		}
-		b.send(user, b.catalog.T(user.Locale, "history.empty"), mainKeyboard(b.catalog, user.Locale))
+		b.send(user, b.catalog.T(user.Locale, empty), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
 	var lines []string
 	var navigation []tgbotapi.InlineKeyboardButton
 	if page > 0 {
-		navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.previous"), fmt.Sprintf("history:%d:%d", watchID, page-1)))
+		navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.previous"), fmt.Sprintf("%s:%d:%d", view, watchID, page-1)))
 	}
 	if len(items) > pageSize {
 		items = items[:pageSize]
-		navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.next"), fmt.Sprintf("history:%d:%d", watchID, page+1)))
+		navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.next"), fmt.Sprintf("%s:%d:%d", view, watchID, page+1)))
 	}
-	now := time.Now()
 	var bookingURL string
 	var hide []tgbotapi.InlineKeyboardButton
 	for i, item := range items {
@@ -95,7 +103,7 @@ func (b *Bot) showHistoryPage(ctx context.Context, user domain.User, watchID int
 			line += "\n" + b.catalog.T(user.Locale, "history.notified")
 		}
 		lines = append(lines, line)
-		hide = append(hide, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.hide_history", i+1), fmt.Sprintf("hide:%d:%d:%d", item.ID, watchID, page)))
+		hide = append(hide, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.hide_history", i+1), fmt.Sprintf("hide:%d:%d:%d%s", item.ID, watchID, page, hideSuffix)))
 	}
 	rows := make([][]tgbotapi.InlineKeyboardButton, 0, 4)
 	if bookingURL != "" {

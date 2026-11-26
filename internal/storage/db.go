@@ -328,6 +328,19 @@ func (db *DB) MarkWatchChecked(ctx context.Context, id int64, success bool, errT
 }
 
 func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {
+	if app.LegacyFingerprint != "" {
+		var legacyAddress string
+		err := db.sql.QueryRowContext(ctx, `
+			SELECT address FROM appointment_history WHERE watch_id=$1 AND fingerprint=$2
+		`, watchID, app.LegacyFingerprint).Scan(&legacyAddress)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return domain.AppointmentHistory{}, false, err
+		}
+		// Keep the original row and its delivery history for this address only.
+		if err == nil && domain.NormalizeAppointmentAddress(legacyAddress) == domain.NormalizeAppointmentAddress(app.Address) {
+			app.Fingerprint = app.LegacyFingerprint
+		}
+	}
 	now := time.Now().UTC()
 	row := db.sql.QueryRowContext(ctx, `
 		INSERT INTO appointment_history (
@@ -366,10 +379,23 @@ func (db *DB) RecentHistory(ctx context.Context, userID int64, limit, offset int
 }
 
 func (db *DB) WatchHistory(ctx context.Context, userID, watchID int64, limit, offset int) ([]domain.AppointmentHistory, error) {
-	rows, err := db.sql.QueryContext(ctx, historySelect()+`
+	return db.queryHistory(ctx, historySelect()+`
 		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1 AND (id=$2 OR $2=0)) AND status <> $3
 		ORDER BY `+db.dateTimeSQL("date_time")+` DESC, id DESC LIMIT $4 OFFSET $5
 	`, userID, watchID, domain.HistoryStatusHidden, limit, offset)
+}
+
+func (db *DB) AvailableWatchOptions(ctx context.Context, userID, watchID int64, now time.Time, limit, offset int) ([]domain.AppointmentHistory, error) {
+	date := db.dateTimeSQL("date_time")
+	return db.queryHistory(ctx, historySelect()+`
+		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1 AND id=$2 AND status <> $3)
+			AND status NOT IN ($4, $5) AND `+date+` > `+db.dateTimeSQL("$6")+`
+		ORDER BY `+date+` ASC, id ASC LIMIT $7 OFFSET $8
+	`, userID, watchID, domain.WatchStatusDeleted, domain.HistoryStatusHidden, domain.HistoryStatusExpired, now.UTC(), limit, offset)
+}
+
+func (db *DB) queryHistory(ctx context.Context, query string, args ...any) ([]domain.AppointmentHistory, error) {
+	rows, err := db.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

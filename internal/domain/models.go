@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type UserStatus string
 type UserRole string
@@ -140,6 +143,13 @@ type Appointment struct {
 	CityName     string
 	BookingURL   string
 	RawPayload   string
+
+	// LegacyFingerprint is the lookup key for an existing row with the same address.
+	LegacyFingerprint string `json:"-"`
+}
+
+func NormalizeAppointmentAddress(address string) string {
+	return strings.ToLower(strings.Join(strings.Fields(address), " "))
 }
 
 type AppointmentHistory struct {

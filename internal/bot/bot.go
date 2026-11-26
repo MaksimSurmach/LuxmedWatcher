@@ -160,7 +160,7 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		keyboard = append(keyboard, []miniAppButton{details})
 	}
 	if max(total, len(histories)) > shown {
-		keyboard[1] = append(keyboard[1], b.actionButton(user, "button.all_options", fmt.Sprintf("watch:history:%d", watch.ID)))
+		keyboard[1] = append(keyboard[1], b.actionButton(user, "button.all_options", fmt.Sprintf("options:%d:0", watch.ID)))
 	}
 	keyboard = append(keyboard, []miniAppButton{
 		b.actionButton(user, "button.pause", fmt.Sprintf("watch:pause:%d", watch.ID)),
@@ -612,7 +612,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 		b.handleFacility(ctx, user, data)
 	case strings.HasPrefix(data, "doctor:"):
 		b.handleDoctorChoice(ctx, user, b.getFlow(user.ID), strings.TrimPrefix(data, "doctor:"))
-	case strings.HasPrefix(data, "history:"):
+	case strings.HasPrefix(data, "history:"), strings.HasPrefix(data, "options:"):
 		b.handleHistoryPage(ctx, user, data)
 	case strings.HasPrefix(data, "hide:"):
 		b.hideHistory(ctx, user, data)
@@ -1580,7 +1580,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 		b.editWatch(ctx, user, watch)
 		return
 	case "history":
-		b.showHistoryPage(ctx, user, watch.ID, 0)
+		b.showHistoryPage(ctx, user, "history", watch.ID, 0)
 		return
 
 	case "show":
@@ -1684,7 +1684,7 @@ func (b *Bot) showWatch(ctx context.Context, user domain.User, watch domain.Watc
 }
 
 func (b *Bot) showHistory(ctx context.Context, user domain.User) {
-	b.showHistoryPage(ctx, user, 0, 0)
+	b.showHistoryPage(ctx, user, "history", 0, 0)
 }
 
 func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string) {
