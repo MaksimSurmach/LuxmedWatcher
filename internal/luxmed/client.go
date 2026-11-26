@@ -29,6 +29,8 @@ type SearchResult struct {
 	// Checked records a validated date window or verified slots in a partial response.
 	// A subsequent ErrAuthentication still invalidates the session.
 	Checked bool
+	// Authenticated records a successful password authentication during the search.
+	Authenticated bool
 }
 
 type Client interface {

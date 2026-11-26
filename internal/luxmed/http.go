@@ -54,6 +54,7 @@ type HTTPClient struct {
 	accessToken string
 	xsrfToken   string
 	creds       Credentials
+	authVersion uint64
 	rawPayloads bool
 	browser     bool
 	workerKey   string
@@ -122,6 +123,7 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 	if err == nil && json.Unmarshal(data, &xsrf) == nil {
 		c.xsrfToken = xsrf.Token
 	}
+	c.authVersion++
 	return nil
 }
 
@@ -171,13 +173,20 @@ func (c *HTTPClient) get(ctx context.Context, endpoint string) ([]byte, error) {
 }
 
 func (c *HTTPClient) getWithRetry(ctx context.Context, endpoint string) ([]byte, error) {
-	var err error
+	var err, previous error
 	for attempt := range 3 {
 		var data []byte
 		data, err = c.request(ctx, http.MethodGet, endpoint, nil)
 		if !errors.Is(err, ErrUnavailable) || attempt == 2 {
+			if c.browser && previous != nil {
+				if status, ok := errors.AsType[*HTTPError](err); ok && status.StatusCode == http.StatusConflict {
+					// An earlier attempt reached upstream, even though the worker is now busy.
+					return data, errors.Join(err, previous)
+				}
+			}
 			return data, err
 		}
+		previous = err
 
 		base := (200 * time.Millisecond) << attempt
 		jitter := rand.N(base)

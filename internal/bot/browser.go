@@ -39,7 +39,15 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 	if err == nil {
 		return nil
 	}
-	if rejected, ok := errors.AsType[*tgbotapi.Error](err); ok {
+	rejected, apiRejected := errors.AsType[*tgbotapi.Error](err)
+	if client.status == http.StatusTooManyRequests {
+		delay := client.retryAfter
+		if apiRejected && rejected.Code == http.StatusTooManyRequests {
+			delay = max(delay, time.Duration(rejected.RetryAfter)*time.Second)
+		}
+		return &scheduler.ReconnectDeliveryRejected{RetryAfter: delay}
+	}
+	if apiRejected {
 		switch {
 		case rejected.Code == http.StatusTooManyRequests || rejected.Code >= http.StatusInternalServerError:
 			return &scheduler.ReconnectDeliveryRejected{RetryAfter: time.Duration(rejected.RetryAfter) * time.Second}
@@ -60,6 +68,8 @@ type reconnectHTTP struct {
 	tgbotapi.HTTPClient
 	ctx                    context.Context
 	failedBeforeConnection bool
+	status                 int
+	retryAfter             time.Duration
 }
 
 func (c *reconnectHTTP) Do(req *http.Request) (*http.Response, error) {
@@ -68,6 +78,16 @@ func (c *reconnectHTTP) Do(req *http.Request) (*http.Response, error) {
 		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
 	})
 	res, err := c.HTTPClient.Do(req.WithContext(ctx))
+	if res != nil {
+		c.status = res.StatusCode
+		if value := res.Header.Get("Retry-After"); c.status == http.StatusTooManyRequests && value != "" {
+			if seconds, err := strconv.ParseUint(value, 10, 31); err == nil {
+				c.retryAfter = time.Duration(seconds) * time.Second
+			} else if date, err := http.ParseTime(value); err == nil {
+				c.retryAfter = max(0, time.Until(date))
+			}
+		}
+	}
 	c.failedBeforeConnection = err != nil && !connected.Load()
 	return res, err
 }

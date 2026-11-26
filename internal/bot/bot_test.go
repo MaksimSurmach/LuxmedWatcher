@@ -134,7 +134,7 @@ func TestPasswordLoginResumesOnlyActiveSearchesAfterAuthentication(t *testing.T)
 	if attempt, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, time.Now()); err != nil || attempt != 1 {
 		t.Fatalf("claim reconnect warning: attempt=%d, err=%v", attempt, err)
 	}
-	must(b.db.RecordLuxMedReconnectRejection(ctx, user.ID, time.Now().Add(time.Minute), 0))
+	must(b.db.RecordLuxMedReconnectRejection(ctx, user.ID, 1, time.Now().Add(time.Minute), 0))
 	if reserved, err := b.db.ReserveLuxMedSearch(ctx, user.ID, time.Now(), minimum); err != nil || !reserved {
 		t.Fatalf("reserve search before login: reserved=%v, err=%v", reserved, err)
 	}

@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"io"
@@ -610,9 +611,11 @@ func TestBrowserBusyReleasesOnlyUnusedSearchReservation(t *testing.T) {
 	for _, test := range []struct {
 		name          string
 		busyOnRequest int32
+		rateLimited   bool
 	}{
 		{name: "busy before any search", busyOnRequest: 1},
 		{name: "busy after a successful search window", busyOnRequest: 2},
+		{name: "busy on retry after upstream 429", busyOnRequest: 2, rateLimited: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -631,7 +634,12 @@ func TestBrowserBusyReleasesOnlyUnusedSearchReservation(t *testing.T) {
 			other.ID = otherID
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if requests.Add(1) == test.busyOnRequest {
+				request := requests.Add(1)
+				if request == 1 && test.rateLimited {
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
+				if request == test.busyOnRequest {
 					w.WriteHeader(http.StatusConflict)
 					return
 				}
@@ -788,7 +796,7 @@ func TestPasswordReconnectSerializesWithQueuedWarning(t *testing.T) {
 	if attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, watch.UserID, time.Now()); err != nil || attempt != 1 {
 		t.Fatalf("prepare scheduled retry: attempt=%d, err=%v", attempt, err)
 	}
-	if err := db.RecordLuxMedReconnectRejection(ctx, watch.UserID, time.Now().Add(-time.Minute), 0); err != nil {
+	if err := db.RecordLuxMedReconnectRejection(ctx, watch.UserID, 1, time.Now().Add(-time.Minute), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -881,11 +889,16 @@ func TestConfirmedPartialSearchResolvesReconnect(t *testing.T) {
 					Fingerprint: strconv.Itoa(i), DateTime: time.Now().Add(time.Duration(i+1) * time.Hour),
 				})
 			}
-			runner.newClient = func(bool) luxmed.Client {
-				return &fixedSearchResultClient{
+			account, err := db.LuxMedAccount(ctx, watch.UserID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.accounts[watch.UserID] = &accountCheck{
+				login: account.Login, encryptedPassword: account.EncryptedPassword, authenticatedAt: time.Now(),
+				client: &fixedSearchResultClient{
 					result: luxmed.SearchResult{Checked: test.checked, Appointments: appointments},
 					err:    test.searchErr,
-				}
+				},
 			}
 			if err := db.BeginLuxMedReconnect(ctx, watch.UserID); err != nil {
 				t.Fatal(err)
@@ -894,7 +907,7 @@ func TestConfirmedPartialSearchResolvesReconnect(t *testing.T) {
 			if attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, watch.UserID, now); err != nil || attempt != 1 {
 				t.Fatalf("seed warning delivery: attempt=%d err=%v", attempt, err)
 			}
-			if err := db.RecordLuxMedReconnectRejection(ctx, watch.UserID, now.Add(time.Minute), 0); err != nil {
+			if err := db.RecordLuxMedReconnectRejection(ctx, watch.UserID, 1, now.Add(time.Minute), 0); err != nil {
 				t.Fatal(err)
 			}
 
@@ -937,7 +950,7 @@ func TestConfirmedSessionResolvesReconnectAfterSearchDeadline(t *testing.T) {
 	if attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, watch.UserID, now); err != nil || attempt != 1 {
 		t.Fatalf("seed warning delivery: attempt=%d err=%v", attempt, err)
 	}
-	if err := db.RecordLuxMedReconnectRejection(ctx, watch.UserID, now.Add(time.Minute), 0); err != nil {
+	if err := db.RecordLuxMedReconnectRejection(ctx, watch.UserID, 1, now.Add(time.Minute), 0); err != nil {
 		t.Fatal(err)
 	}
 
@@ -953,5 +966,90 @@ func TestConfirmedSessionResolvesReconnectAfterSearchDeadline(t *testing.T) {
 	}
 	if attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, watch.UserID, now.Add(time.Hour)); err != nil || attempt != 0 {
 		t.Fatalf("warning survived search deadline: attempt=%d err=%v", attempt, err)
+	}
+}
+
+func TestReconnectRejectionWriteResumesAfterDatabaseFailure(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "watcher.sqlite")
+	sends := 0
+	notifier := reconnectNotifierFunc{send: func() error {
+		sends++
+		if sends == 1 {
+			return &ReconnectDeliveryRejected{ForbiddenLimit: 4, RetryAfter: 6 * time.Hour}
+		}
+		return nil
+	}}
+	runner, db, watch := testRunnerAt(t, notifier, path)
+	fixture, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { fixture.Close() })
+	if _, err := fixture.ExecContext(ctx, `
+		CREATE TRIGGER reject_delivery_write BEFORE UPDATE OF retry_at ON luxmed_reconnect_delivery
+		WHEN NEW.retry_at IS NOT NULL BEGIN SELECT RAISE(FAIL, 'simulated database write failure'); END
+	`); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.requireReconnect(ctx, user); err == nil || !strings.Contains(err.Error(), "record LuxMed reconnect rejection") {
+		t.Fatalf("expected the initial rejection write to fail: %v", err)
+	}
+	now := time.Now()
+	if err := runner.deliverReconnect(ctx, user, now.Add(time.Hour)); err == nil || sends != 1 {
+		t.Fatalf("database still unavailable: sends=%d err=%v", sends, err)
+	}
+	if _, err := fixture.ExecContext(ctx, `DROP TRIGGER reject_delivery_write`); err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.deliverReconnect(ctx, user, now.Add(time.Hour)); err != nil || sends != 1 {
+		t.Fatalf("persist rejection without bypassing cooldown: sends=%d err=%v", sends, err)
+	}
+	if err := runner.deliverReconnect(ctx, user, now.Add(7*time.Hour)); err != nil || sends != 2 {
+		t.Fatalf("send after cooldown: sends=%d err=%v", sends, err)
+	}
+	if err := runner.deliverReconnect(ctx, user, now.Add(8*time.Hour)); err != nil || sends != 2 {
+		t.Fatalf("delivered warning was sent twice: sends=%d err=%v", sends, err)
+	}
+}
+
+func TestPasswordAuthenticationResolvesReconnectBeforeFirstSearchResult(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		status    int
+		wantErr   error
+		reconnect bool
+	}{
+		{name: "search unavailable after login", status: http.StatusServiceUnavailable, wantErr: luxmed.ErrUnavailable},
+		{
+			name: "search rejects fresh login", status: http.StatusUnauthorized,
+			wantErr: luxmed.ErrAuthentication, reconnect: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			runner, db, watch := testRunner(t, nil)
+			client := &fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) {
+				if test.status == http.StatusUnauthorized {
+					return nil, luxmed.ErrAuthentication
+				}
+				return nil, &luxmed.HTTPError{StatusCode: test.status}
+			}}
+			runner.newClient = func(bool) luxmed.Client { return client }
+			if err := db.BeginLuxMedReconnect(ctx, watch.UserID); err != nil {
+				t.Fatal(err)
+			}
+			if err := runner.CheckWatch(ctx, watch); !errors.Is(err, test.wantErr) || client.logins != 1 {
+				t.Fatalf("search after login: logins=%d err=%v", client.logins, err)
+			}
+			required, err := db.LuxMedReconnectRequired(ctx, watch.UserID)
+			if err != nil || required != test.reconnect {
+				t.Fatalf("reconnect = %v, want %v, err=%v", required, test.reconnect, err)
+			}
+		})
 	}
 }

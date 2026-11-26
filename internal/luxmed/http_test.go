@@ -217,3 +217,38 @@ func TestSearchAppointmentsKeepsDifferentAddressesWithoutClinicID(t *testing.T) 
 		t.Fatal("search did not preserve the legacy lookup key for missing clinic IDs")
 	}
 }
+
+func TestSearchReportsPasswordRenewalBeforeUnavailableResponse(t *testing.T) {
+	var logins, terms atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case LoginURL:
+			logins.Add(1)
+			fmt.Fprint(w, `{"succeded":true,"token":"fresh-token"}`)
+		case XsrfTokenURL:
+			fmt.Fprint(w, `{"token":"xsrf"}`)
+		case TermsURL:
+			if terms.Add(1) == 1 {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			if r.Header.Get("authorization-token") != "fresh-token" {
+				t.Error("retry did not use the renewed token")
+			}
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			t.Errorf("unexpected endpoint: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := newHTTPClient(server.URL, false)
+	client.accessToken = "stale-token"
+	client.creds = Credentials{Login: "fixture", Password: "fixture"}
+	result, err := client.SearchAppointments(t.Context(), domain.Watch{CityID: 1, ServiceID: 2, NextDays: 1})
+	if !result.Authenticated || result.Checked || !errors.Is(err, ErrUnavailable) ||
+		logins.Load() != 1 || terms.Load() != 2 {
+		t.Fatalf("search result=%+v, logins=%d, terms=%d, err=%v", result, logins.Load(), terms.Load(), err)
+	}
+}

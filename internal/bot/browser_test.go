@@ -24,6 +24,7 @@ func TestNotifyLuxMedReconnectDeliveryOutcomes(t *testing.T) {
 		response       string
 		wantError      string
 		retryAfter     time.Duration
+		truncated      bool
 		forbiddenLimit int
 	}{
 		{
@@ -35,6 +36,11 @@ func TestNotifyLuxMedReconnectDeliveryOutcomes(t *testing.T) {
 			response:   `{"ok":false,"error_code":429,"parameters":{"retry_after":123}}`,
 			wantError:  "telegram temporarily rejected reconnect warning",
 			retryAfter: 123 * time.Second,
+		},
+		{
+			name: "rate limit with truncated body", status: 429, truncated: true,
+			response: `{"ok":false,`, wantError: "telegram temporarily rejected reconnect warning",
+			retryAfter: 84 * time.Second,
 		},
 		{
 			name: "blocked", status: 403,
@@ -61,6 +67,10 @@ func TestNotifyLuxMedReconnectDeliveryOutcomes(t *testing.T) {
 				if r.URL.Path != "/botfake/sendMessage" || r.Form.Get("chat_id") != "101" ||
 					!strings.Contains(r.Form.Get("reply_markup"), `"callback_data":"account"`) {
 					t.Errorf("unexpected recipient or reconnect action: %s %v", r.URL.Path, r.Form)
+				}
+				if test.truncated {
+					w.Header().Set("Content-Length", "512")
+					w.Header().Set("Retry-After", "84")
 				}
 				w.WriteHeader(test.status)
 				fmt.Fprint(w, test.response)

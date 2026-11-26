@@ -148,9 +148,18 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 			t.Fatalf("reload with a %s watch still requires sign-in: %s", status, result.Body)
 		}
 		saved, err := db.Watch(ctx, otherWatch)
-		if err != nil || saved.Status != status || saved.CityID != 1 || saved.ServiceID != 2 ||
+		if err != nil || saved.Status != status || saved.LastError != "" || saved.CityID != 1 || saved.ServiceID != 2 ||
 			(saved.LastCheckedAt == nil) != (status == domain.WatchStatusActive) {
 			t.Fatalf("unexpected watch after reconnect: %+v, %v", saved, err)
+		}
+
+		if status == domain.WatchStatusPaused {
+			body := fmt.Sprintf(`{"ID":%d,"Status":"active"}`, otherWatch)
+			request("status", body, origin, otherToken, http.StatusNoContent)
+			saved, err = db.Watch(ctx, otherWatch)
+			if err != nil || saved.Status != domain.WatchStatusActive || saved.LastError != "" {
+				t.Fatalf("reactivated watch retained obsolete sign-in error: %+v, %v", saved, err)
+			}
 		}
 	}
 	request("load", "{}", origin, d.sessions.issue(owner.TelegramUserID, time.Now().Add(-2*time.Hour)), http.StatusUnauthorized)

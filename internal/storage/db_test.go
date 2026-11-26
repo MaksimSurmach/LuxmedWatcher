@@ -581,11 +581,19 @@ func TestReconnectDeliveryCounterMigration(t *testing.T) {
 		if attempt != 4 {
 			t.Fatalf("migration changed the total attempt count: attempt=%d", attempt)
 		}
-		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, now.Add(8*time.Hour), 4))
+		for range 2 {
+			must(db.RecordLuxMedReconnectRejection(ctx, user.ID, 4, now.Add(8*time.Hour), 2))
+		}
 		attempt, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(9*time.Hour))
 		must(err)
 		if attempt != 5 {
 			t.Fatalf("legacy attempts consumed the new 403 budget: attempt=%d", attempt)
+		}
+		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, 5, now.Add(15*time.Hour), 2))
+		attempt, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(16*time.Hour))
+		must(err)
+		if attempt != 0 {
+			t.Fatalf("delivery resumed after reaching the 403 limit: attempt=%d", attempt)
 		}
 	})
 }

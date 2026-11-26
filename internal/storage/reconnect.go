@@ -45,6 +45,7 @@ func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, no
 func (db *DB) RecordLuxMedReconnectRejection(
 	ctx context.Context,
 	userID int64,
+	attempt int,
 	retryAt time.Time,
 	forbiddenLimit int,
 ) error {
@@ -53,8 +54,9 @@ func (db *DB) RecordLuxMedReconnectRejection(
 		SET forbidden_failures=forbidden_failures + CASE WHEN $3 > 0 THEN 1 ELSE 0 END,
 		    retry_at=CASE WHEN $3 > 0 AND forbidden_failures + 1 >= $3
 		                  THEN NULL ELSE COALESCE($2, retry_at) END
-		WHERE user_id=$1
-	`, userID, retryAt.UTC(), forbiddenLimit)
+		WHERE user_id=$1 AND attempts=$4 AND retry_at IS NULL
+		    AND ($3 = 0 OR forbidden_failures < $3)
+	`, userID, retryAt.UTC(), forbiddenLimit, attempt)
 	return err
 }
 
@@ -106,11 +108,13 @@ func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64) error
 		return err
 	}
 	if removed > 0 {
-		// Make the saved searches eligible again without changing their filters or user-selected status.
+		// Requeue active searches and clear obsolete sign-in errors on paused searches.
 		_, err := tx.ExecContext(ctx, `
-			UPDATE watches SET last_checked_at=NULL, last_error=''
-			WHERE user_id=$1 AND status=$2
-		`, userID, domain.WatchStatusActive)
+			UPDATE watches
+			SET last_checked_at=CASE WHEN status=$2 THEN NULL ELSE last_checked_at END, last_error=''
+			WHERE user_id=$1 AND (status=$2 OR
+			    (status=$3 AND last_error IN ('luxmed_authentication', 'luxmed_account_missing')))
+		`, userID, domain.WatchStatusActive, domain.WatchStatusPaused)
 		if err != nil {
 			return err
 		}
