@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 )
 
@@ -325,7 +326,7 @@ func TestDueHistoryAndAccount(t *testing.T) {
 		}
 
 		account := domain.LuxMedAccount{UserID: user.ID, Login: "fixture", EncryptedPassword: "cipher", Status: domain.AccountStatusActive}
-		must(db.UpsertLuxMedAccount(ctx, account))
+		must(db.SaveVerifiedLuxMedAccount(ctx, account))
 		stale := account
 		stale.EncryptedPassword = "previous-cipher"
 		if err := db.UpdateLuxMedAccountAuth(ctx, stale); !errors.Is(err, sql.ErrNoRows) {
@@ -482,12 +483,15 @@ func TestLegacySQLiteMigrationAndDueWatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := legacy.Exec(`UPDATE watches SET last_checked_at=$1 WHERE id=$2`, old, watchID); err != nil {
+	if _, err := legacy.Exec(`UPDATE watches SET last_checked_at=$1, updated_at=$1 WHERE id=$2`, old, watchID); err != nil {
 		t.Fatal(err)
 	}
 	due, err := db.DueWatches(ctx, 5)
 	if err != nil || len(due) != 1 || due[0].ID != watchID {
 		t.Fatalf("legacy watch did not become due: %+v, %v", due, err)
+	}
+	if err := db.MarkWatchCheckedIfUnchanged(ctx, due[0], true, ""); err != nil {
+		t.Fatalf("record result on legacy watch: %v", err)
 	}
 }
 
@@ -722,7 +726,8 @@ func TestCredentialMigrationAndModeSwitch(t *testing.T) {
 		}
 		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
 		must(err)
-		must(db.SaveCredentials(ctx, key, user, creds))
+		_, err = db.SaveCredentials(ctx, key, user, creds)
+		must(err)
 		current, err := db.UserByID(ctx, user.ID)
 		must(err)
 		if err := db.ConfirmBrowserLogin(ctx, current); !errors.Is(err, ErrCredentialsChanged) {
@@ -736,13 +741,13 @@ func TestCredentialMigrationAndModeSwitch(t *testing.T) {
 			t.Fatal("password mode scheduled browser renewal")
 		}
 		must(db.ForgetCredentials(ctx, user.ID))
-		if err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
+		if _, err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
 			t.Fatalf("late save after forgetting: %v", err)
 		}
 		current, err = db.UserByID(ctx, user.ID)
 		must(err)
 		must(db.ConfirmBrowserLogin(ctx, current))
-		if err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
+		if _, err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
 			t.Fatalf("late save after choosing Chrome: %v", err)
 		}
 		if _, err := db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
@@ -757,6 +762,446 @@ func TestCredentialMigrationAndModeSwitch(t *testing.T) {
 		must(err)
 		if len(ids) != 1 || ids[0] != user.TelegramUserID {
 			t.Fatal("browser renewal did not resume")
+		}
+	})
+}
+
+func TestReconnectJournalReplayIsScopedToDeliveryClaim(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		directory := t.TempDir()
+		must(db.SetReconnectJournalDirectory(directory))
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		must(err)
+		if claim.Attempt != 1 {
+			t.Fatalf("initial delivery claim: %+v", claim)
+		}
+
+		unavailable, cancel := context.WithCancel(ctx)
+		cancel()
+		err = db.JournalReconnectRejection(unavailable, user.ID, claim, now.Add(time.Hour), 2)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("simulated primary write failure: %v", err)
+		}
+		// Recreate the application-side storage handle with the same durable directory.
+		restarted := &DB{sql: db.sql, postgres: db.postgres}
+		must(restarted.SetReconnectJournalDirectory(directory))
+		must(restarted.ReplayReconnectRejection(ctx, user.ID))
+
+		next, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Hour))
+		must(err)
+		if next.Attempt != 2 || next.ID == claim.ID {
+			t.Fatalf("replay did not restore the retry: %+v", next)
+		}
+
+		err = restarted.JournalReconnectRejection(unavailable, user.ID, next, now.Add(3*time.Hour), 2)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("simulated failure before an episode was closed: %v", err)
+		}
+		must(db.ResolveLuxMedReconnect(ctx, user.ID))
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		replacement, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(4*time.Hour))
+		must(err)
+		if replacement.Attempt != 1 || replacement.ID == claim.ID || replacement.ID == next.ID {
+			t.Fatalf("replacement episode reused a delivery claim: %+v", replacement)
+		}
+		must(restarted.ReplayReconnectRejection(ctx, user.ID))
+		afterReplay, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(5*time.Hour))
+		must(err)
+		if afterReplay.Attempt != 0 {
+			t.Fatalf("old rejection made an unrelated delivery retryable: %+v", afterReplay)
+		}
+	})
+}
+
+func TestUnblockAcceleratesOnlyConfirmedForbiddenDelivery(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		first, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		must(err)
+		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, first, now.Add(6*time.Hour), 4))
+		unblockedAt := now.Add(time.Minute)
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, unblockedAt))
+		second, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt.Add(time.Second))
+		must(err)
+		if second.Attempt != 2 {
+			t.Fatalf("first forbidden rejection still blocked delivery: %+v", second)
+		}
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, unblockedAt))
+		unknown, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt.Add(time.Second))
+		must(err)
+		if unknown.Attempt != 0 {
+			t.Fatalf("unblock retried a send with unknown outcome: %+v", unknown)
+		}
+		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, second, now.Add(time.Hour), 0))
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, unblockedAt))
+		throttled, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt.Add(time.Second))
+		must(err)
+		if throttled.Attempt != 0 {
+			t.Fatalf("unblock bypassed Telegram rate limiting: %+v", throttled)
+		}
+	})
+}
+
+func TestReconnectOnlyRequeuesCurrentSearches(t *testing.T) {
+	for _, mode := range []string{"pending password", "verified recovery"} {
+		t.Run(mode, func(t *testing.T) {
+			testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+				must := func(err error) {
+					t.Helper()
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42, Status: domain.UserStatusActive})
+				must(err)
+				today, _ := luxmed.SearchDateBounds(time.Now())
+				past := today.AddDate(0, 0, -1)
+				currentID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 12, DateTo: &today})
+				must(err)
+				expiredID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 34, DateTo: &past})
+				must(err)
+				must(db.MarkWatchChecked(ctx, currentID, false, "luxmed_authentication"))
+				must(db.MarkWatchChecked(ctx, expiredID, true, ""))
+				must(db.MarkWatchChecked(ctx, expiredID, false, "luxmed_authentication"))
+				before, err := db.Watch(ctx, expiredID)
+				must(err)
+				must(db.BeginLuxMedReconnect(ctx, user.ID))
+				if mode == "pending password" {
+					must(db.SavePendingLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Status: domain.AccountStatusActive}))
+				} else {
+					must(db.ResolveLuxMedReconnect(ctx, user.ID))
+				}
+				after, err := db.Watch(ctx, expiredID)
+				must(err)
+				if after.LastCheckedAt == nil || !after.LastCheckedAt.Equal(*before.LastCheckedAt) ||
+					after.LastSuccessAt == nil || !after.LastSuccessAt.Equal(*before.LastSuccessAt) ||
+					after.DateTo == nil || !after.DateTo.Equal(past) || after.ServiceID != 34 {
+					t.Fatalf("expired search lost schedule or filters: %+v", after)
+				}
+				due, err := db.DueWatches(ctx, 5)
+				must(err)
+				if len(due) != 1 || due[0].ID != currentID || due[0].LastCheckedAt != nil || due[0].ServiceID != 12 {
+					t.Fatalf("wrong searches requeued: %+v", due)
+				}
+			})
+		})
+	}
+}
+
+func TestReconnectRequiresCurrentActiveSearchInWarsaw(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		now := time.Now().UTC()
+		today, end := luxmed.SearchDateBounds(now)
+		past := today.AddDate(0, 0, -1)
+		watch := domain.Watch{UserID: user.ID, DateTo: &past}
+		watch.ID, err = db.CreateWatch(ctx, watch)
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		required, err := db.LuxMedReconnectRequired(ctx, user.ID)
+		if err != nil || required {
+			t.Fatalf("expired search opened an episode: required=%v err=%v", required, err)
+		}
+		watch.DateFrom, watch.DateTo = &end, nil
+		must(db.UpdateWatch(ctx, watch))
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		required, err = db.LuxMedReconnectRequired(ctx, user.ID)
+		if err != nil || required {
+			t.Fatalf("search beyond the horizon opened an episode: required=%v err=%v", required, err)
+		}
+		watch.DateFrom, watch.DateTo = nil, &today
+		must(db.UpdateWatch(ctx, watch))
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		afterMidnight := today.AddDate(0, 0, 1)
+		due, err := db.LuxMedReconnectDeliveryDue(ctx, user.ID, afterMidnight)
+		if err != nil || due {
+			t.Fatalf("delivery stayed due after Warsaw midnight: due=%v err=%v", due, err)
+		}
+		expired, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, afterMidnight)
+		if err != nil || expired.Attempt != 0 {
+			t.Fatalf("expired search reserved a delivery: %+v %v", expired, err)
+		}
+		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		if err != nil || claim.Attempt != 1 {
+			t.Fatalf("search should remain current until the end of the last day: %+v %v", claim, err)
+		}
+	})
+}
+
+func TestUnblockDoesNotReopenWeeklyAttemptWithUnknownOutcome(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		for i := range 4 {
+			at := now.Add(time.Duration(i) * 7 * time.Hour)
+			claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, at)
+			must(err)
+			if claim.Attempt != i+1 {
+				t.Fatalf("unexpected claim: %+v", claim)
+			}
+			must(db.RecordLuxMedReconnectRejection(ctx, user.ID, claim, at.Add(6*time.Hour), 4))
+		}
+		later := now.Add(8 * 24 * time.Hour)
+		weekly, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, later)
+		must(err)
+		if weekly.Attempt != 5 {
+			t.Fatalf("expected weekly retry: %+v", weekly)
+		}
+		// A crash or lost Telegram reply leaves this claim without an outcome.
+		restarted := &DB{sql: db.sql, postgres: db.postgres}
+		must(restarted.ResumeLuxMedReconnectDelivery(ctx, user.ID, later.Add(time.Second)))
+		duplicate, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, later.Add(time.Minute))
+		must(err)
+		if duplicate.Attempt != 0 {
+			t.Fatalf("unblock made an unknown weekly attempt retryable: %+v", duplicate)
+		}
+	})
+}
+
+func TestReconnectJournalKeepsBothOutcomesDuringDatabaseFailure(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		journal := t.TempDir()
+		must(db.SetReconnectJournalDirectory(journal))
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		must(err)
+		unavailable, cancel := context.WithCancel(ctx)
+		cancel()
+		if err := db.JournalReconnectRejection(unavailable, user.ID, claim, now.Add(time.Minute), 0); !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected the initial write failure: %v", err)
+		}
+		newClaim := ReconnectDeliveryClaim{ID: "new-unknown-id"}
+		if err := db.JournalUnsentReconnectReservation(unavailable, user.ID, newClaim, now.Add(time.Minute)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected the later write failure: %v", err)
+		}
+		restarted := &DB{sql: db.sql, postgres: db.postgres}
+		must(restarted.SetReconnectJournalDirectory(journal))
+		must(restarted.ReplayReconnectRejection(ctx, user.ID))
+		claim, err = restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Minute))
+		must(err)
+		if claim.Attempt != 2 {
+			t.Fatalf("later reservation lost the confirmed rejection: %+v", claim)
+		}
+	})
+}
+
+func TestUnsentReservationJournalWaitsForPostgresCommit(t *testing.T) {
+	for _, mode := range []string{"file journal", "PostgreSQL only"} {
+		t.Run(mode, func(t *testing.T) {
+			testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+				if !db.postgres {
+					t.Skip("requires concurrent PostgreSQL transactions")
+				}
+				must := func(err error) {
+					t.Helper()
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				var journal string
+				if mode == "file journal" {
+					journal = t.TempDir()
+					must(db.SetReconnectJournalDirectory(journal))
+				}
+				user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+				must(err)
+				_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+				must(err)
+				must(db.BeginLuxMedReconnect(ctx, user.ID))
+				tx, err := db.sql.BeginTx(ctx, nil)
+				must(err)
+				defer tx.Rollback()
+				claim := ReconnectDeliveryClaim{ID: "late-claim"}
+				_, err = tx.ExecContext(ctx, `
+			INSERT INTO luxmed_reconnect_delivery (user_id, attempts, claim_id) VALUES ($1, 1, $2)
+		`, user.ID, claim.ID)
+				must(err)
+				now := time.Now().UTC()
+				must(db.JournalUnsentReconnectReservation(ctx, user.ID, claim, now.Add(time.Minute)))
+				if journal != "" {
+					_, err = os.Stat(filepath.Join(journal, reconnectRejectionName(user.ID, claim.ID)))
+					must(err)
+				} else {
+					var pending int
+					must(db.sql.QueryRowContext(ctx, "SELECT COUNT(*) FROM luxmed_reconnect_unsent WHERE user_id=$1 AND claim_id=$2", user.ID, claim.ID).Scan(&pending))
+					if pending != 1 {
+						t.Fatalf("known unsent outcome was not stored before commit: %d", pending)
+					}
+				}
+				must(tx.Commit())
+
+				restarted := &DB{sql: db.sql, postgres: true}
+				if journal != "" {
+					must(restarted.SetReconnectJournalDirectory(journal))
+				}
+				must(restarted.ReplayReconnectRejection(ctx, user.ID))
+				if journal != "" {
+					if _, err := os.Stat(filepath.Join(journal, reconnectRejectionName(user.ID, claim.ID))); !errors.Is(err, os.ErrNotExist) {
+						t.Fatalf("confirmed journal was not cleared: %v", err)
+					}
+				} else {
+					var pending int
+					must(db.sql.QueryRowContext(ctx, "SELECT COUNT(*) FROM luxmed_reconnect_unsent WHERE user_id=$1", user.ID).Scan(&pending))
+					if pending != 0 {
+						t.Fatalf("applied outcomes remained queued: %d", pending)
+					}
+				}
+				next, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Minute))
+				must(err)
+				if next.Attempt != 2 || next.ID == claim.ID {
+					t.Fatalf("late committed claim remained blocked: %+v", next)
+				}
+			})
+		})
+	}
+}
+
+func TestReconnectRejectionIsRetriedWithoutDiskJournal(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		db.reconnectDirectory = ""
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		must(err)
+		unavailable, cancel := context.WithCancel(ctx)
+		cancel()
+		retryAt := now.Add(time.Hour)
+		if err := db.JournalReconnectRejection(unavailable, user.ID, claim, retryAt, 4); !errors.Is(err, context.Canceled) {
+			t.Fatalf("write failure = %v", err)
+		}
+		if err := db.ReplayReconnectRejection(unavailable, user.ID); !errors.Is(err, context.Canceled) {
+			t.Fatalf("replay during outage = %v", err)
+		}
+		restarted := &DB{sql: db.sql, postgres: db.postgres}
+		must(restarted.ReplayReconnectRejection(ctx, user.ID))
+		unknown, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, retryAt.Add(time.Hour))
+		must(err)
+		if unknown.Attempt != 0 {
+			t.Fatalf("restart without a recorded outcome allowed an ambiguous resend: %+v", unknown)
+		}
+		must(db.ReplayReconnectRejection(ctx, user.ID))
+		must(db.ReplayReconnectRejection(ctx, user.ID))
+		early, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(time.Minute))
+		must(err)
+		if early.Attempt != 0 {
+			t.Fatalf("retry ignored its cooldown: %+v", early)
+		}
+		next, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, retryAt.Add(time.Second))
+		must(err)
+		if next.Attempt != 2 || next.ID == claim.ID {
+			t.Fatalf("retry was not restored: %+v", next)
+		}
+	})
+}
+
+func TestWatchesAndReconnectStateStayConsistentDuringRecovery(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		if err != nil {
+			t.Fatal(err)
+		}
+		watchID, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		const cycles = 40
+		changes := make(chan error, 1)
+		go func() {
+			for range cycles {
+				if err := db.BeginLuxMedReconnect(ctx, user.ID); err != nil {
+					changes <- err
+					return
+				}
+				watch, err := db.Watch(ctx, watchID)
+				if err != nil {
+					changes <- err
+					return
+				}
+				if err := db.MarkWatchCheckedIfUnchanged(ctx, watch, false, "luxmed_authentication"); err != nil {
+					changes <- err
+					return
+				}
+				if err := db.ResolveLuxMedReconnect(ctx, user.ID); err != nil {
+					changes <- err
+					return
+				}
+			}
+			changes <- nil
+		}()
+		for range cycles * 2 {
+			watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+			if err != nil || len(watches) != 1 || watches[0].ID != watchID {
+				t.Errorf("load snapshot: watches=%+v err=%v", watches, err)
+				break
+			}
+			if access.EpisodeID == "" && watches[0].LastError == "luxmed_authentication" {
+				t.Error("snapshot mixed a recovered session with a stale sign-in error")
+				break
+			}
+		}
+		if err := <-changes; err != nil {
+			t.Fatal(err)
 		}
 	})
 }

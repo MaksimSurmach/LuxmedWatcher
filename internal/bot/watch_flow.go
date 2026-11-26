@@ -53,12 +53,10 @@ func (b *Bot) handleDoctorChoice(ctx context.Context, user domain.User, state *f
 	}
 	if choice == "exact" {
 		if state.Doctors == nil {
-			client, err := b.authenticatedLuxMedClient(ctx, user)
-			if err == nil {
-				var directory domain.DoctorsAndFacilities
-				directory, err = client.GetDoctorsAndFacilities(ctx, state.Watch.CityID, state.Watch.ServiceID)
-				state.Doctors = directory.Doctors
-			}
+			directory, err := withLuxMedCatalog(ctx, b, user, func(client luxmed.Client) (domain.DoctorsAndFacilities, error) {
+				return client.GetDoctorsAndFacilities(ctx, state.Watch.CityID, state.Watch.ServiceID)
+			})
+			state.Doctors = directory.Doctors
 			if err != nil {
 				b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.generic"), doctorModeKeyboard(b.catalog, user.Locale))
 				return

@@ -16,14 +16,13 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
-	"github.com/maksimsurmach/luxmed-watcher/internal/security"
+	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
 const dashboardPrefix = "/api/dashboard/"
 
 type DashboardConfig struct {
-	Cryptor         *security.Cryptor
 	Origin          string
 	BotID           int64
 	MinimumInterval time.Duration
@@ -32,23 +31,28 @@ type DashboardConfig struct {
 }
 
 type dashboard struct {
-	verifyCredentials func(context.Context, luxmed.Credentials) error
-	cfg               DashboardConfig
-	key               ed25519.PublicKey
-	sessions          sessions
-	historyViews      historyViews
-	db                *storage.DB
-	browsers          map[int64]*luxmed.Browser
-	connect           func(context.Context, int64) (string, error)
+	cfg          DashboardConfig
+	key          ed25519.PublicKey
+	sessions     sessions
+	historyViews historyViews
+	db           *storage.DB
+	browsers     map[int64]*luxmed.Browser
+	connect      func(context.Context, int64) (string, error)
+	runner       *scheduler.Runner
+	checkAccount func(context.Context, domain.User) (scheduler.BrowserSessionCheck, error)
+	saveLogin    func(context.Context, domain.User, luxmed.Credentials) error
 }
 
-func Dashboard(cfg DashboardConfig, db *storage.DB, browsers map[int64]*luxmed.Browser, app *luxmed.MiniApp) http.Handler {
+func Dashboard(
+	cfg DashboardConfig,
+	db *storage.DB,
+	browsers map[int64]*luxmed.Browser,
+	app *luxmed.MiniApp,
+	runner *scheduler.Runner,
+) http.Handler {
 	d := &dashboard{
-		cfg: cfg, key: productionKey(), sessions: newSessions(),
-		db: db, browsers: browsers, connect: app.Link,
-		verifyCredentials: func(ctx context.Context, creds luxmed.Credentials) error {
-			return luxmed.NewPasswordClient(creds).Check(ctx)
-		},
+		cfg: cfg, key: productionKey(), sessions: newSessions(), db: db, browsers: browsers,
+		connect: app.Link, runner: runner, saveLogin: runner.SaveCredentials, checkAccount: runner.CheckBrowserSession,
 	}
 	return d.handler()
 }
@@ -67,16 +71,25 @@ func (d *dashboard) handler() http.Handler {
 	mux.HandleFunc("POST "+dashboardPrefix+"settings", d.authorize(d.settings))
 	mux.HandleFunc("POST "+dashboardPrefix+"watch", d.authorize(d.saveWatch))
 	mux.HandleFunc("POST "+dashboardPrefix+"status", d.authorize(d.status))
-	mux.HandleFunc("POST "+dashboardPrefix+"credentials", d.authorize(d.saveCredentials))
+	mux.HandleFunc("POST "+dashboardPrefix+"credentials", dashboardDeadline(d.authorize(d.saveCredentials)))
 	mux.HandleFunc("POST "+dashboardPrefix+"forget-credentials", d.authorize(func(w http.ResponseWriter, r *http.Request, user domain.User) {
 		dashboardResult(w, nil, d.db.ForgetCredentials(r.Context(), user.ID))
 	}))
-	mux.HandleFunc("POST "+dashboardPrefix+"account", d.authorize(d.account))
+	mux.HandleFunc("POST "+dashboardPrefix+"account", dashboardDeadline(d.authorize(d.account)))
 	mux.HandleFunc("POST "+dashboardPrefix+"connect", d.authorize(d.openBrowser))
 	mux.HandleFunc("POST "+dashboardPrefix+"viewer-access", d.authorizeTelegram(func(w http.ResponseWriter, _ *http.Request, _ domain.User) {
 		reply(w, http.StatusNoContent, nil)
 	}))
 	return mux
+}
+
+// Leave room in the gateway's write deadline for the response.
+func dashboardDeadline(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 17*time.Second)
+		defer cancel()
+		next(w, r.WithContext(ctx))
+	}
 }
 
 type dashboardAction func(http.ResponseWriter, *http.Request, domain.User)
@@ -138,7 +151,7 @@ type dashboardHistoryCursor struct {
 }
 
 func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.User) {
-	watches, err := d.db.WatchesByUser(r.Context(), user.ID)
+	watches, access, err := d.db.WatchesWithReconnectState(r.Context(), user.ID)
 	if err != nil {
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
@@ -149,17 +162,20 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		return
 	}
 	reply(w, http.StatusOK, struct {
-		SavedLogin     bool
-		HasCredentials bool
-		Watches        []domain.Watch
-		Locale         string
-		CityID         *int
-		CityName       string
-		MinimumMinutes int
-		DefaultMinutes int
+		SavedLogin         bool
+		HasCredentials     bool
+		Watches            []domain.Watch
+		Locale             string
+		CityID             *int
+		CityName           string
+		MinimumMinutes     int
+		DefaultMinutes     int
+		ReconnectRequired  bool
+		ReconnectEpisodeID string `json:",omitempty"`
+		AccountStatus      storage.LuxMedAccessStatus
 	}{stored.UseSavedLogin, err == nil, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
-		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute)})
+		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.Status})
 }
 
 func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -235,12 +251,11 @@ func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, user domain.U
 	ctx := r.Context()
 	items, err := d.db.Cities(ctx, 300)
 	if err == nil && len(items) == 0 {
-		client, clientErr := d.client(ctx, user)
-		if clientErr != nil {
-			dashboardResult(w, nil, clientErr)
-			return
-		}
-		items, err = client.GetCities(ctx)
+		err = d.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
+			var err error
+			items, err = client.GetCities(ctx)
+			return err
+		})
 		if err == nil {
 			err = d.db.UpsertCities(ctx, items)
 		}
@@ -267,12 +282,7 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 	ctx := r.Context()
 	city, err := d.db.City(ctx, input.CityID)
 	if err == nil {
-		client, clientErr := d.client(ctx, user)
-		if clientErr != nil {
-			dashboardResult(w, nil, clientErr)
-			return
-		}
-		err = d.ensureProcedureCatalog(ctx, city, client)
+		err = d.ensureProcedureCatalog(ctx, user, city)
 	}
 	if err != nil {
 		dashboardResult(w, nil, err)
@@ -304,14 +314,9 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 		dashboardResult(w, nil, err)
 		return
 	}
-	client, err := d.client(ctx, user)
-	if err != nil {
-		dashboardResult(w, nil, err)
-		return
-	}
 	portalCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if err := d.ensureProcedureCatalog(portalCtx, city, client); err != nil {
+	if err := d.ensureProcedureCatalog(portalCtx, user, city); err != nil {
 		dashboardResult(w, nil, err)
 		return
 	}
@@ -328,10 +333,31 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 		}
 	}
 
-	// The browser serves one request per account at a time.
-	referred, _ := client.GetReferredProcedures(portalCtx)
-	recent, _ := client.GetRecentProcedures(portalCtx)
-	popular, _ := client.GetPopularProcedures(portalCtx)
+	var referred, recent, popular []domain.Procedure
+	err = d.runner.WithLuxMedClient(portalCtx, user, func(client luxmed.Client) error {
+		var err error
+		if referrals, ok := client.(interface {
+			GetReferredProcedures(context.Context) ([]domain.Procedure, error)
+		}); ok {
+			referred, err = referrals.GetReferredProcedures(portalCtx)
+			if catalogAccessError(err) {
+				return err
+			}
+		}
+		recent, err = client.GetRecentProcedures(portalCtx)
+		if catalogAccessError(err) {
+			return err
+		}
+		popular, err = client.GetPopularProcedures(portalCtx)
+		if catalogAccessError(err) {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		dashboardResult(w, nil, err)
+		return
+	}
 
 	var picks procedurePicks
 	seen := make(map[int]bool)
@@ -371,12 +397,23 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 	reply(w, http.StatusOK, picks)
 }
 
-func (d *dashboard) ensureProcedureCatalog(ctx context.Context, city domain.City, client luxmed.Client) error {
+func catalogAccessError(err error) bool {
+	return errors.Is(err, luxmed.ErrAuthentication) || errors.Is(err, luxmed.ErrUnavailable) ||
+		errors.Is(err, luxmed.ErrBrowserBusy) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled)
+}
+
+func (d *dashboard) ensureProcedureCatalog(ctx context.Context, user domain.User, city domain.City) error {
 	cached, err := d.db.SearchProceduresPage(ctx, city.ID, "", 1, 0)
 	if err != nil || len(cached) > 0 {
 		return err
 	}
-	items, err := client.GetServices(ctx)
+	var items []domain.Service
+	err = d.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
+		var err error
+		items, err = client.GetServices(ctx)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -447,26 +484,13 @@ func (d *dashboard) setStatus(w http.ResponseWriter, r *http.Request, user domai
 }
 
 func (d *dashboard) providersForUser(ctx context.Context, user domain.User, cityID, serviceID int) (domain.DoctorsAndFacilities, error) {
-	client, err := d.client(ctx, user)
-	if err != nil {
-		return domain.DoctorsAndFacilities{}, err
-	}
-	return client.GetDoctorsAndFacilities(ctx, cityID, serviceID)
-}
-
-func (d *dashboard) client(ctx context.Context, user domain.User) (*luxmed.HTTPClient, error) {
-	account, err := d.db.LoginAccount(ctx, user.ID, true)
-	if errors.Is(err, sql.ErrNoRows) {
-		return d.browsers[user.TelegramUserID].Client(), nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	creds, err := d.cfg.Cryptor.OpenCredentials(user.ID, account.EncryptedPassword)
-	if err != nil {
-		return nil, err
-	}
-	return luxmed.NewPasswordClient(creds), nil
+	var providers domain.DoctorsAndFacilities
+	err := d.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
+		var err error
+		providers, err = client.GetDoctorsAndFacilities(ctx, cityID, serviceID)
+		return err
+	})
+	return providers, err
 }
 
 func (d *dashboard) saveCredentials(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -479,29 +503,40 @@ func (d *dashboard) saveCredentials(w http.ResponseWriter, r *http.Request, user
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
-	ctx := r.Context()
-	if err := d.verifyCredentials(ctx, creds); err != nil {
-		dashboardResult(w, nil, err)
-		return
-	}
-	dashboardResult(w, nil, d.db.SaveCredentials(ctx, d.cfg.Cryptor, user, creds))
+	dashboardResult(w, nil, d.saveLogin(r.Context(), user, creds))
 }
 
 func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {
-	client, err := d.client(r.Context(), user)
-	if err == nil {
-		err = client.Check(r.Context())
+	check, err := d.checkAccount(r.Context(), user)
+	result := struct {
+		State              string `json:"state"`
+		ReconnectRequired  bool
+		ReconnectEpisodeID string `json:",omitempty"`
+	}{
+		State: "connected", ReconnectRequired: check.VerificationPending || check.EpisodeID != "",
+		ReconnectEpisodeID: check.EpisodeID,
 	}
+
 	switch {
 	case err == nil:
-		reply(w, http.StatusOK, map[string]string{"state": "connected"})
+		if check.NoSavedSearches {
+			result.State = string(storage.LuxMedAccessNoSearches)
+		} else if check.VerificationPending {
+			result.State = "verification_pending"
+		}
+	case errors.Is(err, luxmed.ErrUnavailable):
+		reply(w, http.StatusServiceUnavailable, nil)
+		return
 	case errors.Is(err, luxmed.ErrAuthentication):
-		reply(w, http.StatusOK, map[string]string{"state": "needs_login"})
+		result.State = "needs_login"
 	case errors.Is(err, luxmed.ErrBrowserBusy):
 		reply(w, http.StatusTooManyRequests, nil)
+		return
 	default:
 		reply(w, http.StatusServiceUnavailable, nil)
+		return
 	}
+	reply(w, http.StatusOK, result)
 }
 
 func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -534,6 +569,9 @@ func dashboardResult(w http.ResponseWriter, value any, err error) {
 		reply(w, http.StatusPreconditionFailed, nil)
 	case errors.Is(err, sql.ErrNoRows):
 		reply(w, http.StatusNotFound, nil)
+	case errors.Is(err, luxmed.ErrUnavailable):
+		reply(w, http.StatusServiceUnavailable, nil)
+		return
 	case errors.Is(err, luxmed.ErrAuthentication):
 		reply(w, http.StatusConflict, map[string]string{"error": "needs_login"})
 	case errors.Is(err, luxmed.ErrBrowserBusy):

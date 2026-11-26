@@ -42,6 +42,39 @@ CREATE TABLE IF NOT EXISTS luxmed_accounts (
 	status TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS luxmed_access (
+	user_id %[5]s PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+	status TEXT NOT NULL,
+	requires_terms BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS luxmed_reconnect (
+	user_id %[5]s PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+	episode_id TEXT NOT NULL,
+	notified BOOLEAN NOT NULL DEFAULT FALSE
+);
+
+CREATE TABLE IF NOT EXISTS luxmed_reconnect_unsent (
+	user_id %[5]s NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	claim_id TEXT NOT NULL,
+	retry_at %[6]s NOT NULL,
+	PRIMARY KEY (user_id, claim_id)
+);
+
+CREATE TABLE IF NOT EXISTS luxmed_reconnect_delivery (
+	user_id %[5]s PRIMARY KEY REFERENCES luxmed_reconnect(user_id) ON DELETE CASCADE,
+	attempts INTEGER NOT NULL,
+	claim_id TEXT NOT NULL DEFAULT '',
+	forbidden_failures INTEGER NOT NULL DEFAULT 0,
+	last_failure_forbidden BOOLEAN NOT NULL DEFAULT FALSE,
+	retry_at %[6]s
+);
+
+CREATE TABLE IF NOT EXISTS luxmed_search_cooldown (
+	user_id %[5]s PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+	started_at %[6]s NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS watches (
 	id %[4]s,
 	user_id %[5]s NOT NULL REFERENCES users(id) ON DELETE CASCADE,

@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
@@ -59,9 +61,28 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		t.Fatal(err)
 	}
 	const origin = "https://app.example"
+	var unauthorized atomic.Bool
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/session" {
+			t.Errorf("unexpected browser route: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if unauthorized.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	browsers := map[int64]*luxmed.Browser{owner.TelegramUserID: {}, other.TelegramUserID: browser}
+	runner := scheduler.NewRunner(db, nil, nil, 2*time.Minute, time.Hour, false)
+	runner.UseBrowsers(browsers)
 	d := &dashboard{db: db, key: pub, sessions: newSessions(),
-		browsers: map[int64]*luxmed.Browser{owner.TelegramUserID: {}, other.TelegramUserID: {}},
-		cfg:      DashboardConfig{Origin: origin, BotID: 12, MinimumInterval: 2 * time.Minute}}
+		browsers: browsers, runner: runner, checkAccount: runner.CheckBrowserSession,
+		cfg: DashboardConfig{Origin: origin, BotID: 12, MinimumInterval: 2 * time.Minute}}
 	var syncedLocales []string
 	d.cfg.SyncAppMenu = func(ctx context.Context, userID int64) {
 		persisted, err := db.UserByID(ctx, userID)
@@ -105,16 +126,20 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	}
 	token := session(signed)
 	otherToken := session(signTelegram(other.TelegramUserID, 12, time.Now(), priv))
-	d.cfg.Cryptor, err = security.NewCryptor(make([]byte, 32))
+	cryptor, err := security.NewCryptor(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
 	}
 	const secret = "  example password  "
-	d.verifyCredentials = func(_ context.Context, creds luxmed.Credentials) error {
+	d.saveLogin = func(ctx context.Context, user domain.User, creds luxmed.Credentials) error {
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 17*time.Second {
+			t.Error("credential request does not reserve time for the gateway response")
+		}
 		if creds.Login != "patient" || creds.Password != secret {
 			return luxmed.ErrAuthentication
 		}
-		return nil
+		_, err := db.SaveCredentials(ctx, cryptor, user, creds)
+		return err
 	}
 	validLogin := `{"Login":"patient","Password":"  example password  "}`
 	request("credentials", validLogin, origin, "", http.StatusUnauthorized)
@@ -127,11 +152,11 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err != nil || saved.Login != "" || saved.EncryptedPassword == "" {
 		t.Fatal("expected encrypted credentials only", err)
 	}
-	creds, err := d.cfg.Cryptor.OpenCredentials(owner.ID, saved.EncryptedPassword)
+	creds, err := cryptor.OpenCredentials(owner.ID, saved.EncryptedPassword)
 	if err != nil || creds.Login != "patient" || creds.Password != secret {
 		t.Fatal("original credentials were not preserved")
 	}
-	if _, err := d.cfg.Cryptor.OpenCredentials(other.ID, saved.EncryptedPassword); err == nil {
+	if _, err := cryptor.OpenCredentials(other.ID, saved.EncryptedPassword); err == nil {
 		t.Fatal("ciphertext accepted for another user")
 	}
 	for _, tc := range []struct {
@@ -149,6 +174,143 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	}
 	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), "Other") {
 		t.Fatalf("other user's search missing: %s", res.Body)
+	}
+	if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), `"ReconnectRequired":true`) {
+		t.Fatalf("owner's reconnect state missing: %s", res.Body)
+	}
+	if res := request("load", "{}", origin, token, http.StatusOK); !strings.Contains(res.Body.String(), `"AccountStatus":"unchecked"`) {
+		t.Fatalf("reconnect state leaked across users: %s", res.Body)
+	}
+	var lastEpisodeID string
+	for _, scenario := range []struct {
+		status  domain.WatchStatus
+		episode bool
+	}{
+		{domain.WatchStatusActive, true},
+		{domain.WatchStatusPaused, true},
+		{domain.WatchStatusActive, false},
+		{domain.WatchStatusPaused, false},
+	} {
+		status := scenario.status
+		if err := db.MarkWatchChecked(ctx, otherWatch, false, "luxmed_authentication"); err != nil {
+			t.Fatal(err)
+		}
+		if scenario.episode {
+			if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := db.SetWatchStatus(ctx, otherWatch, status); err != nil {
+			t.Fatal(err)
+		}
+		result := request("account", "{}", origin, otherToken, http.StatusOK)
+		if !strings.Contains(result.Body.String(), `"state":"verification_pending","ReconnectRequired":true`) {
+			t.Fatalf("account probe bypassed protected verification for %s watch: %s", status, result.Body)
+		}
+		var check struct{ ReconnectEpisodeID string }
+		if err := json.Unmarshal(result.Body.Bytes(), &check); err != nil {
+			t.Fatal(err)
+		}
+		if (check.ReconnectEpisodeID != "") != scenario.episode {
+			t.Fatalf("probe episode ID did not match open episode: %s", result.Body)
+		}
+		if scenario.episode {
+			if check.ReconnectEpisodeID == lastEpisodeID {
+				t.Fatal("new reconnect episode reused the previous ID")
+			}
+			lastEpisodeID = check.ReconnectEpisodeID
+		}
+		result = request("load", "{}", origin, otherToken, http.StatusOK)
+		var pending struct {
+			Watches            []domain.Watch
+			ReconnectRequired  bool
+			ReconnectEpisodeID string
+			AccountStatus      string
+		}
+		if err := json.Unmarshal(result.Body.Bytes(), &pending); err != nil || len(pending.Watches) != 1 ||
+			pending.Watches[0].LastError != "luxmed_authentication" || pending.ReconnectRequired != scenario.episode ||
+			pending.ReconnectEpisodeID != check.ReconnectEpisodeID || pending.AccountStatus != "verification_pending" {
+			t.Fatalf("load lost the pending sign-in evidence: %s (%v)", result.Body, err)
+		}
+		if scenario.episode && status == domain.WatchStatusActive {
+			if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+				t.Fatal(err)
+			}
+			result = request("load", "{}", origin, otherToken, http.StatusOK)
+			if !strings.Contains(result.Body.String(), `"AccountStatus":"search_paused"`) ||
+				!strings.Contains(result.Body.String(), `"ReconnectEpisodeID":"`+check.ReconnectEpisodeID+`"`) {
+				t.Fatalf("fresh rejection did not update the same episode: %s", result.Body)
+			}
+		}
+		// The load endpoint observes protected success without another account check.
+		if err := db.ResolveLuxMedReconnect(ctx, other.ID); err != nil {
+			t.Fatal(err)
+		}
+		result = request("load", "{}", origin, otherToken, http.StatusOK)
+		if !strings.Contains(result.Body.String(), `"ReconnectRequired":false`) ||
+			!strings.Contains(result.Body.String(), `"AccountStatus":"connected"`) {
+			t.Fatalf("reload with a %s watch did not report recovery: %s", status, result.Body)
+		}
+		saved, err := db.Watch(ctx, otherWatch)
+		if err != nil || saved.Status != status || saved.LastError != "" || saved.CityID != 1 || saved.ServiceID != 2 ||
+			(saved.LastCheckedAt == nil) != (status == domain.WatchStatusActive) {
+			t.Fatalf("unexpected watch after reconnect: %+v, %v", saved, err)
+		}
+
+		if status == domain.WatchStatusPaused {
+			body := fmt.Sprintf(`{"ID":%d,"Status":"active"}`, otherWatch)
+			request("status", body, origin, otherToken, http.StatusNoContent)
+			saved, err = db.Watch(ctx, otherWatch)
+			if err != nil || saved.Status != domain.WatchStatusActive || saved.LastError != "" {
+				t.Fatalf("reactivated watch retained obsolete sign-in error: %+v, %v", saved, err)
+			}
+		}
+	}
+	unauthorized.Store(true)
+	probe := request("account", "{}", origin, otherToken, http.StatusOK)
+	if !strings.Contains(probe.Body.String(), `"state":"needs_login","ReconnectRequired":false`) {
+		t.Fatalf("standalone 401 should request login: %s", probe.Body)
+	}
+	if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	d.checkAccount = func(ctx context.Context, user domain.User) (scheduler.BrowserSessionCheck, error) {
+		required, err := runner.CheckBrowserSession(ctx, user)
+		// Simulate background recovery winning as soon as the probe releases the account.
+		if resolveErr := db.ResolveLuxMedReconnect(ctx, user.ID); resolveErr != nil {
+			t.Error(resolveErr)
+		}
+		return required, err
+	}
+	probe = request("account", "{}", origin, otherToken, http.StatusOK)
+	if !strings.Contains(probe.Body.String(), `"state":"needs_login","ReconnectRequired":true`) {
+		t.Fatalf("probe lost the episode it observed: %s", probe.Body)
+	}
+	if load := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(load.Body.String(), `"ReconnectRequired":false`) {
+		t.Fatalf("load did not observe the subsequent recovery: %s", load.Body)
+	}
+	d.checkAccount = runner.CheckBrowserSession
+	unauthorized.Store(false)
+	if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	episodeID, err := db.LuxMedReconnectEpisode(ctx, other.ID)
+	if err != nil || episodeID == "" {
+		t.Fatalf("expected an open episode: %q, %v", episodeID, err)
+	}
+	request("status", fmt.Sprintf(`{"ID":%d,"Status":"deleted"}`, otherWatch), origin, otherToken, http.StatusNoContent)
+	for _, endpoint := range []struct{ name, statusField string }{
+		{"load", "AccountStatus"},
+		{"account", "state"},
+	} {
+		result := request(endpoint.name, "{}", origin, otherToken, http.StatusOK)
+		if !strings.Contains(result.Body.String(), `"`+endpoint.statusField+`":"no_saved_searches"`) ||
+			!strings.Contains(result.Body.String(), `"ReconnectEpisodeID":"`+episodeID+`"`) {
+			t.Fatalf("%s lost the empty state or episode: %s", endpoint.name, result.Body)
+		}
 	}
 	request("load", "{}", origin, d.sessions.issue(owner.TelegramUserID, time.Now().Add(-2*time.Hour)), http.StatusUnauthorized)
 	request("load", "{}", origin, "", http.StatusUnauthorized)
@@ -357,6 +519,8 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 	const origin = "https://app.example"
 	d := &dashboard{db: db, sessions: newSessions(), cfg: DashboardConfig{Origin: origin},
 		browsers: make(map[int64]*luxmed.Browser)}
+	d.runner = scheduler.NewRunner(db, nil, nil, 0, 0, false)
+	d.runner.UseBrowsers(d.browsers)
 	addUser := func(id int64, serve http.HandlerFunc) domain.User {
 		t.Helper()
 		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: id, Status: domain.UserStatusActive, Locale: "pl"})

@@ -99,40 +99,50 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.registerCommands()
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = b.cfg.PollTimeout
-	config.AllowedUpdates = []string{"message", "callback_query", "widget_query"}
+	config.AllowedUpdates = []string{"message", "callback_query", "widget_query", "my_chat_member"}
 	var delay time.Duration
 	for ctx.Err() == nil {
 		updates, err := b.getUpdates(config)
-		if err != nil {
-			b.logger.Warn("Telegram polling failed", "retrying", true)
-			delay = min(30*time.Second, max(time.Second, 2*delay))
-			if apiErr, ok := errors.AsType[*tgbotapi.Error](err); ok && apiErr.RetryAfter > 0 {
-				delay = max(delay, time.Duration(apiErr.RetryAfter)*time.Second)
-			}
-			timer := time.NewTimer(delay + time.Duration(randv2.IntN(500))*time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil
-			case <-timer.C:
-			}
+		if err == nil {
+			err = b.processUpdates(ctx, &config, updates)
+		}
+		if err == nil {
+			delay = 0
 			continue
 		}
-		delay = 0
-		for _, update := range updates {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if update.UpdateID < config.Offset {
-				continue
-			}
-			if update.WidgetQuery != nil {
-				b.handleWidgetQuery(ctx, update.WidgetQuery)
-			} else {
-				b.handleUpdate(ctx, update.Update)
-			}
-			config.Offset = update.UpdateID + 1
+		b.logger.Warn("Telegram update loop failed", "retrying", true)
+		delay = min(30*time.Second, max(time.Second, 2*delay))
+		if apiErr, ok := errors.AsType[*tgbotapi.Error](err); ok && apiErr.RetryAfter > 0 {
+			delay = max(delay, time.Duration(apiErr.RetryAfter)*time.Second)
 		}
+		timer := time.NewTimer(delay + time.Duration(randv2.IntN(500))*time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
+func (b *Bot) processUpdates(ctx context.Context, config *tgbotapi.UpdateConfig, updates []telegramUpdate) error {
+	for _, update := range updates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if update.UpdateID < config.Offset {
+			continue
+		}
+		switch {
+		case update.MyChatMember != nil:
+			b.handleTelegramUnblock(ctx, update.MyChatMember)
+		case update.WidgetQuery != nil:
+			b.handleWidgetQuery(ctx, update.WidgetQuery)
+		default:
+			b.handleUpdate(ctx, update.Update)
+		}
+		config.Offset = update.UpdateID + 1
 	}
 	return nil
 }
@@ -378,21 +388,27 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, "flow.account.password"), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		if err := b.newClient(false).Authenticate(ctx, luxmed.Credentials{Login: state.Login, Password: text}); err != nil {
-			key := "errors.auth_failed"
-			if errors.Is(err, luxmed.ErrUnavailable) {
+		creds := luxmed.Credentials{Login: state.Login, Password: text}
+		err := b.saveLogin(ctx, user, creds)
+		if err != nil {
+			key := "errors.generic"
+			switch {
+			case errors.Is(err, luxmed.ErrUnavailable), errors.Is(err, context.DeadlineExceeded):
 				key = "errors.luxmed_unavailable"
+			case errors.Is(err, luxmed.ErrAuthentication):
+				key = "errors.auth_failed"
+			case errors.Is(err, luxmed.ErrBrowserBusy):
+				key = "watch.browser_busy"
 			}
 			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		err := b.db.SaveCredentials(ctx, b.cryptor, user, luxmed.Credentials{Login: state.Login, Password: text})
 		b.clearFlow(user.ID)
-		if err != nil {
-			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
-			return
+		key := "flow.account.saved"
+		if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err == nil && required {
+			key = "flow.account.verification_pending"
 		}
-		b.send(user, b.catalog.T(user.Locale, "flow.account.saved"), mainKeyboard(b.catalog, user.Locale))
+		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
 	case flowWatchCity:
 		b.showCityPicker(ctx, user, state.CitySettings, 0)
 	case flowCitySearch:
@@ -861,20 +877,9 @@ func (b *Bot) showPopularProcedures(ctx context.Context, user domain.User, state
 	state.ProcedureSearchQuery = ""
 	b.setFlow(user.ID, state)
 
-	client, err := b.authenticatedLuxMedClient(ctx, user)
-	if err != nil {
-		b.logger.Warn(
-			"authenticate luxmed client for popular procedures failed",
-			"user_id", user.ID,
-			"city_id", state.Watch.CityID,
-			"city_name", state.Watch.CityName,
-			"err", err,
-		)
-		b.send(user, b.catalog.T(user.Locale, "errors.generic"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
-		return
-	}
-
-	popular, err := client.GetPopularProcedures(ctx)
+	popular, err := withLuxMedCatalog(ctx, b, user, func(client luxmed.Client) ([]domain.Procedure, error) {
+		return client.GetPopularProcedures(ctx)
+	})
 	if err != nil {
 		b.logger.Warn(
 			"load popular procedures failed",
@@ -1281,11 +1286,9 @@ func (b *Bot) ensureCities(ctx context.Context, user domain.User) ([]domain.City
 	if len(cities) > 0 {
 		return cities, nil
 	}
-	client, err := b.authenticatedLuxMedClient(ctx, user)
-	if err != nil {
-		return nil, err
-	}
-	cities, err = client.GetCities(ctx)
+	cities, err = withLuxMedCatalog(ctx, b, user, func(client luxmed.Client) ([]domain.City, error) {
+		return client.GetCities(ctx)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1300,11 +1303,9 @@ func (b *Bot) ensureProcedures(ctx context.Context, user domain.User, state *flo
 		return nil
 	}
 	city := domain.City{ID: state.Watch.CityID, Name: state.Watch.CityName}
-	client, err := b.authenticatedLuxMedClient(ctx, user)
-	if err != nil {
-		return err
-	}
-	catalog, err := client.GetServices(ctx)
+	catalog, err := withLuxMedCatalog(ctx, b, user, func(client luxmed.Client) ([]domain.Service, error) {
+		return client.GetServices(ctx)
+	})
 	if err != nil {
 		return err
 	}
@@ -1530,15 +1531,47 @@ func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domai
 	if len(existing) > 0 {
 		return nil
 	}
-	client, err := b.authenticatedLuxMedClient(ctx, user)
-	if err != nil {
-		return err
-	}
-	data, err := client.GetDoctorsAndFacilities(ctx, city.ID, procedureID)
+	data, err := withLuxMedCatalog(ctx, b, user, func(client luxmed.Client) (domain.DoctorsAndFacilities, error) {
+		return client.GetDoctorsAndFacilities(ctx, city.ID, procedureID)
+	})
 	if err != nil {
 		return err
 	}
 	return b.db.UpsertFacilities(ctx, city, procedureID, data.Facilities)
+}
+
+func (b *Bot) saveLogin(ctx context.Context, user domain.User, creds luxmed.Credentials) error {
+	if b.runner != nil {
+		return b.runner.SaveCredentials(ctx, user, creds)
+	}
+	// A bot without a runner is used by the standalone bot tests.
+	if err := b.newClient(false).Authenticate(ctx, creds); err != nil {
+		return err
+	}
+	_, err := b.db.SaveCredentials(ctx, b.cryptor, user, creds)
+	return err
+}
+
+func withLuxMedCatalog[T any](
+	ctx context.Context,
+	b *Bot,
+	user domain.User,
+	query func(luxmed.Client) (T, error),
+) (T, error) {
+	var result T
+	if b.runner != nil {
+		err := b.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
+			var err error
+			result, err = query(client)
+			return err
+		})
+		return result, err
+	}
+	client, err := b.authenticatedLuxMedClient(ctx, user)
+	if err != nil {
+		return result, err
+	}
+	return query(client)
 }
 
 func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (luxmed.Client, error) {
@@ -1551,7 +1584,7 @@ func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (
 		if err := browser.Check(ctx); err != nil {
 			return nil, err
 		}
-		return browser.Client(), nil
+		return b.cfg.Browsers[user.TelegramUserID].Client(), nil
 	}
 	if err != nil {
 		return nil, err

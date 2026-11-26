@@ -53,7 +53,6 @@ let state;
 let apiToken;
 let cities;
 let tab = 'home';
-let account = 'unchecked';
 let flashTimer;
 let renderID = 0;
 
@@ -122,16 +121,20 @@ function show(title, html, focus = true) {
 }
 
 // The portal connection is only checked when the user asks (never automatically).
+// Compact: a status line with the two actions, used on Home. Full: adds instructions, used in Settings.
+const accountStatusKey = (status) => status === 'no_saved_searches' ? 'watches.empty' : `account.${status}`;
+
 function accountSection(compact = false) {
+  const account = state.AccountStatus;
   return `<section class="card stack account${compact ? ' compact' : ''}" data-state="${account}" aria-labelledby="account-heading">
     <div class="account-head">
       <h2 id="account-heading">${text('account.title')}</h2>
-      <p class="account-status" data-state="${account}" role="status">${text(`account.${account}`)}</p>
+      <p class="account-status" data-state="${account}" role="status">${text(accountStatusKey(account))}</p>
     </div>
     <div class="account-actions">
       ${state.HasCredentials
         ? `<button type="button" class="secondary" id="forget-credentials">${text('account.forget')}</button>`
-        : `<button type="button" class="secondary" id="connect">${text('account.chrome')} ${icon('link')}</button>`}
+        : `<button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>`}
       <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
     </div>
     ${compact || state.SavedLogin ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
@@ -175,31 +178,70 @@ function bindAccount() {
       } finally {
         form.elements.password.value = '';
       }
-      state.HasCredentials = true;
-      state.SavedLogin = true;
-      account = 'connected';
       await switchTab(tab);
     }, failure);
   };
   const forget = main.querySelector('#forget-credentials');
   if (forget) forget.onclick = () => void run(forget, async () => {
     await api('forget-credentials');
-    state.HasCredentials = false;
-    state.SavedLogin = false;
-    account = 'unchecked';
     await switchTab(tab);
   }, failure);
   const check = main.querySelector('#account-check');
-  check.onclick = () => void run(check, async () => {
-    account = (await api('account')).state;
-    const section = main.querySelector('.account');
+  let refreshTimer;
+  let manualCheck = 0;
+
+  async function showAccountSnapshot(latest) {
+    applySnapshot(latest);
+    if (tab === 'home' || tab === 'watches') {
+      await switchTab(tab, { reload: false });
+      return;
+    }
+    const account = state.AccountStatus;
+    if (connect) connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
+    main.querySelector('.account').dataset.state = account;
     const status = main.querySelector('.account-status');
-    if (section) section.dataset.state = account;
-    if (status) {
-      status.dataset.state = account;
-      status.textContent = t(`account.${account}`);
+    status.dataset.state = account;
+    status.textContent = t(accountStatusKey(account));
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    if (!check.isConnected || !['verification_pending', 'search_paused'].includes(state.AccountStatus)) return;
+    refreshTimer = setTimeout(refreshAccountStatus, 5000);
+  }
+
+  async function refreshAccountStatus() {
+    if (!check.isConnected) return;
+    if (!document.hidden && !check.disabled) {
+      const revision = manualCheck;
+      try {
+        const latest = await api('load');
+        if (check.isConnected && revision === manualCheck && latest.AccountStatus !== state.AccountStatus) {
+          await showAccountSnapshot(latest);
+        }
+      } catch (error) {
+        if (check.isConnected && revision === manualCheck && ['error.reopen', 'error.access_denied'].includes(error?.key)) {
+          failure.textContent = errorText(error);
+          return;
+        }
+      }
+    }
+    scheduleRefresh();
+  }
+
+  check.onclick = () => void run(check, async () => {
+    manualCheck++;
+    clearTimeout(refreshTimer);
+    try {
+      await api('account');
+      if (!check.isConnected) return;
+      const latest = await api('load');
+      if (check.isConnected) await showAccountSnapshot(latest);
+    } finally {
+      scheduleRefresh();
     }
   }, failure);
+  scheduleRefresh();
 }
 
 function home() {
@@ -208,7 +250,7 @@ function home() {
   show(t('home.title'), `<p class="home-intro">${text('home.intro')}</p>
     <div class="stack home">
       <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
-      <p class="home-count">${searchHint}</p>
+      ${state.AccountStatus === 'no_saved_searches' ? '' : `<p class="home-count">${searchHint}</p>`}
       <div class="rows">
         <button type="button" class="row" id="recommendations"><span>${text('editor.recommendations')}</span></button>
         <a class="row" href="${referralsPortal}" target="_blank" rel="noopener"><span>${text('home.referrals')}</span>${icon('link')}</a>
@@ -234,8 +276,6 @@ function hoursLabel(windows) {
 }
 
 const watchErrors = new Map([
-  ['luxmed_account_missing', 'error.no_account'],
-  ['luxmed_authentication', 'error.connect_first'],
   ['luxmed_unavailable', 'error.luxmed_unavailable'],
   ['luxmed_partial', 'watches.check_partial'],
 ]);
@@ -249,8 +289,15 @@ function watchCard(watch) {
     ? `${escape(dateText(watch.DateFrom))} — ${escape(dateText(watch.DateTo))}`
     : text('watches.period_days', { days: watch.NextDays });
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
-  const checkError = watch.LastError ? watchErrors.get(watch.LastError) ?? 'watches.check_error' : '';
-  const needsLogin = checkError === 'error.connect_first' || checkError === 'error.no_account';
+  const account = state.AccountStatus;
+  const accessError = ['luxmed_authentication', 'luxmed_account_missing'].includes(watch.LastError);
+  const needsLogin = accessError && ['needs_login', 'search_paused'].includes(account);
+  let checkError = '';
+  if (accessError) {
+    if (needsLogin || account === 'verification_pending') checkError = `account.${account}`;
+  } else if (watch.LastError) {
+    checkError = watchErrors.get(watch.LastError) ?? 'watches.check_error';
+  }
   const success = watch.LastSuccessAt ? timeOf(watch.LastSuccessAt) : t('watches.never_succeeded');
   return `<article class="card watch" data-status="${active ? 'active' : 'paused'}">
     <h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
@@ -302,14 +349,17 @@ function autoBookDialog(button, watch) {
 
 function watches() {
   const items = state.Watches ?? [];
+  const showAccount = !['unchecked', 'no_saved_searches'].includes(state.AccountStatus);
   show(titleFor('watches'), `<div class="stack">
     <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
+    ${showAccount ? accountSection(true) : ''}
     ${items.length ? items.map(watchCard).join('') : `<div class="card empty"><h2>${text('watches.empty')}</h2><p>${text('watches.empty_hint')}</p></div>`}
     ${items.length ? `<section class="stack">
       <p class="muted" id="check-hint">${text('watches.check_chat_hint')}</p>
       <button type="button" class="secondary" id="check-in-chat" aria-describedby="check-hint">${text('watches.check_chat')}</button>
     </section>` : ''}
   </div>`);
+  if (showAccount) bindAccount();
   main.querySelector('#new-watch').onclick = () => void editor();
   for (const button of main.querySelectorAll('[data-account-settings]')) {
     button.onclick = () => void switchTab('settings');
@@ -905,7 +955,7 @@ function screenError(title, error, retry) {
   if (retry) main.querySelector('button').onclick = retry;
 }
 
-async function switchTab(next) {
+async function switchTab(next, { reload = next !== 'history' } = {}) {
   clearTimeout(flashTimer);
   announcement.textContent = '';
   tab = next;
@@ -915,21 +965,31 @@ async function switchTab(next) {
     else button.removeAttribute('aria-current');
   }
   try {
+    if (reload) {
+      show(titleFor(next), `<p>${text('dashboard.loading')}</p>`, false);
+      const latest = await api('load');
+      if (id !== renderID) return;
+      applySnapshot(latest);
+    }
     if (tab === 'home') home();
     if (tab === 'watches') watches();
     if (tab === 'history') await historyScreen(id);
     if (tab === 'settings') await settingsScreen(id);
   } catch (error) {
-    if (id === renderID) screenError(titleFor(next), error, () => switchTab(next));
+    if (id === renderID) screenError(titleFor(next), error, () => switchTab(next, { reload }));
   }
 }
 
-async function update(next) {
-  state = await api('load');
+function applySnapshot(latest) {
+  state = latest;
   setLanguage(state.Locale);
   renderLanguage();
+}
+
+async function update(next) {
+  applySnapshot(await api('load'));
   navigation.hidden = false;
-  await switchTab(next);
+  await switchTab(next, { reload: false });
 }
 
 async function start() {

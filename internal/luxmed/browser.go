@@ -59,7 +59,8 @@ func (b *Browser) Client() *HTTPClient {
 }
 
 func (b *Browser) Check(ctx context.Context) error {
-	return b.Client().Check(ctx)
+	_, err := b.Client().get(ctx, "/session")
+	return err
 }
 
 func (b *Browser) SupportsBackgroundRenewal() bool {

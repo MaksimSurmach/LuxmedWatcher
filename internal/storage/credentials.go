@@ -12,34 +12,51 @@ import (
 
 var ErrCredentialsChanged = errors.New("account changed during sign-in")
 
-func (db *DB) SaveCredentials(ctx context.Context, key *security.Cryptor, owner domain.User, creds security.Credentials) error {
+func (db *DB) SaveCredentials(ctx context.Context, key *security.Cryptor, owner domain.User, creds security.Credentials) (string, error) {
 	sealed, err := key.SealCredentials(owner.ID, creds)
 	if err != nil {
-		return err
+		return "", err
 	}
 	// Verification calls LUX MED outside the transaction. A later opt-out or
 	// logout takes precedence even when no credentials existed before that call.
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return "", err
 	}
 	defer tx.Rollback()
 	err = requireOneRow(tx.ExecContext(ctx, `UPDATE users SET credential_revision=credential_revision+1
         WHERE id=$1 AND credential_revision=$2 AND status=$3 AND role <> ''`, owner.ID, owner.CredentialRevision, domain.UserStatusActive))
 	if errors.Is(err, sql.ErrNoRows) {
-		return ErrCredentialsChanged
+		return "", ErrCredentialsChanged
 	}
 	if err != nil {
-		return err
+		return "", err
 	}
 	now := time.Now().UTC()
 	if err := upsertLuxMedAccount(ctx, tx, domain.LuxMedAccount{
 		UserID: owner.ID, EncryptedPassword: sealed, UseSavedLogin: true,
 		LastLoginAt: &now, Status: domain.AccountStatusActive,
 	}); err != nil {
-		return err
+		return "", err
 	}
-	return tx.Commit()
+	if err := db.finalizeLuxMedAccountSave(ctx, tx, owner.ID, false); err != nil {
+		return "", err
+	}
+	verification, err := luxMedReconnectVerification(ctx, tx, owner.ID)
+	if err != nil {
+		return "", err
+	}
+	status := LuxMedAccessConnected
+	if verification.RequiresTerms {
+		status = LuxMedAccessPending
+	}
+	if err := setLuxMedAccessStatus(ctx, tx, owner.ID, status, verification.RequiresTerms); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return sealed, nil
 }
 
 // A viewer link from an older tab cannot remove a saved login. Choosing Chrome

@@ -22,9 +22,19 @@ const (
 
 type Credentials = security.Credentials
 
+type SearchResult struct {
+	Appointments []domain.Appointment
+	// Checked records a validated date window or verified slots in a partial response.
+	// A subsequent ErrAuthentication still invalidates the session.
+	Checked bool
+	// Authenticated records a successful password authentication during the search.
+	Authenticated bool
+}
+
 type Client interface {
 	Authenticate(ctx context.Context, creds Credentials) error
-	SearchAppointments(ctx context.Context, watch domain.Watch) ([]domain.Appointment, error)
+	CheckTermsAccess(ctx context.Context, watch domain.Watch) error
+	SearchAppointments(ctx context.Context, watch domain.Watch) (SearchResult, error)
 	GetCities(ctx context.Context) ([]domain.City, error)
 	GetServices(ctx context.Context) ([]domain.Service, error)
 	GetRecentProcedures(ctx context.Context) ([]domain.Procedure, error)
