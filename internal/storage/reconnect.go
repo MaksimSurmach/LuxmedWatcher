@@ -25,7 +25,7 @@ func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) error {
 	return err
 }
 
-// A claimed delivery has no retry time until Telegram explicitly rejects it.
+// A claimed delivery can be retried only when the attempt is known to be unsuccessful.
 func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time) (int, error) {
 	var attempts int
 	err := db.sql.QueryRowContext(ctx, `
@@ -59,6 +59,13 @@ func (db *DB) ReserveLuxMedSearch(ctx context.Context, userID int64, started tim
 	}
 	rows, err := res.RowsAffected()
 	return rows > 0, err
+}
+
+func (db *DB) ReleaseLuxMedSearch(ctx context.Context, userID int64, started time.Time) error {
+	_, err := db.sql.ExecContext(ctx, `
+		DELETE FROM luxmed_search_cooldown WHERE user_id=$1 AND started_at=$2
+	`, userID, started.UTC())
+	return err
 }
 
 func (db *DB) MarkLuxMedReconnectNotified(ctx context.Context, userID int64) error {

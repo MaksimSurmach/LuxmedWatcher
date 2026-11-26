@@ -587,3 +587,57 @@ func TestSessionProbeResumesWatchesWithoutBypassingSearchCooldown(t *testing.T) 
 		t.Fatalf("search bypassed the persisted cooldown: searches=%d, err=%v", searches.Load(), err)
 	}
 }
+
+func TestBrowserBusyReleasesOnlyUnusedSearchReservation(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		busyOnRequest int32
+	}{
+		{name: "busy before any search", busyOnRequest: 1},
+		{name: "busy after a successful search window", busyOnRequest: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			runner, db, watch := testRunner(t, nil)
+			runner.minimumInterval = 5 * time.Minute
+			watch.CityID, watch.ServiceID, watch.NextDays = 1, 2, 20
+			if err := db.UpdateWatch(ctx, watch); err != nil {
+				t.Fatal(err)
+			}
+			other := watch
+			other.ID = 0
+			otherID, err := db.CreateWatch(ctx, other)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other.ID = otherID
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if requests.Add(1) == test.busyOnRequest {
+					w.WriteHeader(http.StatusConflict)
+					return
+				}
+				fmt.Fprint(w, `{"termsForService":{"termsForDays":[],"termsInfoForDays":[]}}`)
+			}))
+			t.Cleanup(server.Close)
+			browser, err := luxmed.NewBrowser(server.URL, "http://localhost:18769")
+			if err != nil {
+				t.Fatal(err)
+			}
+			runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
+			if err := runner.CheckWatch(ctx, watch); !errors.Is(err, luxmed.ErrBrowserBusy) {
+				t.Fatalf("first check: %v", err)
+			}
+
+			restarted := NewRunner(db, nil, nil, runner.minimumInterval, time.Hour, false)
+			restarted.UseBrowsers(runner.browsers)
+			err = restarted.CheckWatch(ctx, other)
+			if test.busyOnRequest == 1 && (err != nil || requests.Load() < 2) {
+				t.Fatalf("unused reservation blocked retry: requests=%d err=%v", requests.Load(), err)
+			}
+			if test.busyOnRequest == 2 && (!errors.Is(err, ErrRateLimited) || requests.Load() != 2) {
+				t.Fatalf("partial search lost its cooldown: requests=%d err=%v", requests.Load(), err)
+			}
+		})
+	}
+}

@@ -28,12 +28,16 @@ type Notifier interface {
 	NotifyAppointments(context.Context, domain.User, domain.Watch, []domain.AppointmentHistory, int) (int, error)
 }
 
-// ReconnectDeliveryRejected describes an explicit Telegram rejection that can be retried.
+// ReconnectDeliveryRejected marks a retryable attempt known to have failed.
 type ReconnectDeliveryRejected struct {
 	RetryAfter time.Duration
+	BeforeSend bool
 }
 
-func (*ReconnectDeliveryRejected) Error() string {
+func (err *ReconnectDeliveryRejected) Error() string {
+	if err.BeforeSend {
+		return "reconnect warning could not be sent to telegram"
+	}
 	return "telegram temporarily rejected reconnect warning"
 }
 
@@ -163,17 +167,25 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 		}
 	}
 	count, err = r.run(ctx, user, watch, state, started)
+	if errors.Is(err, luxmed.ErrBrowserBusy) && !errors.Is(err, luxmed.ErrPartialResults) && count == 0 {
+		r.mu.Lock()
+		state.next = time.Now().Add(3*time.Second + jitter(time.Second))
+		r.mu.Unlock()
+
+		if r.minimumInterval > 0 {
+			releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+			defer cancel()
+			if releaseErr := r.db.ReleaseLuxMedSearch(releaseCtx, user.ID, started); releaseErr != nil {
+				return 0, fmt.Errorf("release unused LuxMed search reservation: %w", releaseErr)
+			}
+		}
+		return 0, errors.Join(err, parent.Err())
+	}
 	if parent.Err() != nil {
 		return count, errors.Join(err, parent.Err())
 	}
 	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		err = errors.Join(err, luxmed.ErrUnavailable, ctx.Err())
-	}
-	if errors.Is(err, luxmed.ErrBrowserBusy) && count == 0 {
-		r.mu.Lock()
-		state.next = time.Now().Add(3*time.Second + jitter(time.Second))
-		r.mu.Unlock()
-		return 0, err
 	}
 	r.mu.Lock()
 	state.next = time.Now().Add(r.minimumInterval + jitter(r.minimumInterval/10))

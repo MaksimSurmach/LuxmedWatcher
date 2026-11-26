@@ -59,7 +59,11 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	httpClient := &http.Client{Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second}
+	httpClient := &http.Client{
+		Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second,
+		// A redirect could fail to dial after Telegram already received a POST.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	api, err := tgbotapi.NewBotAPIWithClient(a.cfg.TelegramToken, tgbotapi.APIEndpoint, telegramHTTP{
 		ctx: ctx, client: httpClient,
 	})

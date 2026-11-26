@@ -1,8 +1,10 @@
 package bot
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -66,6 +68,46 @@ func TestNotifyLuxMedReconnectDeliveryOutcomes(t *testing.T) {
 			rejection, retryable := errors.AsType[*scheduler.ReconnectDeliveryRejected](err)
 			if retryable != (test.retryAfter > 0) || retryable && rejection.RetryAfter != test.retryAfter {
 				t.Fatalf("incorrect retry classification: %v", rejection)
+			}
+		})
+	}
+}
+
+type reconnectTransportFunc func(*http.Request) (*http.Response, error)
+
+func (f reconnectTransportFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+func TestNotifyLuxMedReconnectRetriesOnlyKnownUnsentRequests(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		canceled bool
+		failure  error
+		retry    bool
+	}{
+		{name: "canceled before send", canceled: true, retry: true},
+		{name: "connection refused", failure: &net.OpError{Op: "dial", Err: errors.New("connection refused")}, retry: true},
+		{name: "canceled during request", failure: context.Canceled},
+		{name: "connection lost after send", failure: &net.OpError{Op: "read", Err: errors.New("connection reset")}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			b := testBot(t)
+			user := createUser(t, b, 101, domain.UserStatusActive)
+			b.api.Client = &http.Client{Transport: reconnectTransportFunc(func(*http.Request) (*http.Response, error) {
+				if test.canceled {
+					t.Error("attempted to send with an already canceled context")
+				}
+				return nil, test.failure
+			})}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if test.canceled {
+				cancel()
+			}
+			err := b.NotifyLuxMedReconnect(ctx, user)
+			if _, retry := errors.AsType[*scheduler.ReconnectDeliveryRejected](err); retry != test.retry {
+				t.Fatalf("retryable = %t, want %t (%v)", retry, test.retry, err)
 			}
 		})
 	}
