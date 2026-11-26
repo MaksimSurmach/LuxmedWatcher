@@ -33,7 +33,7 @@ func normalizeName(name string) string {
 	return strings.Join(strings.Fields(dashes.Replace(strings.ToLower(name))), " ")
 }
 
-// Name returns the display name without changing the portal name used by saved searches.
+// Name returns a localized alias for matching procedure searches.
 func Name(locale, source string) string {
 	locale = i18n.Normalize(locale, "pl")
 	if locale != "pl" {
@@ -44,11 +44,11 @@ func Name(locale, source string) string {
 	return source
 }
 
-func WatchTitle(locale string, watch domain.Watch) string {
+func WatchTitle(watch domain.Watch) string {
 	if watch.ServiceName == "" {
 		return watch.Name
 	}
-	label := Name(locale, watch.ServiceName)
+	label := watch.ServiceName
 	generatedName := watch.ServiceName + " · " + watch.CityName
 	if watch.Name != "" && watch.Name != generatedName && watch.Name != watch.ServiceName {
 		return watch.Name + "\n" + label
@@ -59,7 +59,7 @@ func WatchTitle(locale string, watch domain.Watch) string {
 	return label
 }
 
-// Search matches the Polish source and the displayed translation before pagination.
+// Search matches the Polish source and the localized alias before pagination.
 func Search(ctx context.Context, db *storage.DB, cityID int, locale, query string, limit, offset int) ([]domain.Procedure, error) {
 	locale = i18n.Normalize(locale, "pl")
 	query = normalizeName(query)

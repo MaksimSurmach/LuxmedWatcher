@@ -319,3 +319,33 @@ func TestBrowserChecksUseIndependentWorkers(t *testing.T) {
 		}
 	}
 }
+
+func TestScheduledNotificationUsesLocaleChangedDuringSearch(t *testing.T) {
+	t.Parallel()
+
+	var deliveredFor string
+	runner, db, watch := testRunner(t, notifyFunc(func(
+		_ context.Context,
+		user domain.User,
+		_ domain.Watch,
+		_ []domain.AppointmentHistory,
+		_ int,
+	) (int, error) {
+		deliveredFor = user.Locale
+		return 23, nil
+	}))
+	runner.newClient = func(bool) luxmed.Client {
+		return &fakeLuxMed{search: func(ctx context.Context) ([]domain.Appointment, error) {
+			if err := db.SetUserLocale(ctx, watch.UserID, "uk"); err != nil {
+				return nil, err
+			}
+			return []domain.Appointment{{Fingerprint: "slot", DateTime: time.Now().Add(time.Hour)}}, nil
+		}}
+	}
+	if err := runner.CheckWatch(t.Context(), watch); err != nil {
+		t.Fatal(err)
+	}
+	if deliveredFor != "uk" {
+		t.Errorf("notification used %q after switching to Ukrainian", deliveredFor)
+	}
+}

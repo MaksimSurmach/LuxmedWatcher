@@ -407,3 +407,54 @@ func TestBrowserBotAdmitsOnlyInvitedUsersWithAnAssignedWorker(t *testing.T) {
 		t.Fatalf("invited user was not admitted as regular user: %+v, %v", active, err)
 	}
 }
+
+func TestStandaloneConnectLinkUsesSavedLanguage(t *testing.T) {
+	t.Parallel()
+
+	ticket := strings.Repeat("a", 64)
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/viewer" {
+			t.Errorf("unexpected browser worker request: %s %s", r.Method, r.URL.Path)
+		}
+		fmt.Fprintf(w, `{"ticket":%q}`, ticket)
+	}))
+	t.Cleanup(worker.Close)
+
+	for _, tc := range []struct{ name, origin, field string }{
+		{name: "local link", origin: "http://localhost:18769", field: "text"},
+		{name: "inline button", origin: "https://browser.example", field: "reply_markup"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sent := make(chan string, 1)
+			b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/botfake/sendMessage" {
+					t.Errorf("unexpected Telegram API request: %s", r.URL.Path)
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+				}
+				sent <- r.Form.Get(tc.field)
+				fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+			})
+			user := createUser(t, b, 101, domain.UserStatusActive)
+			if err := b.db.SetUserPreferences(t.Context(), user.ID, "be", domain.City{}); err != nil {
+				t.Fatal(err)
+			}
+			browser, err := luxmed.NewBrowser(worker.URL, tc.origin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+			b.handleAction(t.Context(), user.TelegramUserID, "connect:open")
+			select {
+			case got := <-sent:
+				want := tc.origin + "/connect?lang=be#" + ticket
+				if !strings.Contains(got, want) {
+					t.Errorf("connect link = %q, want URL %q", got, want)
+				}
+			default:
+				t.Fatal("viewer link was not sent")
+			}
+		})
+	}
+}

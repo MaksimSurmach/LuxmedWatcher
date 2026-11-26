@@ -9,8 +9,6 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
-	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
-	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
 )
 
 func (b *Bot) handleHistoryPage(ctx context.Context, user domain.User, data string) {
@@ -78,8 +76,8 @@ func (b *Bot) showHistoryPage(ctx context.Context, user domain.User, watchID int
 	var hide []tgbotapi.InlineKeyboardButton
 	for i, item := range items {
 		line := fmt.Sprintf("%d. %s\n%s\n%s · %s", i+1,
-			item.DateTime.In(luxmed.Location()).Format("2006-01-02 15:04"),
-			truncateMessage(procedures.Name(user.Locale, item.ServiceName), 160), truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120))
+			appointmentDateTime(user.Locale, item.DateTime),
+			truncateMessage(item.ServiceName, 160), truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120))
 		switch {
 		case !item.DateTime.After(now):
 			line += "\n" + b.catalog.T(user.Locale, "history.expired")
