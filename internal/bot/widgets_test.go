@@ -168,6 +168,10 @@ func TestBookCommandOpensOfficialReservationPage(t *testing.T) {
 			!strings.Contains(r.Form.Get("reply_markup"), luxmed.ReservationPageURL) {
 			t.Errorf("booking entry must open the official portal from the widget and inline keyboard")
 		}
+		want := "Choose an appointment time and book in the LUX MED portal."
+		if !strings.Contains(r.Form.Get("html"), want) || !strings.Contains(r.Form.Get("caption"), want) {
+			t.Errorf("booking entry lacks instructions to choose a time")
+		}
 		sent <- struct{}{}
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":51}}`)
 	})
@@ -188,11 +192,11 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 	tests := []struct {
 		locale, title, more, date, days string
 	}{
-		{"pl", "Znalezione terminy LUX MED: ", "Więcej w historii: ", "02.07.2026 · 01:30", "Dni: "},
-		{"en", "LUX MED appointments found: ", "More in history: ", "Jul 2, 2026 · 01:30", "Days: "},
-		{"ru", "Найдено слотов LUX MED: ", "Ещё в истории: ", "02.07.2026 · 01:30", "Дней: "},
-		{"be", "Даступныя варыянты запісу ў LUX MED: ", "Яшчэ варыянтаў у гісторыі: ", "02.07.2026 · 01:30", "Дзён: "},
-		{"uk", "Доступні варіанти запису в LUX MED: ", "Ще варіантів в історії: ", "02.07.2026 · 01:30", "Днів: "},
+		{"pl", "Znaleziono wolne terminy · ", "Więcej w historii: ", "02.07.2026 · 01:30", "Dni: "},
+		{"en", "Appointment times found · ", "More in history: ", "Jul 2, 2026 · 01:30", "Days: "},
+		{"ru", "Свободное время найдено · ", "Ещё в истории: ", "02.07.2026 · 01:30", "Дней: "},
+		{"be", "Знойдзены вольны час · ", "Яшчэ варыянтаў у гісторыі: ", "02.07.2026 · 01:30", "Дзён: "},
+		{"uk", "Знайдено вільний час · ", "Ще варіантів в історії: ", "02.07.2026 · 01:30", "Днів: "},
 	}
 	for _, tc := range tests {
 		t.Run(tc.locale, func(t *testing.T) {

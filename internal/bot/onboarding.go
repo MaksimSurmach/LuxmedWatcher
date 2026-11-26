@@ -130,8 +130,12 @@ func (b *Bot) showStart(ctx context.Context, user domain.User, invited bool) {
 
 func (b *Bot) showBooking(user domain.User) {
 	button := tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.book_portal"), luxmed.ReservationPageURL)
-	b.sendOnboarding(user, b.catalog.T(user.Locale, "button.book_portal"), b.catalog.T(user.Locale, "notification.booking_hint"),
-		widgetKeyboard(tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(button))))
+	b.sendOnboarding(
+		user,
+		b.catalog.T(user.Locale, "button.book_portal"),
+		b.catalog.T(user.Locale, "flow.booking.open"),
+		widgetKeyboard(tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(button))),
+	)
 }
 
 func (b *Bot) showLanguage(user domain.User) {
@@ -145,7 +149,7 @@ func (b *Bot) showConnect(ctx context.Context, user domain.User) {
 	}
 	b.clearFlow(user.ID)
 	b.sendOnboarding(user, b.catalog.T(user.Locale, "button.connect"), b.catalog.T(user.Locale, "widget.connect"), [][]miniAppButton{
-		{b.actionButton(user, "button.open_luxmed", "connect:open")},
+		{b.actionButton(user, "button.sign_in", "connect:open")},
 		{b.actionButton(user, "button.menu", "menu")},
 	})
 }

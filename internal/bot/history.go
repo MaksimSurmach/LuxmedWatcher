@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -70,21 +71,35 @@ func (b *Bot) showHistoryPage(ctx context.Context, user domain.User, watchID int
 		items = items[:pageSize]
 		navigation = append(navigation, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.next"), fmt.Sprintf("history:%d:%d", watchID, page+1)))
 	}
+	now := time.Now()
+	var bookingURL string
 	var hide []tgbotapi.InlineKeyboardButton
 	for i, item := range items {
 		line := fmt.Sprintf("%d. %s\n%s\n%s · %s", i+1,
 			appointmentDateTime(user.Locale, item.DateTime),
 			truncateMessage(item.ServiceName, 160), truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120))
+		switch {
+		case !item.DateTime.After(now):
+			line += "\n" + b.catalog.T(user.Locale, "history.expired")
+		case item.Status == domain.HistoryStatusExpired:
+			line += "\n" + b.catalog.T(user.Locale, "history.unavailable")
+		case bookingURL == "":
+			bookingURL = portalURL(item.BookingURL)
+		}
 		if item.LastNotifiedAt != nil {
 			line += "\n" + b.catalog.T(user.Locale, "history.notified")
 		}
 		lines = append(lines, line)
 		hide = append(hide, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.hide_history", i+1), fmt.Sprintf("hide:%d:%d:%d", item.ID, watchID, page)))
 	}
-	rows := [][]tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), portalURL(items[0].BookingURL))),
-		hide,
+	rows := make([][]tgbotapi.InlineKeyboardButton, 0, 4)
+	if bookingURL != "" {
+		lines = append(lines, b.catalog.T(user.Locale, "notification.booking_hint"))
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.book_portal"), bookingURL),
+		))
 	}
+	rows = append(rows, hide)
 	if len(navigation) > 0 {
 		rows = append(rows, navigation)
 	}
