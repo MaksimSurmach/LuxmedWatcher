@@ -1725,6 +1725,89 @@ func TestProtectedVerificationSurvivesEditingOnlyPausedSearch(t *testing.T) {
 	}
 }
 
+func TestRejectedActiveFilterFallsBackToPausedSearchAfterCooldown(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "watcher.sqlite")
+	notifier := &reconnectRecorder{}
+	runner, db, active := testRunnerAt(t, notifier, path)
+	runner.minimumInterval = time.Minute
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	active.CityID, active.ServiceID = 1, 99
+	must(db.UpdateWatch(ctx, active))
+	pausedID, err := db.CreateWatch(ctx, domain.Watch{UserID: active.UserID, CityID: 1, ServiceID: 12})
+	must(err)
+	must(db.SetWatchStatus(ctx, pausedID, domain.WatchStatusPaused))
+	must(db.MarkWatchChecked(ctx, pausedID, false, "luxmed_authentication"))
+	paused, err := db.Watch(ctx, pausedID)
+	must(err)
+
+	var rejected, accepted atomic.Int32
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch {
+		case req.URL.Path == "/session":
+		case req.URL.Path == luxmed.TermsURL && req.URL.Query().Get("serviceVariantId") == "99":
+			rejected.Add(1)
+			w.WriteHeader(http.StatusBadRequest)
+		case req.URL.Path == luxmed.TermsURL && req.URL.Query().Get("serviceVariantId") == "12":
+			accepted.Add(1)
+			fmt.Fprint(w, `{"termsForService":{"termsForDays":[]}}`)
+		default:
+			t.Errorf("unexpected recovery request: %s", req.URL.RequestURI())
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	must(err)
+	runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
+
+	user, err := db.UserByID(ctx, active.UserID)
+	must(err)
+	if result, err := runner.CheckBrowserSession(ctx, user); err != nil || !result.VerificationPending {
+		t.Fatalf("manual check should queue verification: %+v, %v", result, err)
+	}
+	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	scheduler.maintainReconnectSessions(ctx)
+	if rejected.Load() != 1 || accepted.Load() != 0 {
+		t.Fatalf("initial search did not reject the active filter: rejected=%d alternate=%d", rejected.Load(), accepted.Load())
+	}
+
+	// Expire the in-memory backoff while the persisted search reservation is still current.
+	runner.mu.Lock()
+	runner.accounts[user.ID].next = time.Time{}
+	runner.mu.Unlock()
+	scheduler.maintainReconnectSessions(ctx)
+	if rejected.Load() != 1 || accepted.Load() != 0 {
+		t.Fatalf("fallback bypassed the persisted cooldown: rejected=%d alternate=%d", rejected.Load(), accepted.Load())
+	}
+	sqlDB, err := sql.Open("sqlite", path)
+	must(err)
+	t.Cleanup(func() { sqlDB.Close() })
+	_, err = sqlDB.ExecContext(ctx, `UPDATE luxmed_search_cooldown SET started_at=$1 WHERE user_id=$2`,
+		time.Now().UTC().Add(-2*time.Minute), user.ID)
+	must(err)
+
+	scheduler.maintainReconnectSessions(ctx)
+	_, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+	must(err)
+	if rejected.Load() != 1 || accepted.Load() != 1 || access.Status != storage.LuxMedAccessConnected ||
+		access.EpisodeID != "" || notifier.attempts != 0 {
+		t.Fatalf("fallback did not confirm access: rejected=%d alternate=%d access=%+v warnings=%d",
+			rejected.Load(), accepted.Load(), access, notifier.attempts)
+	}
+	saved, err := db.Watch(ctx, pausedID)
+	must(err)
+	if saved.Status != domain.WatchStatusPaused || saved.ServiceID != paused.ServiceID || saved.LastError != "" ||
+		saved.LastCheckedAt == nil || !saved.LastCheckedAt.Equal(*paused.LastCheckedAt) {
+		t.Fatalf("fallback changed the paused search schedule or filters: %+v", saved)
+	}
+}
+
 func TestPausedLegacySignInErrorRecoversWithAlternativeProtectedFilter(t *testing.T) {
 	ctx := t.Context()
 	runner, db, good := testRunner(t, nil)

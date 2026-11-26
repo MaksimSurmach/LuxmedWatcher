@@ -156,11 +156,10 @@ function bindAccount() {
   const connect = main.querySelector('#connect');
   connect.onclick = () => void run(connect, signIn, failure);
   const check = main.querySelector('#account-check');
-  check.onclick = () => void run(check, async () => {
-    await api('account');
-    if (!check.isConnected) return;
-    const latest = await api('load');
-    if (!check.isConnected) return;
+  let refreshTimer;
+  let manualCheck = 0;
+
+  async function showAccountSnapshot(latest) {
     applySnapshot(latest);
     if (tab === 'home' || tab === 'watches') {
       await switchTab(tab, { reload: false });
@@ -168,14 +167,50 @@ function bindAccount() {
     }
     const account = state.AccountStatus;
     connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
-    const section = main.querySelector('.account');
+    main.querySelector('.account').dataset.state = account;
     const status = main.querySelector('.account-status');
-    if (section) section.dataset.state = account;
-    if (status) {
-      status.dataset.state = account;
-      status.textContent = t(`account.${account}`);
+    status.dataset.state = account;
+    status.textContent = t(`account.${account}`);
+  }
+
+  function scheduleRefresh() {
+    clearTimeout(refreshTimer);
+    if (!check.isConnected || state.AccountStatus !== 'verification_pending') return;
+    refreshTimer = setTimeout(refreshPendingAccount, 5000);
+  }
+
+  async function refreshPendingAccount() {
+    if (!check.isConnected) return;
+    if (!document.hidden && !check.disabled) {
+      const revision = manualCheck;
+      try {
+        const latest = await api('load');
+        if (check.isConnected && revision === manualCheck && latest.AccountStatus !== 'verification_pending') {
+          await showAccountSnapshot(latest);
+        }
+      } catch (error) {
+        if (check.isConnected && revision === manualCheck && ['error.reopen', 'error.access_denied'].includes(error?.key)) {
+          failure.textContent = errorText(error);
+          return;
+        }
+      }
+    }
+    scheduleRefresh();
+  }
+
+  check.onclick = () => void run(check, async () => {
+    manualCheck++;
+    clearTimeout(refreshTimer);
+    try {
+      await api('account');
+      if (!check.isConnected) return;
+      const latest = await api('load');
+      if (check.isConnected) await showAccountSnapshot(latest);
+    } finally {
+      scheduleRefresh();
     }
   }, failure);
+  scheduleRefresh();
 }
 
 function home() {

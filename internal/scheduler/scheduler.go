@@ -57,6 +57,7 @@ type accountCheck struct {
 	client                   luxmed.Client
 	recoveryPending          bool
 	nextProbeFilter          int
+	rejectedReconnectWatchID int64
 }
 
 type Runner struct {
@@ -145,6 +146,8 @@ func (r *Runner) saveLuxMedAccount(ctx context.Context, userID int64, save func(
 			if err == nil {
 				state.client = nil
 				state.recoveryPending = false
+				state.rejectedReconnectWatchID = 0
+				state.nextProbeFilter = 0
 			}
 			return err
 		}
@@ -470,6 +473,10 @@ func (r *Runner) recordReconnectRejection(ctx context.Context, userID int64, cla
 func (r *Runner) confirmReconnectRecovery(ctx context.Context, userID int64, state *accountCheck) error {
 	err := r.resolveReconnect(ctx, userID)
 	state.recoveryPending = err != nil
+	if err == nil {
+		state.rejectedReconnectWatchID = 0
+		state.nextProbeFilter = 0
+	}
 	return err
 }
 
@@ -601,6 +608,16 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 	if err != nil {
 		return err
 	}
+	if state.rejectedReconnectWatchID != 0 {
+		if index := slices.IndexFunc(watches, func(watch domain.Watch) bool {
+			return watch.ID == state.rejectedReconnectWatchID
+		}); index >= 0 && index < len(watches)-1 {
+			rejected := watches[index]
+			copy(watches[index:], watches[index+1:])
+			watches[len(watches)-1] = rejected
+		}
+		return r.probeReconnectFilters(ctx, userID, state, browser, watches)
+	}
 	hasSearch := false
 	for _, watch := range watches {
 		if watch.Status == domain.WatchStatusActive && luxmed.SearchWindowOpen(watch, now) {
@@ -613,12 +630,24 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 			if errors.Is(err, ErrRateLimited) || errors.Is(err, ErrInactive) {
 				continue
 			}
+			if !errors.Is(err, luxmed.ErrPartialResults) && retryWithAnotherFilter(err) &&
+				slices.ContainsFunc(watches, func(candidate domain.Watch) bool {
+					return candidate.ID != watch.ID && candidate.CityID > 0 && candidate.ServiceID > 0
+				}) {
+				// The next probe can use another filter once the normal cooldown expires.
+				state.rejectedReconnectWatchID = watch.ID
+				state.nextProbeFilter = 0
+			}
 			return err
 		}
 	}
 	if hasSearch {
 		return nil
 	}
+	return r.probeReconnectFilters(ctx, userID, state, browser, watches)
+}
+
+func (r *Runner) probeReconnectFilters(ctx context.Context, userID int64, state *accountCheck, browser *luxmed.Browser, watches []domain.Watch) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if browser != nil {
@@ -651,6 +680,9 @@ func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *
 		}
 		err := client.CheckTermsAccess(ctx, watches[index])
 		if err == nil {
+			if state.rejectedReconnectWatchID != 0 {
+				return r.confirmReconnectRecovery(ctx, userID, state)
+			}
 			state.nextProbeFilter = 0
 			return r.resolveAfterAccessProbe(ctx, userID)
 		}
@@ -660,7 +692,7 @@ func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *
 			return errors.Join(err, r.db.ReleaseLuxMedSearch(releaseCtx, userID, started))
 		}
 		if errors.Is(err, luxmed.ErrAuthentication) {
-			return r.recordAccessRejection(ctx, userID, err)
+			return r.recordAccessRejection(ctx, userID, state, err)
 		}
 		if !retryWithAnotherFilter(err) {
 			return err
@@ -673,17 +705,28 @@ func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *
 	}
 	if _, err := client.GetRecentProcedures(ctx); err != nil {
 		if errors.Is(err, luxmed.ErrAuthentication) {
-			return r.recordAccessRejection(ctx, userID, err)
+			return r.recordAccessRejection(ctx, userID, state, err)
 		}
 		return err
 	}
 	return r.resolveAfterAccessProbe(ctx, userID)
 }
 
-func (r *Runner) recordAccessRejection(ctx context.Context, userID int64, rejection error) error {
-	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+func (r *Runner) recordAccessRejection(ctx context.Context, userID int64, state *accountCheck, rejection error) error {
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	return errors.Join(rejection, r.db.SetLuxMedAccessStatus(recordCtx, userID, storage.LuxMedAccessRejected, true))
+	if state.rejectedReconnectWatchID == 0 {
+		return errors.Join(rejection, r.db.SetLuxMedAccessStatus(recordCtx, userID, storage.LuxMedAccessRejected, true))
+	}
+
+	user, err := r.db.UserByID(recordCtx, userID)
+	if err != nil {
+		return errors.Join(rejection, err)
+	}
+	if err := r.db.BeginLuxMedReconnectAfterSearch(recordCtx, userID); err != nil {
+		return errors.Join(rejection, err)
+	}
+	return errors.Join(rejection, r.deliverReconnect(recordCtx, user, time.Now()))
 }
 
 func retryWithAnotherFilter(err error) bool {
@@ -907,7 +950,7 @@ func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched
 		accounts[watch.UserID] = true
 		s.runner.mu.Lock()
 		account := s.runner.accounts[watch.UserID]
-		blocked := account != nil && (account.inFlight != nil || now.Before(account.next))
+		blocked := account != nil && (account.inFlight != nil || now.Before(account.next) || account.rejectedReconnectWatchID == watch.ID)
 		s.runner.mu.Unlock()
 		if blocked {
 			continue
