@@ -303,10 +303,14 @@ func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool) ([
 		SELECT u.telegram_user_id
 		FROM users u
 		WHERE u.status=$1 AND u.role <> ''
-			AND (($3 AND EXISTS (SELECT 1 FROM luxmed_reconnect r WHERE r.user_id=u.id))
+			AND (($3 AND (
+				EXISTS (SELECT 1 FROM luxmed_reconnect r WHERE r.user_id=u.id)
+				OR (EXISTS (SELECT 1 FROM luxmed_accounts a WHERE a.user_id=u.id AND a.status=$4)
+					AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status IN ($2, $5) AND `+watchSignInError+`))
+			))
 				OR (NOT $3 AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status=$2)))
 		ORDER BY u.telegram_user_id
-	`, domain.UserStatusActive, domain.WatchStatusActive, reconnectOnly)
+	`, domain.UserStatusActive, domain.WatchStatusActive, reconnectOnly, domain.AccountStatusActive, domain.WatchStatusPaused)
 	if err != nil {
 		return nil, err
 	}

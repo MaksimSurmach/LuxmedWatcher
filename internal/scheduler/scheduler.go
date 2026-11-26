@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"slices"
 	"sync"
 	"time"
@@ -55,6 +56,7 @@ type accountCheck struct {
 	login, encryptedPassword string
 	client                   luxmed.Client
 	recoveryPending          bool
+	nextProbeFilter          int
 }
 
 type Runner struct {
@@ -609,7 +611,7 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if browser != nil {
-		return r.probeReconnectAccess(ctx, userID, now, browser.Client(), watches)
+		return r.probeReconnectAccess(ctx, userID, state, browser.Client(), watches)
 	}
 	client, err := r.passwordClient(ctx, userID, state)
 	if errors.Is(err, ErrNoAccount) {
@@ -618,34 +620,60 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 	if err != nil {
 		return err
 	}
-	return r.probeReconnectAccess(ctx, userID, now, client, watches)
+	return r.probeReconnectAccess(ctx, userID, state, client, watches)
 }
 
-func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, now time.Time, client luxmed.Client, watches []domain.Watch) error {
-	for _, watch := range watches {
-		if watch.CityID <= 0 || watch.ServiceID <= 0 {
-			continue
-		}
+func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *accountCheck, client luxmed.Client, watches []domain.Watch) error {
+	watches = slices.DeleteFunc(watches, func(watch domain.Watch) bool {
+		return watch.CityID <= 0 || watch.ServiceID <= 0
+	})
+	var rejectedFilter error
+	start := state.nextProbeFilter
+	for offset := range len(watches) {
+		index := (start + offset) % len(watches)
+		started := time.Now().UTC()
 		if r.minimumInterval > 0 {
-			ok, err := r.db.ReserveLuxMedSearch(ctx, userID, now, r.minimumInterval)
+			ok, err := r.db.ReserveLuxMedSearch(ctx, userID, started, r.minimumInterval)
 			if err != nil || !ok {
-				return err
+				return errors.Join(rejectedFilter, err)
 			}
 		}
-		if err := client.CheckTermsAccess(ctx, watch); err != nil {
-			if errors.Is(err, luxmed.ErrBrowserBusy) && !errors.Is(err, luxmed.ErrUnavailable) && r.minimumInterval > 0 {
-				releaseCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-				defer stop()
-				return errors.Join(err, r.db.ReleaseLuxMedSearch(releaseCtx, userID, now))
-			}
+		err := client.CheckTermsAccess(ctx, watches[index])
+		if err == nil {
+			state.nextProbeFilter = 0
+			return r.resolveAfterAccessProbe(ctx, userID)
+		}
+		if errors.Is(err, luxmed.ErrBrowserBusy) && !errors.Is(err, luxmed.ErrUnavailable) && r.minimumInterval > 0 {
+			releaseCtx, stop := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			defer stop()
+			return errors.Join(err, r.db.ReleaseLuxMedSearch(releaseCtx, userID, started))
+		}
+		if !retryWithAnotherFilter(err) {
 			return err
 		}
-		return r.resolveAfterAccessProbe(ctx, userID)
+		rejectedFilter = err
+		state.nextProbeFilter = (index + 1) % len(watches)
+	}
+	if len(watches) > 0 {
+		return rejectedFilter
 	}
 	if _, err := client.GetRecentProcedures(ctx); err != nil {
 		return err
 	}
 	return r.resolveAfterAccessProbe(ctx, userID)
+}
+
+func retryWithAnotherFilter(err error) bool {
+	if errors.Is(err, luxmed.ErrAuthentication) || errors.Is(err, luxmed.ErrUnavailable) {
+		return false
+	}
+	if status, ok := errors.AsType[*luxmed.HTTPError](err); ok {
+		switch status.StatusCode {
+		case http.StatusBadRequest, http.StatusNotFound, http.StatusUnprocessableEntity:
+			return true
+		}
+	}
+	return errors.Is(err, luxmed.ErrResponse)
 }
 
 func (r *Runner) resolveAfterAccessProbe(ctx context.Context, userID int64) error {

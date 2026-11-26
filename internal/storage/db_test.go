@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
 func TestInviteRedeemAndWatchHistory(t *testing.T) {
@@ -790,6 +791,53 @@ func TestUnblockAcceleratesOnlyConfirmedForbiddenDelivery(t *testing.T) {
 		must(err)
 		if throttled.Attempt != 0 {
 			t.Fatalf("unblock bypassed Telegram rate limiting: %+v", throttled)
+		}
+	})
+}
+
+func TestReconnectRequiresCurrentActiveSearchInWarsaw(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		now := time.Now().UTC()
+		today, end := luxmed.SearchDateBounds(now)
+		past := today.AddDate(0, 0, -1)
+		watch := domain.Watch{UserID: user.ID, DateTo: &past}
+		watch.ID, err = db.CreateWatch(ctx, watch)
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		required, err := db.LuxMedReconnectRequired(ctx, user.ID)
+		if err != nil || required {
+			t.Fatalf("expired search opened an episode: required=%v err=%v", required, err)
+		}
+		watch.DateFrom, watch.DateTo = &end, nil
+		must(db.UpdateWatch(ctx, watch))
+		must(db.BeginLuxMedReconnectAfterSearch(ctx, user.ID))
+		required, err = db.LuxMedReconnectRequired(ctx, user.ID)
+		if err != nil || required {
+			t.Fatalf("search beyond the horizon opened an episode: required=%v err=%v", required, err)
+		}
+		watch.DateFrom, watch.DateTo = nil, &today
+		must(db.UpdateWatch(ctx, watch))
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		afterMidnight := today.AddDate(0, 0, 1)
+		due, err := db.LuxMedReconnectDeliveryDue(ctx, user.ID, afterMidnight)
+		if err != nil || due {
+			t.Fatalf("delivery stayed due after Warsaw midnight: due=%v err=%v", due, err)
+		}
+		expired, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, afterMidnight)
+		if err != nil || expired.Attempt != 0 {
+			t.Fatalf("expired search reserved a delivery: %+v %v", expired, err)
+		}
+		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		if err != nil || claim.Attempt != 1 {
+			t.Fatalf("search should remain current until the end of the last day: %+v %v", claim, err)
 		}
 	})
 }

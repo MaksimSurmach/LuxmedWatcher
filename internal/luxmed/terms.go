@@ -52,6 +52,12 @@ func SearchWindowOpen(watch domain.Watch, now time.Time) bool {
 	return !from.After(to)
 }
 
+// SearchDateBounds returns the first searchable day and the exclusive upper bound.
+func SearchDateBounds(now time.Time) (time.Time, time.Time) {
+	today := startOfDay(now)
+	return today, today.AddDate(0, 0, 91)
+}
+
 // CheckTermsAccess validates the protected terms response without searching the saved schedule.
 func (c *HTTPClient) CheckTermsAccess(ctx context.Context, watch domain.Watch) error {
 	day := startOfDay(time.Now())
@@ -63,7 +69,10 @@ func (c *HTTPClient) CheckTermsAccess(ctx context.Context, watch domain.Watch) e
 	if err != nil {
 		return err
 	}
-	_, err = decodeTermsResponse(watch, data, false)
+	_, checked, err := decodeCheckedTerms(watch, data, false)
+	if checked {
+		return nil
+	}
 	return err
 }
 
@@ -126,8 +135,8 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 		if err != nil {
 			return result, searchFailure(result.Checked, err)
 		}
-		preview, err := decodeTermsResponse(watch, data, c.rawPayloads)
-		result.Checked = result.Checked || err == nil || len(preview.apps) > 0
+		preview, checked, err := decodeCheckedTerms(watch, data, c.rawPayloads)
+		result.Checked = result.Checked || checked
 		addMatches(preview.apps, from, end)
 		if err != nil {
 			return result, searchFailure(result.Checked, err)
@@ -242,8 +251,8 @@ func termsQuery(watch domain.Watch, facilities []int, from, to time.Time) (url.V
 }
 
 func searchRange(watch domain.Watch, now time.Time) (time.Time, time.Time) {
-	today := startOfDay(now)
-	horizon := today.AddDate(0, 0, 90)
+	today, end := SearchDateBounds(now)
+	horizon := end.AddDate(0, 0, -1)
 	from := today
 	if watch.DateFrom != nil {
 		if date := startOfDay(*watch.DateFrom); date.After(from) {
@@ -262,6 +271,11 @@ func searchRange(watch domain.Watch, now time.Time) (time.Time, time.Time) {
 		to = horizon
 	}
 	return from, to
+}
+
+func decodeCheckedTerms(watch domain.Watch, body []byte, raw bool) (termsPreview, bool, error) {
+	preview, err := decodeTermsResponse(watch, body, raw)
+	return preview, err == nil || len(preview.apps) > 0, err
 }
 
 func startOfDay(t time.Time) time.Time {

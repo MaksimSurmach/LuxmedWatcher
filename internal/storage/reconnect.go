@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
 const reconnectRequiredQuery = `SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1)`
@@ -49,13 +50,22 @@ func (db *DB) BeginLuxMedReconnectAfterSearch(ctx context.Context, userID int64)
 }
 
 func (db *DB) beginLuxMedReconnect(ctx context.Context, userID int64, requiresTerms bool) error {
+	first, end := luxmed.SearchDateBounds(time.Now())
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO luxmed_reconnect (user_id, requires_terms)
-		SELECT $1, $3 WHERE EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=$2)
+		SELECT $1, $3 WHERE `+db.hasCurrentReconnectSearch("$2", "$4", "$5")+`
 		ON CONFLICT (user_id) DO UPDATE SET requires_terms=TRUE
 		WHERE excluded.requires_terms AND NOT luxmed_reconnect.requires_terms
-	`, userID, domain.WatchStatusActive, requiresTerms)
+	`, userID, domain.WatchStatusActive, requiresTerms, first.UTC(), end.UTC())
 	return err
+}
+
+func (db *DB) hasCurrentReconnectSearch(status, first, end string) string {
+	from, to := db.dateTimeSQL("date_from"), db.dateTimeSQL("date_to")
+	return `EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=` + status + `
+		AND (date_to IS NULL OR ` + to + ` >= ` + db.dateTimeSQL(first) + `)
+		AND (date_from IS NULL OR ` + from + ` < ` + db.dateTimeSQL(end) + `)
+		AND (date_from IS NULL OR date_to IS NULL OR ` + from + ` <= ` + to + `))`
 }
 
 func (db *DB) LuxMedReconnectRequiresTerms(ctx context.Context, userID int64) (bool, error) {
@@ -76,15 +86,16 @@ const blockedReconnectRetry = 7 * 24 * time.Hour
 // On a database error the returned ID identifies the attempted reservation, even if it committed.
 func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time) (ReconnectDeliveryClaim, error) {
 	claim := ReconnectDeliveryClaim{ID: rand.Text()}
+	first, end := luxmed.SearchDateBounds(now)
 	err := db.sql.QueryRowContext(ctx, `
 		INSERT INTO luxmed_reconnect_delivery (user_id, attempts, claim_id)
 		SELECT user_id, 1, $3 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified
-		    AND EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=$4)
+		    AND `+db.hasCurrentReconnectSearch("$4", "$5", "$6")+`
 		ON CONFLICT (user_id) DO UPDATE SET attempts=luxmed_reconnect_delivery.attempts+1,
 		    retry_at=NULL, claim_id=excluded.claim_id, last_failure_forbidden=FALSE
 		WHERE `+db.dateTimeSQL("luxmed_reconnect_delivery.retry_at")+` <= `+db.dateTimeSQL("$2")+`
 		RETURNING attempts
-	`, userID, now.UTC(), claim.ID, domain.WatchStatusActive).Scan(&claim.Attempt)
+	`, userID, now.UTC(), claim.ID, domain.WatchStatusActive, first.UTC(), end.UTC()).Scan(&claim.Attempt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ReconnectDeliveryClaim{}, nil
 	}
@@ -93,15 +104,16 @@ func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, no
 
 func (db *DB) LuxMedReconnectDeliveryDue(ctx context.Context, userID int64, now time.Time) (bool, error) {
 	var due bool
+	first, end := luxmed.SearchDateBounds(now)
 	err := db.sql.QueryRowContext(ctx, `
 		SELECT EXISTS (
 			SELECT 1 FROM luxmed_reconnect r
 			LEFT JOIN luxmed_reconnect_delivery d ON d.user_id=r.user_id
 			WHERE r.user_id=$1 AND NOT r.notified
 			    AND (d.user_id IS NULL OR `+db.dateTimeSQL("d.retry_at")+` <= `+db.dateTimeSQL("$2")+`)
-			    AND EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=$3)
+			    AND `+db.hasCurrentReconnectSearch("$3", "$4", "$5")+`
 		)
-	`, userID, now.UTC(), domain.WatchStatusActive).Scan(&due)
+	`, userID, now.UTC(), domain.WatchStatusActive, first.UTC(), end.UTC()).Scan(&due)
 	return due, err
 }
 

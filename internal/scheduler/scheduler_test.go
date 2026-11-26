@@ -1395,13 +1395,13 @@ func TestBrowserRecoveryChecksAccessWithoutRestartingPausedOrExpiredSearch(t *te
 				}
 			}
 			watch.CityID, watch.ServiceID, watch.CheckIntervalSeconds = 1, 12, 3600
+			must(db.BeginLuxMedReconnectAfterSearch(ctx, watch.UserID))
 			if !paused {
 				past := time.Now().AddDate(0, 0, -2)
 				watch.DateTo = &past
 			}
 			must(db.UpdateWatch(ctx, watch))
 			must(db.MarkWatchChecked(ctx, watch.ID, false, "luxmed_authentication"))
-			must(db.BeginLuxMedReconnectAfterSearch(ctx, watch.UserID))
 			must(db.MarkLuxMedReconnectNotified(ctx, watch.UserID))
 			if paused {
 				must(db.SetWatchStatus(ctx, watch.ID, domain.WatchStatusPaused))
@@ -1454,6 +1454,86 @@ func TestBrowserRecoveryChecksAccessWithoutRestartingPausedOrExpiredSearch(t *te
 				t.Fatalf("access probe changed the saved schedule: before=%+v after=%+v", before, after)
 			}
 		})
+	}
+}
+
+type termsProbeClient struct {
+	fakeLuxMed
+	probe func(context.Context, domain.Watch) error
+}
+
+func (c *termsProbeClient) CheckTermsAccess(ctx context.Context, watch domain.Watch) error {
+	return c.probe(ctx, watch)
+}
+
+func TestPausedLegacySignInErrorRecoversWithAlternativeProtectedFilter(t *testing.T) {
+	ctx := t.Context()
+	runner, db, good := testRunner(t, nil)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	good.CityID, good.ServiceID = 1, 12
+	must(db.UpdateWatch(ctx, good))
+	badID, err := db.CreateWatch(ctx, domain.Watch{UserID: good.UserID, CityID: 1, ServiceID: 99})
+	must(err)
+	for _, id := range []int64{good.ID, badID} {
+		must(db.SetWatchStatus(ctx, id, domain.WatchStatusPaused))
+		must(db.MarkWatchChecked(ctx, id, false, "luxmed_authentication"))
+	}
+	account, err := db.LuxMedAccount(ctx, good.UserID)
+	must(err)
+	account.Status = domain.AccountStatusActive
+	must(runner.SavePendingLuxMedAccount(ctx, account))
+
+	var temporary atomic.Bool
+	temporary.Store(true)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		switch req.URL.Query().Get("serviceVariantId") {
+		case "99":
+			if temporary.Load() {
+				w.Header().Set("Retry-After", "60")
+				w.WriteHeader(http.StatusServiceUnavailable)
+			} else {
+				w.WriteHeader(http.StatusBadRequest)
+			}
+		case "12":
+			fmt.Fprint(w, `{"termsForService":{"termsForDays":[{"terms":[{"dateTimeFrom":"2026-12-01T10:00:00+01:00"},{"dateTimeFrom":"invalid"}]}]}}`)
+		default:
+			t.Errorf("unexpected protected filter: %s", req.URL.RequestURI())
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(server.Close)
+	browser, err := luxmed.NewBrowser(server.URL, "http://localhost:18769")
+	must(err)
+	var filters []int
+	client := &termsProbeClient{probe: func(ctx context.Context, watch domain.Watch) error {
+		filters = append(filters, watch.ServiceID)
+		return browser.Client().CheckTermsAccess(ctx, watch)
+	}}
+	runner.newClient = func(bool) luxmed.Client { return client }
+	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	scheduler.maintainReconnectSessions(ctx)
+	watched, err := db.Watch(ctx, good.ID)
+	if err != nil || watched.LastError != "luxmed_authentication" || !slices.Equal(filters, []int{99}) {
+		t.Fatalf("temporary failure changed sign-in state or tried a new filter: filters=%v error=%q err=%v", filters, watched.LastError, err)
+	}
+	temporary.Store(false)
+	scheduler.maintainReconnectSessions(ctx)
+	if !slices.Equal(filters, []int{99, 99, 12}) {
+		t.Fatalf("filter rejection blocked alternate verification: %v", filters)
+	}
+	for _, id := range []int64{good.ID, badID} {
+		watch, err := db.Watch(ctx, id)
+		if err != nil || watch.Status != domain.WatchStatusPaused || watch.LastError != "" || watch.LastCheckedAt == nil {
+			t.Fatalf("verified partial response failed to clear paused search: %+v %v", watch, err)
+		}
+	}
+	if required, err := db.LuxMedReconnectRequired(ctx, good.UserID); err != nil || required {
+		t.Fatalf("legacy recovery manufactured an episode: required=%v err=%v", required, err)
 	}
 }
 
