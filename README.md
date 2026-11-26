@@ -27,7 +27,7 @@ Selecting another database starts from the data already in that database. Keep t
 
 Set `RECONNECT_JOURNAL_DIR` to an application-owned, writable directory on a persistent volume. It holds confirmed Telegram refusals and queued unblock events across a restart. The app first uses `<DATABASE_PATH>.reconnect` by default. If that path is unavailable with PostgreSQL, it uses a database-specific directory under `$XDG_STATE_HOME/luxmed-watcher` or `~/.local/state/luxmed-watcher`. In containers, mount a persistent volume at the configured directory to preserve it across replacement.
 
-PostgreSQL can still start if both default paths are unavailable, or with `RECONNECT_JOURNAL_DIR=-` to disable the local journal. During a database outage the process keeps confirmed refusals and unblock events in memory and retries them while it runs. If it crashes before recording the outcome durably, an outstanding delivery claim stays paused after restart because Telegram may already have accepted it.
+PostgreSQL can still start if both default paths are unavailable, or with `RECONNECT_JOURNAL_DIR=-` to disable the local journal. The bot advances its Telegram offset after saving an unblock event in the database or journal. If both are unavailable, Telegram can redeliver the unacknowledged event while it remains in Telegram's queue. The process holds known unsent outcomes in memory when both stores are unavailable. If it crashes before recording an outcome durably, an outstanding send claim stays paused after restart because Telegram may already have accepted it.
 
 ## Telegram workflow
 

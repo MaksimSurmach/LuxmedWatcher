@@ -29,29 +29,34 @@ func (event TelegramUnblock) filename() string {
 	return fmt.Sprintf("unblock-%d-%d.json", event.UserID, event.UpdateID)
 }
 
-func (db *DB) QueueTelegramUnblock(event TelegramUnblock) error {
+func (db *DB) QueueTelegramUnblock(ctx context.Context, event TelegramUnblock) error {
+	_, dbErr := db.sql.ExecContext(ctx, `
+		INSERT INTO telegram_unblocks (telegram_user_id, update_id) VALUES ($1, $2)
+		ON CONFLICT (telegram_user_id, update_id) DO NOTHING
+	`, event.UserID, event.UpdateID)
+	if dbErr == nil {
+		return nil
+	}
 	if db.reconnectDirectory != "" {
 		err := db.writeReconnectFile(event.filename(), event)
 		if err == nil {
 			return nil
 		}
-		db.pendingUnblocks.Store(event, struct{}{})
-		return err
+		return errors.Join(dbErr, err)
 	}
-	db.pendingUnblocks.Store(event, struct{}{})
-	return nil
+	return dbErr
 }
 
-func (db *DB) PendingTelegramUnblocks() ([]TelegramUnblock, error) {
+func (db *DB) PendingTelegramUnblocks(ctx context.Context) ([]TelegramUnblock, error) {
 	events := make(map[TelegramUnblock]struct{})
-	db.pendingUnblocks.Range(func(key, _ any) bool {
-		events[key.(TelegramUnblock)] = struct{}{}
-		return true
-	})
+	dbErr := db.readQueuedTelegramUnblocks(ctx, events)
 	var readErr error
 	if db.reconnectDirectory != "" {
 		var entries []os.DirEntry
 		entries, readErr = os.ReadDir(db.reconnectDirectory)
+		if errors.Is(readErr, os.ErrNotExist) {
+			readErr = nil
+		}
 		for _, entry := range entries {
 			name, isEvent := strings.CutPrefix(entry.Name(), "unblock-")
 			user, update, found := strings.Cut(strings.TrimSuffix(name, ".json"), "-")
@@ -70,11 +75,32 @@ func (db *DB) PendingTelegramUnblocks() ([]TelegramUnblock, error) {
 	for event := range events {
 		pending = append(pending, event)
 	}
-	return pending, readErr
+	return pending, errors.Join(dbErr, readErr)
 }
 
-func (db *DB) FinishTelegramUnblock(event TelegramUnblock) error {
-	db.pendingUnblocks.Delete(event)
+func (db *DB) readQueuedTelegramUnblocks(ctx context.Context, events map[TelegramUnblock]struct{}) error {
+	rows, err := db.sql.QueryContext(ctx, `SELECT telegram_user_id, update_id FROM telegram_unblocks`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var event TelegramUnblock
+		if err := rows.Scan(&event.UserID, &event.UpdateID); err != nil {
+			return err
+		}
+		events[event] = struct{}{}
+	}
+	return rows.Err()
+}
+
+func (db *DB) FinishTelegramUnblock(ctx context.Context, event TelegramUnblock) error {
+	_, err := db.sql.ExecContext(ctx, `
+		DELETE FROM telegram_unblocks WHERE telegram_user_id=$1 AND update_id=$2
+	`, event.UserID, event.UpdateID)
+	if err != nil {
+		return err
+	}
 	if db.reconnectDirectory != "" {
 		err := os.Remove(filepath.Join(db.reconnectDirectory, event.filename()))
 		if !errors.Is(err, os.ErrNotExist) {

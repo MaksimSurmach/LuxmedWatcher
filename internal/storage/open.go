@@ -22,7 +22,6 @@ type DB struct {
 	postgres           bool
 	reconnectDirectory string
 	pendingRejections  sync.Map // user ID to a confirmed rejection awaiting a durable write
-	pendingUnblocks    sync.Map // TelegramUnblock events held when the journal is unavailable
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {
@@ -111,7 +110,8 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if db.postgres {
 		if _, err := tx.ExecContext(ctx, `
 			ALTER TABLE luxmed_reconnect_delivery ADD COLUMN IF NOT EXISTS forbidden_failures INTEGER NOT NULL DEFAULT 0,
-			    ADD COLUMN IF NOT EXISTS claim_id TEXT NOT NULL DEFAULT ''
+			    ADD COLUMN IF NOT EXISTS claim_id TEXT NOT NULL DEFAULT '',
+			    ADD COLUMN IF NOT EXISTS last_failure_forbidden BOOLEAN NOT NULL DEFAULT FALSE
 		`); err != nil {
 			return fmt.Errorf("add PostgreSQL reconnect delivery columns: %w", err)
 		}
@@ -121,6 +121,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 			{"users", "preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
 			{"luxmed_reconnect_delivery", "forbidden_failures", "INTEGER NOT NULL DEFAULT 0"},
 			{"luxmed_reconnect_delivery", "claim_id", "TEXT NOT NULL DEFAULT ''"},
+			{"luxmed_reconnect_delivery", "last_failure_forbidden", "BOOLEAN NOT NULL DEFAULT FALSE"},
 		} {
 			var exists bool
 			err := tx.QueryRowContext(ctx, `

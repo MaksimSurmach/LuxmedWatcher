@@ -97,7 +97,7 @@ func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
 	must(err)
 	must(b.processUpdates(ctx, &config, updates))
 	b.processTelegramUnblocks(ctx)
-	pending, err := b.db.PendingTelegramUnblocks()
+	pending, err := b.db.PendingTelegramUnblocks(ctx)
 	must(err)
 	if config.Offset != 3 || len(pending) != 1 {
 		t.Fatalf("failed rearm blocked polling or lost the event: offset=%d pending=%v", config.Offset, pending)
@@ -117,9 +117,10 @@ func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
 	must(err)
 	runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: browser, other.TelegramUserID: browser})
 	b.SetRunner(runner)
+	must(os.MkdirAll(path+".reconnect", 0o700))
 	must(os.WriteFile(filepath.Join(path+".reconnect", fmt.Sprintf("%d.json", user.ID)), []byte("corrupt"), 0o600))
 	b.processTelegramUnblocks(ctx)
-	pending, err = b.db.PendingTelegramUnblocks()
+	pending, err = b.db.PendingTelegramUnblocks(ctx)
 	must(err)
 	if len(pending) != 0 {
 		t.Fatalf("unreadable refusal journal prevented the queued unblock: %v", pending)
@@ -132,7 +133,7 @@ func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
 			t.Fatalf("check watch: %v", err)
 		}
 	}
-	pending, err = b.db.PendingTelegramUnblocks()
+	pending, err = b.db.PendingTelegramUnblocks(ctx)
 	must(err)
 	if len(pending) != 0 {
 		t.Fatalf("successful retry left pending events: %v", pending)
@@ -143,6 +144,16 @@ func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
 	if err := runner.CheckWatch(ctx, otherWatch); !errors.Is(err, luxmed.ErrAuthentication) ||
 		errors.Is(err, storage.ErrReconnectJournalUnreadable) || sends.Load() != 2 {
 		t.Fatalf("corrupt journal affected another user: sends=%d err=%v", sends.Load(), err)
+	}
+	_, err = faults.ExecContext(ctx, `
+		CREATE TRIGGER fail_queue BEFORE INSERT ON telegram_unblocks
+		BEGIN SELECT RAISE(ABORT, 'simulated queue write failure'); END
+	`)
+	must(err)
+	must(os.Mkdir(filepath.Join(path+".reconnect", "unblock-42-1.json"), 0o700))
+	config.Offset = 0
+	if err := b.processUpdates(ctx, &config, updates); err == nil || config.Offset != 0 {
+		t.Fatalf("advanced offset without a durable copy: offset=%d err=%v", config.Offset, err)
 	}
 }
 

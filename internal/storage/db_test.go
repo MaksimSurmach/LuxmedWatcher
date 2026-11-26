@@ -571,6 +571,8 @@ func TestReconnectDeliveryCounterMigration(t *testing.T) {
 		must(err)
 		_, err = db.sql.ExecContext(ctx, `ALTER TABLE luxmed_reconnect_delivery DROP COLUMN claim_id`)
 		must(err)
+		_, err = db.sql.ExecContext(ctx, `ALTER TABLE luxmed_reconnect_delivery DROP COLUMN last_failure_forbidden`)
+		must(err)
 		_, err = db.sql.ExecContext(ctx, `
 			INSERT INTO luxmed_reconnect_delivery(user_id, attempts, retry_at) VALUES ($1, 3, $2)
 		`, user.ID, now.Add(time.Hour))
@@ -816,6 +818,71 @@ func TestReconnectJournalReplayIsScopedToDeliveryClaim(t *testing.T) {
 		must(err)
 		if afterReplay.Attempt != 0 {
 			t.Fatalf("old rejection made an unrelated delivery retryable: %+v", afterReplay)
+		}
+	})
+}
+
+func TestTelegramUnblockSurvivesRestartWithoutDiskJournal(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		db.reconnectDirectory = ""
+		event := TelegramUnblock{UserID: 42, UpdateID: 123}
+		unavailable, cancel := context.WithCancel(ctx)
+		cancel()
+		if err := db.QueueTelegramUnblock(unavailable, event); !errors.Is(err, context.Canceled) {
+			t.Fatalf("accepted an update without a durable store: %v", err)
+		}
+		for range 2 {
+			if err := db.QueueTelegramUnblock(ctx, event); err != nil {
+				t.Fatal(err)
+			}
+		}
+		restarted := &DB{sql: db.sql, postgres: db.postgres}
+		pending, err := restarted.PendingTelegramUnblocks(ctx)
+		if err != nil || len(pending) != 1 || pending[0] != event {
+			t.Fatalf("restart did not recover exactly one update: %v, %v", pending, err)
+		}
+		if err := restarted.FinishTelegramUnblock(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+func TestUnblockAcceleratesOnlyConfirmedForbiddenDelivery(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		first, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		must(err)
+		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, first, now.Add(6*time.Hour), 4))
+		unblockedAt := now.Add(time.Minute)
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 4, unblockedAt))
+		second, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt.Add(time.Second))
+		must(err)
+		if second.Attempt != 2 {
+			t.Fatalf("first forbidden rejection still blocked delivery: %+v", second)
+		}
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 4, unblockedAt))
+		unknown, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt.Add(time.Second))
+		must(err)
+		if unknown.Attempt != 0 {
+			t.Fatalf("unblock retried a send with unknown outcome: %+v", unknown)
+		}
+		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, second, now.Add(time.Hour), 0))
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 4, unblockedAt))
+		throttled, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt.Add(time.Second))
+		must(err)
+		if throttled.Attempt != 0 {
+			t.Fatalf("unblock bypassed Telegram rate limiting: %+v", throttled)
 		}
 	})
 }

@@ -383,15 +383,27 @@ func (r *Runner) beginReconnect(ctx context.Context, userID int64) error {
 }
 
 func (r *Runner) deliverReconnect(ctx context.Context, user domain.User, now time.Time) error {
+	return r.deliverReconnectAfterReplay(ctx, user, now, r.replayReconnect(ctx, user.ID))
+}
+
+func (r *Runner) replayReconnect(ctx context.Context, userID int64) error {
+	replayCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	return r.db.ReplayReconnectRejection(replayCtx, userID)
+}
+
+func (r *Runner) deliverReconnectAfterReplay(ctx context.Context, user domain.User, now time.Time, replayErr error) error {
 	notifier, ok := r.notifier.(reconnectNotifier)
 	if !ok {
 		return nil
 	}
-	replayCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	replayErr := r.db.ReplayReconnectRejection(replayCtx, user.ID)
-	cancel()
 	claim, err := r.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
 	if err != nil {
+		// The database may have committed this ID before its response was lost.
+		// Telegram has not been called, so this particular claim can be retried.
+		if claim.ID != "" {
+			err = errors.Join(err, r.recordReconnectRejection(ctx, user.ID, claim, time.Now().Add(time.Minute), 0))
+		}
 		return errors.Join(replayErr, fmt.Errorf("claim LuxMed reconnect delivery: %w", err))
 	}
 	if claim.Attempt == 0 {
@@ -410,13 +422,18 @@ func (r *Runner) deliverReconnect(ctx context.Context, user domain.User, now tim
 	if rejected, ok := errors.AsType[*ReconnectDeliveryRejected](sendErr); ok {
 		backoff := min(time.Hour, time.Minute<<min(claim.Attempt-1, 6))
 		retryAt := time.Now().Add(max(backoff, rejected.RetryAfter))
-		recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
-		defer cancel()
-		if err := r.db.JournalReconnectRejection(recordCtx, user.ID, claim, retryAt, rejected.ForbiddenLimit); err != nil {
-			sendErr = errors.Join(sendErr, fmt.Errorf("record LuxMed reconnect rejection: %w", err))
-		}
+		sendErr = errors.Join(sendErr, r.recordReconnectRejection(ctx, user.ID, claim, retryAt, rejected.ForbiddenLimit))
 	}
 	return errors.Join(replayErr, fmt.Errorf("send LuxMed reconnect warning: %w", sendErr))
+}
+
+func (r *Runner) recordReconnectRejection(ctx context.Context, userID int64, claim storage.ReconnectDeliveryClaim, retryAt time.Time, forbiddenLimit int) error {
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := r.db.JournalReconnectRejection(recordCtx, userID, claim, retryAt, forbiddenLimit); err != nil {
+		return fmt.Errorf("record LuxMed reconnect rejection: %w", err)
+	}
+	return nil
 }
 
 func (r *Runner) confirmReconnectRecovery(ctx context.Context, userID int64, state *accountCheck) error {
@@ -468,7 +485,10 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		if state.recoveryPending {
 			return false, r.confirmReconnectRecovery(ctx, user.ID, state)
 		}
-		return false, r.deliverReconnect(ctx, user, time.Now())
+		if r.browsers != nil {
+			return false, nil
+		}
+		return false, r.recheckPasswordBeforeWarning(ctx, user, state)
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	err := browser.Check(probeCtx)
@@ -502,6 +522,28 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		return false, errors.Join(err, r.confirmReconnectRecovery(ctx, user.ID, state))
 	}
 	return false, errors.Join(err, r.deliverReconnect(ctx, user, time.Now()))
+}
+
+func (r *Runner) recheckPasswordBeforeWarning(ctx context.Context, user domain.User, state *accountCheck) error {
+	now := time.Now()
+	replayErr := r.replayReconnect(ctx, user.ID)
+	due, err := r.db.LuxMedReconnectDeliveryDue(ctx, user.ID, now)
+	if err != nil || !due {
+		return errors.Join(replayErr, err)
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	_, _, err = r.passwordClient(probeCtx, user.ID, state)
+	switch {
+	case err == nil:
+		return r.confirmReconnectRecovery(ctx, user.ID, state)
+	case errors.Is(err, luxmed.ErrAuthentication):
+		return r.deliverReconnectAfterReplay(ctx, user, now, replayErr)
+	case errors.Is(err, ErrNoAccount):
+		return nil
+	default:
+		return errors.Join(replayErr, err)
+	}
 }
 
 func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accountCheck) (luxmed.Client, bool, error) {

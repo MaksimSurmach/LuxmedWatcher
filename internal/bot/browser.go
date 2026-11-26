@@ -22,15 +22,15 @@ import (
 
 const reconnectForbiddenLimit = 4
 
-func (b *Bot) queueBotMembership(updateID int, update *tgbotapi.ChatMemberUpdated) {
+func (b *Bot) queueBotMembership(ctx context.Context, updateID int, update *tgbotapi.ChatMemberUpdated) error {
 	if b.runner == nil || !privateChat(&update.Chat, &update.From) ||
 		update.OldChatMember.Status != "kicked" || update.NewChatMember.Status != "member" ||
 		update.NewChatMember.User == nil || update.NewChatMember.User.ID != b.api.Self.ID {
-		return
+		return nil
 	}
-	if err := b.db.QueueTelegramUnblock(storage.TelegramUnblock{UserID: update.From.ID, UpdateID: updateID}); err != nil {
-		b.logger.Warn("queue Telegram unblock in memory", "err", err)
-	}
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	return b.db.QueueTelegramUnblock(ctx, storage.TelegramUnblock{UserID: update.From.ID, UpdateID: updateID})
 }
 
 func (b *Bot) retryTelegramUnblocks(ctx context.Context) {
@@ -50,7 +50,9 @@ func (b *Bot) processTelegramUnblocks(ctx context.Context) {
 	if b.runner == nil {
 		return
 	}
-	events, err := b.db.PendingTelegramUnblocks()
+	readCtx, stop := context.WithTimeout(ctx, 2*time.Second)
+	events, err := b.db.PendingTelegramUnblocks(readCtx)
+	stop()
 	if err != nil {
 		b.logger.Warn("read Telegram unblock queue", "err", err)
 	}
@@ -60,10 +62,10 @@ func (b *Bot) processTelegramUnblocks(ctx context.Context) {
 		}
 		attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
 		err := b.resumeAfterTelegramUnblock(attempt, event.UserID)
-		cancel()
 		if err == nil {
-			err = b.db.FinishTelegramUnblock(event)
+			err = b.db.FinishTelegramUnblock(attempt, event)
 		}
+		cancel()
 		if err != nil && !errors.Is(err, luxmed.ErrBrowserBusy) {
 			b.logger.Warn("retry Telegram unblock", "err", err)
 		}

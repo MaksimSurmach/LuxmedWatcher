@@ -50,7 +50,14 @@ CREATE TABLE IF NOT EXISTS luxmed_reconnect_delivery (
 	attempts INTEGER NOT NULL,
 	claim_id TEXT NOT NULL DEFAULT '',
 	forbidden_failures INTEGER NOT NULL DEFAULT 0,
+	last_failure_forbidden BOOLEAN NOT NULL DEFAULT FALSE,
 	retry_at %[6]s
+);
+
+CREATE TABLE IF NOT EXISTS telegram_unblocks (
+	telegram_user_id BIGINT NOT NULL,
+	update_id BIGINT NOT NULL,
+	PRIMARY KEY (telegram_user_id, update_id)
 );
 
 CREATE TABLE IF NOT EXISTS luxmed_search_cooldown (

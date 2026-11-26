@@ -786,6 +786,7 @@ func TestPasswordReconnectSerializesWithQueuedWarning(t *testing.T) {
 		return &ReconnectDeliveryRejected{}
 	}}
 	runner, db, watch := testRunner(t, notifier)
+	runner.newClient = func(bool) luxmed.Client { return &fakeLuxMed{authErr: luxmed.ErrAuthentication} }
 	account, err := db.LuxMedAccount(ctx, watch.UserID)
 	if err != nil {
 		t.Fatal(err)
@@ -1118,6 +1119,54 @@ func TestReconnectRejectionSurvivesRestartAfterDatabaseWriteFailure(t *testing.T
 	}
 }
 
+func TestReconnectClaimErrorAfterWriteRecordsKnownUnsentDelivery(t *testing.T) {
+	ctx := t.Context()
+	path := filepath.Join(t.TempDir(), "watcher.sqlite")
+	sends := 0
+	runner, db, watch := testRunnerAt(t, reconnectNotifierFunc{send: func() error {
+		sends++
+		return nil
+	}}, path)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	user, err := db.UserByID(ctx, watch.UserID)
+	must(err)
+	must(db.BeginLuxMedReconnect(ctx, user.ID))
+	faults, err := sql.Open("sqlite", path)
+	must(err)
+	t.Cleanup(func() { faults.Close() })
+	// FAIL reports a statement error while retaining the insert performed before it.
+	_, err = faults.ExecContext(ctx, `
+		CREATE TRIGGER lose_claim_reply AFTER INSERT ON luxmed_reconnect_delivery
+		BEGIN SELECT RAISE(FAIL, 'simulated lost reservation response'); END
+	`)
+	must(err)
+	now := time.Now()
+	err = runner.deliverReconnect(ctx, user, now)
+	if err == nil || !strings.Contains(err.Error(), "lost reservation response") || sends != 0 {
+		t.Fatalf("claim error was not recognized as unsent: sends=%d err=%v", sends, err)
+	}
+	var attempts int
+	var hasRetry bool
+	must(faults.QueryRowContext(ctx, `
+		SELECT attempts, retry_at IS NOT NULL FROM luxmed_reconnect_delivery WHERE user_id=$1
+	`, user.ID).Scan(&attempts, &hasRetry))
+	if attempts != 1 || !hasRetry {
+		t.Fatalf("persisted claim was not made retryable: attempts=%d retry=%v", attempts, hasRetry)
+	}
+	_, err = faults.ExecContext(ctx, `DROP TRIGGER lose_claim_reply`)
+	must(err)
+	must(runner.deliverReconnect(ctx, user, now.Add(2*time.Minute)))
+	must(runner.deliverReconnect(ctx, user, now.Add(3*time.Minute)))
+	if sends != 1 {
+		t.Fatalf("sends after recovery = %d, want one", sends)
+	}
+}
+
 func TestReconnectEpisodeWriteFailures(t *testing.T) {
 	for _, test := range []struct {
 		name      string
@@ -1173,10 +1222,15 @@ func TestReconnectEpisodeWriteFailures(t *testing.T) {
 			_, err = faults.ExecContext(ctx, `DROP TRIGGER fail_episode`)
 			must(err)
 			if closing {
-				must(runner.renewBrowserSession(ctx, 42, nil))
-				must(runner.renewBrowserSession(ctx, 42, nil))
-				if sends != 0 {
-					t.Fatalf("sent %d stale warnings after recovery", sends)
+				reopened, err := storage.Open(ctx, path)
+				must(err)
+				t.Cleanup(func() { reopened.Close() })
+				restarted := NewRunner(reopened, runner.cryptor, runner.notifier, 0, time.Hour, false)
+				restarted.newClient = runner.newClient
+				must(restarted.renewBrowserSession(ctx, 42, nil))
+				must(restarted.renewBrowserSession(ctx, 42, nil))
+				if sends != 0 || client.logins != 2 {
+					t.Fatalf("restart must recheck before delivery: sends=%d logins=%d", sends, client.logins)
 				}
 			} else if err := runner.CheckWatch(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) || sends != 1 {
 				t.Fatalf("retry did not deliver the warning: err=%v sends=%d", err, sends)

@@ -54,14 +54,15 @@ type ReconnectDeliveryClaim struct {
 	Attempt int
 }
 
-// A claimed delivery can be retried only when the attempt is known to be unsuccessful.
+// On a database error the returned ID identifies the attempted reservation, even if it committed.
 func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time) (ReconnectDeliveryClaim, error) {
 	claim := ReconnectDeliveryClaim{ID: rand.Text()}
 	err := db.sql.QueryRowContext(ctx, `
 		INSERT INTO luxmed_reconnect_delivery (user_id, attempts, claim_id)
 		SELECT user_id, 1, $3 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified
 		    AND EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=$4)
-		ON CONFLICT (user_id) DO UPDATE SET attempts=luxmed_reconnect_delivery.attempts+1, retry_at=NULL, claim_id=excluded.claim_id
+		ON CONFLICT (user_id) DO UPDATE SET attempts=luxmed_reconnect_delivery.attempts+1,
+		    retry_at=NULL, claim_id=excluded.claim_id, last_failure_forbidden=FALSE
 		WHERE `+db.dateTimeSQL("luxmed_reconnect_delivery.retry_at")+` <= `+db.dateTimeSQL("$2")+`
 		RETURNING attempts
 	`, userID, now.UTC(), claim.ID, domain.WatchStatusActive).Scan(&claim.Attempt)
@@ -69,6 +70,20 @@ func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, no
 		return ReconnectDeliveryClaim{}, nil
 	}
 	return claim, err
+}
+
+func (db *DB) LuxMedReconnectDeliveryDue(ctx context.Context, userID int64, now time.Time) (bool, error) {
+	var due bool
+	err := db.sql.QueryRowContext(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM luxmed_reconnect r
+			LEFT JOIN luxmed_reconnect_delivery d ON d.user_id=r.user_id
+			WHERE r.user_id=$1 AND NOT r.notified
+			    AND (d.user_id IS NULL OR `+db.dateTimeSQL("d.retry_at")+` <= `+db.dateTimeSQL("$2")+`)
+			    AND EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status=$3)
+		)
+	`, userID, now.UTC(), domain.WatchStatusActive).Scan(&due)
+	return due, err
 }
 
 // A nonzero forbidden limit records a 403 and suppresses further retries when the episode reaches the limit.
@@ -85,6 +100,7 @@ func (db *DB) RecordLuxMedReconnectRejection(
 	_, err := db.sql.ExecContext(ctx, `
 		UPDATE luxmed_reconnect_delivery
 		SET forbidden_failures=forbidden_failures + CASE WHEN $3 > 0 THEN 1 ELSE 0 END,
+		    last_failure_forbidden=($3 > 0),
 		    retry_at=CASE WHEN $3 > 0 AND forbidden_failures + 1 >= $3
 		                  THEN NULL ELSE COALESCE($2, retry_at) END
 		WHERE user_id=$1 AND claim_id=$4 AND retry_at IS NULL
@@ -93,15 +109,15 @@ func (db *DB) RecordLuxMedReconnectRejection(
 	return err
 }
 
-// ResumeLuxMedReconnectDelivery reopens only attempts stopped by confirmed 403s.
+// ResumeLuxMedReconnectDelivery accelerates confirmed 403s, including legacy capped attempts.
 func (db *DB) ResumeLuxMedReconnectDelivery(ctx context.Context, userID int64, forbiddenLimit int, now time.Time) error {
 	if forbiddenLimit <= 0 {
 		return errors.New("missing reconnect forbidden limit")
 	}
 	_, err := db.sql.ExecContext(ctx, `
 		UPDATE luxmed_reconnect_delivery
-		SET forbidden_failures=0, retry_at=$3
-		WHERE user_id=$1 AND forbidden_failures >= $2 AND retry_at IS NULL
+		SET forbidden_failures=0, retry_at=$3, last_failure_forbidden=FALSE
+		WHERE user_id=$1 AND (last_failure_forbidden OR (forbidden_failures >= $2 AND retry_at IS NULL))
 		    AND EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified)
 	`, userID, forbiddenLimit, now.UTC())
 	return err

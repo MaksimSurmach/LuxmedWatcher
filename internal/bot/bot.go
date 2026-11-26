@@ -136,7 +136,9 @@ func (b *Bot) processUpdates(ctx context.Context, config *tgbotapi.UpdateConfig,
 		}
 		switch {
 		case update.MyChatMember != nil:
-			b.queueBotMembership(update.UpdateID, update.MyChatMember)
+			if err := b.queueBotMembership(ctx, update.UpdateID, update.MyChatMember); err != nil {
+				return err
+			}
 		case update.WidgetQuery != nil:
 			b.handleWidgetQuery(ctx, update.WidgetQuery)
 		default:
