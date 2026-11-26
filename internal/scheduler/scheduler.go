@@ -291,8 +291,15 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 	if err := r.checkWatchUnchanged(ctx, watch); err != nil {
 		return len(seen), errors.Join(searchErr, err)
 	}
+	recipient, err := r.db.UserByID(ctx, user.ID)
+	if err != nil {
+		return len(seen), errors.Join(searchErr, fmt.Errorf("reload notification recipient: %w", err))
+	}
+	if !recipient.IsActive() {
+		return len(seen), errors.Join(searchErr, ErrInactive)
+	}
 	preview := pending[:min(10, len(pending))]
-	messageID, notifyErr := r.notifier.NotifyAppointments(ctx, user, watch, preview, len(pending))
+	messageID, notifyErr := r.notifier.NotifyAppointments(ctx, recipient, watch, preview, len(pending))
 	status, errText := domain.NotificationStatusSent, ""
 	if notifyErr != nil {
 		status, errText = domain.NotificationStatusFailed, "telegram delivery failed"

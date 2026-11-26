@@ -5,10 +5,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"net"
 	"net/http"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -24,14 +25,17 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 	}
 	button := b.actionButton(user, "button.connect_luxmed", "account")
 	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
-		button = newMiniAppButton(button.Text, b.cfg.MiniApp.DashboardURL()+"?tab=settings")
+		button = newMiniAppButton(button.Text, b.dashboardURL(user, "settings"))
 	}
 	msg := tgbotapi.NewMessage(user.TelegramChatID, b.catalog.T(user.Locale, "notification.search_paused"))
 	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": {{button}}}
 	if ctx.Err() != nil {
 		return &scheduler.ReconnectDeliveryRejected{BeforeSend: true}
 	}
-	_, err := b.api.Request(msg)
+	api := *b.api
+	client := &reconnectHTTP{HTTPClient: api.Client, ctx: ctx}
+	api.Client = client
+	_, err := api.Request(msg)
 	if err == nil {
 		return nil
 	}
@@ -46,10 +50,26 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 			return errors.New("telegram permanently rejected reconnect warning")
 		}
 	}
-	if connErr, ok := errors.AsType[*net.OpError](err); ok && connErr.Op == "dial" {
+	if client.failedBeforeConnection {
 		return &scheduler.ReconnectDeliveryRejected{BeforeSend: true}
 	}
 	return errors.New("telegram reconnect delivery outcome unknown")
+}
+
+type reconnectHTTP struct {
+	tgbotapi.HTTPClient
+	ctx                    context.Context
+	failedBeforeConnection bool
+}
+
+func (c *reconnectHTTP) Do(req *http.Request) (*http.Response, error) {
+	var connected atomic.Bool
+	ctx := httptrace.WithClientTrace(c.ctx, &httptrace.ClientTrace{
+		GotConn: func(httptrace.GotConnInfo) { connected.Store(true) },
+	})
+	res, err := c.HTTPClient.Do(req.WithContext(ctx))
+	c.failedBeforeConnection = err != nil && !connected.Load()
+	return res, err
 }
 
 func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
@@ -111,7 +131,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 		b.showMiniApp(ctx, user)
 		return
 	}
-	link, err := browser.ViewerLink(ctx)
+	link, err := browser.ViewerLink(ctx, i18n.Normalize(user.Locale, b.cfg.DefaultLocale))
 	if err != nil {
 		b.logger.Warn("open browser viewer failed", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)

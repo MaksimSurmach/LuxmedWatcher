@@ -61,7 +61,7 @@ func (a *App) Run(ctx context.Context) error {
 	}
 	httpClient := &http.Client{
 		Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second,
-		// A redirect could fail to dial after Telegram already received a POST.
+		// Keep delivery tracing scoped to a single Telegram request.
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	api, err := tgbotapi.NewBotAPIWithClient(a.cfg.TelegramToken, tgbotapi.APIEndpoint, telegramHTTP{
@@ -104,6 +104,7 @@ func (a *App) Run(ctx context.Context) error {
 		PollTimeout:      a.cfg.PollTimeout,
 		Browsers:         browsers,
 		MiniApp:          miniApp,
+		MenuClient:       telegramHTTP{ctx: ctx, client: &http.Client{Timeout: 3 * time.Second}},
 	}, a.logger)
 	runner := scheduler.NewRunner(db, cryptor, tgBot, a.cfg.MinimumInterval, a.cfg.NotificationCooldown, a.cfg.EnableRawLuxMedPayload)
 	runner.UseBrowsers(browsers)
@@ -113,6 +114,7 @@ func (a *App) Run(ctx context.Context) error {
 	dashboardCfg := miniapp.DashboardConfig{
 		MinimumInterval: a.cfg.MinimumInterval,
 		DefaultInterval: a.cfg.DefaultInterval,
+		SyncAppMenu:     tgBot.SyncAppMenu,
 	}
 	var dashboard http.Handler
 	if miniApp != nil {
@@ -168,5 +170,9 @@ type telegramHTTP struct {
 }
 
 func (c telegramHTTP) Do(req *http.Request) (*http.Response, error) {
-	return c.client.Do(req.WithContext(c.ctx))
+	// Bot API requests have no context unless the caller supplies one.
+	if req.Context() == context.Background() {
+		req = req.WithContext(c.ctx)
+	}
+	return c.client.Do(req)
 }

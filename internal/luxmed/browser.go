@@ -67,7 +67,7 @@ func (b *Browser) SupportsBackgroundRenewal() bool {
 	return b.key != ""
 }
 
-func (b *Browser) ViewerLink(ctx context.Context) (string, error) {
+func (b *Browser) ViewerLink(ctx context.Context, locale string) (string, error) {
 	body, err := b.Client().request(ctx, http.MethodPost, "/viewer", nil)
 	if err != nil {
 		return "", err
@@ -83,6 +83,7 @@ func (b *Browser) ViewerLink(ctx context.Context) (string, error) {
 	}
 	link := b.viewer
 	link.Path = "/connect"
+	link.RawQuery = url.Values{"lang": {locale}}.Encode()
 	link.Fragment = parsed.Ticket
 	return link.String(), nil
 }

@@ -2,10 +2,13 @@ package bot
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/http/httptrace"
 	"strings"
 	"testing"
 	"time"
@@ -89,22 +92,27 @@ func (f reconnectTransportFunc) RoundTrip(req *http.Request) (*http.Response, er
 
 func TestNotifyLuxMedReconnectRetriesOnlyKnownUnsentRequests(t *testing.T) {
 	for _, test := range []struct {
-		name     string
-		canceled bool
-		failure  error
-		retry    bool
+		name      string
+		canceled  bool
+		connected bool
+		failure   error
+		retry     bool
 	}{
 		{name: "canceled before send", canceled: true, retry: true},
 		{name: "connection refused", failure: &net.OpError{Op: "dial", Err: errors.New("connection refused")}, retry: true},
-		{name: "canceled during request", failure: context.Canceled},
-		{name: "connection lost after send", failure: &net.OpError{Op: "read", Err: errors.New("connection reset")}},
+		{name: "canceled before connection", failure: context.Canceled, retry: true},
+		{name: "canceled after connection", connected: true, failure: context.Canceled},
+		{name: "connection lost after send", connected: true, failure: &net.OpError{Op: "read", Err: errors.New("connection reset")}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			b := testBot(t)
 			user := createUser(t, b, 101, domain.UserStatusActive)
-			b.api.Client = &http.Client{Transport: reconnectTransportFunc(func(*http.Request) (*http.Response, error) {
+			b.api.Client = &http.Client{Transport: reconnectTransportFunc(func(req *http.Request) (*http.Response, error) {
 				if test.canceled {
 					t.Error("attempted to send with an already canceled context")
+				}
+				if trace := httptrace.ContextClientTrace(req.Context()); trace != nil && test.connected {
+					trace.GotConn(httptrace.GotConnInfo{})
 				}
 				return nil, test.failure
 			})}
@@ -118,5 +126,41 @@ func TestNotifyLuxMedReconnectRetriesOnlyKnownUnsentRequests(t *testing.T) {
 				t.Fatalf("retryable = %t, want %t (%v)", retry, test.retry, err)
 			}
 		})
+	}
+}
+
+func TestNotifyLuxMedReconnectRetriesTLSHandshakeTimeout(t *testing.T) {
+	b := testBot(t)
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	hello := make(chan struct{}, 1)
+	release := make(chan struct{})
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("sendMessage reached Telegram despite the handshake timeout")
+	}))
+	server.TLS = &tls.Config{
+		GetConfigForClient: func(*tls.ClientHelloInfo) (*tls.Config, error) {
+			hello <- struct{}{}
+			<-release
+			return nil, nil
+		},
+	}
+	server.StartTLS()
+	t.Cleanup(server.Close)
+	t.Cleanup(func() { close(release) })
+
+	transport := server.Client().Transport.(*http.Transport).Clone()
+	transport.TLSHandshakeTimeout = 250 * time.Millisecond
+	t.Cleanup(transport.CloseIdleConnections)
+	b.api.Client = &http.Client{Transport: transport}
+	b.api.SetAPIEndpoint(server.URL + "/bot%s/%s")
+	err := b.NotifyLuxMedReconnect(t.Context(), user)
+	select {
+	case <-hello:
+	default:
+		t.Fatal("request did not reach the TLS handshake")
+	}
+	rejected, ok := errors.AsType[*scheduler.ReconnectDeliveryRejected](err)
+	if !ok || !rejected.BeforeSend {
+		t.Fatalf("TLS timeout must be retryable before send: %v", err)
 	}
 }

@@ -3,15 +3,18 @@ package bot
 import (
 	"bytes"
 	"compress/zlib"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
@@ -181,5 +184,216 @@ func TestBookCommandOpensOfficialReservationPage(t *testing.T) {
 	case <-sent:
 	default:
 		t.Fatal("booking link was not sent")
+	}
+}
+
+func TestAppointmentNotificationLanguages(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		locale, title, more, date, days string
+	}{
+		{"pl", "Znaleziono wolne terminy · ", "Więcej w historii: ", "02.07.2026 · 01:30", "Dni: "},
+		{"en", "Appointment times found · ", "More in history: ", "Jul 2, 2026 · 01:30", "Days: "},
+		{"ru", "Свободное время найдено · ", "Ещё в истории: ", "02.07.2026 · 01:30", "Дней: "},
+		{"be", "Знойдзены вольны час · ", "Яшчэ варыянтаў у гісторыі: ", "02.07.2026 · 01:30", "Дзён: "},
+		{"uk", "Знайдено вільний час · ", "Ще варіантів в історії: ", "02.07.2026 · 01:30", "Днів: "},
+	}
+	for _, tc := range tests {
+		t.Run(tc.locale, func(t *testing.T) {
+			var b *Bot
+			b = testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+				}
+				check := func(body string, expected ...string) {
+					for _, part := range expected {
+						if !strings.Contains(body, part) {
+							t.Errorf("missing %q in %s", part, body)
+						}
+					}
+				}
+				switch r.URL.Path {
+				case "/botfake/sendWidget":
+					body := r.Form.Get("html")
+					check(body, `lang="`+tc.locale+`"`, tc.date, luxmed.ReservationPageURL,
+						"Konsultacja dermatologiczna", "dr Żółć", "Placówka LUX MED", "ul. Główna",
+						b.catalog.T(tc.locale, "button.book_portal"), b.catalog.T(tc.locale, "notification.booking_hint"))
+					check(r.Form.Get("caption"), tc.date, "Konsultacja dermatologiczna")
+					w.WriteHeader(http.StatusNotFound)
+					fmt.Fprint(w, `{"ok":false,"error_code":404}`)
+				case "/botfake/sendMessage":
+					check(r.Form.Get("text"), tc.date, "Konsultacja dermatologiczna", "ul. Główna",
+						b.catalog.T(tc.locale, "notification.booking_hint"))
+					check(r.Form.Get("reply_markup"), b.catalog.T(tc.locale, "button.book_portal"), luxmed.ReservationPageURL)
+					fmt.Fprint(w, `{"ok":true,"result":{"message_id":93}}`)
+				default:
+					t.Errorf("unexpected Telegram method %s", r.URL.Path)
+				}
+			})
+			user := createUser(t, b, 101, domain.UserStatusActive)
+			user.Locale = tc.locale
+			watch := domain.Watch{ID: 30, UserID: user.ID, ServiceName: "Konsultacja dermatologiczna"}
+			history := []domain.AppointmentHistory{{Appointment: domain.Appointment{
+				DateTime:     time.Date(2026, 7, 1, 23, 30, 0, 0, time.UTC),
+				DoctorName:   "dr Żółć",
+				FacilityName: "Placówka LUX MED",
+				Address:      "ul. Główna",
+			}}}
+			for _, count := range []int{1, 2, 5} {
+				text := b.appointmentNotification(tc.locale, watch, history, count, 1)
+				if !strings.Contains(text, fmt.Sprint(tc.title, count)) {
+					t.Errorf("count %d: unexpected notification %q", count, text)
+				}
+				if count == 1 && strings.Contains(text, tc.more) {
+					t.Errorf("one slot must not show additional results: %q", text)
+				}
+				if count > 1 && !strings.Contains(text, fmt.Sprint(tc.more, count-1)) {
+					t.Errorf("count %d: unexpected additional results in %q", count, text)
+				}
+				want := fmt.Sprint(tc.days, count)
+				if got := b.catalog.T(tc.locale, "button.next_days", count); got != want {
+					t.Errorf("count %d: search period %q, want %q", count, got, want)
+				}
+			}
+			if _, err := b.NotifyAppointments(t.Context(), user, watch, history, 5); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestBotLanguageSurvivesTelegramProfileUpdates(t *testing.T) {
+	t.Parallel()
+
+	b := testBot(t)
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	ctx := t.Context()
+	msg := &tgbotapi.Message{
+		Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
+		From: &tgbotapi.User{ID: user.TelegramUserID, LanguageCode: "en-US"},
+	}
+	for _, locale := range i18n.SupportedLocales {
+		t.Run(locale, func(t *testing.T) {
+			b.handleAction(ctx, user.TelegramUserID, "lang:"+locale)
+			got, err := b.upsertUser(ctx, msg)
+			if err != nil || got.Locale != locale {
+				t.Fatalf("language after next Telegram message = %q, error = %v", got.Locale, err)
+			}
+		})
+	}
+}
+
+func TestAppMenuUsesSavedLanguageForLabelAndLaunchURL(t *testing.T) {
+	t.Parallel()
+
+	type menu struct {
+		Text   string
+		WebApp struct{ URL string } `json:"web_app"`
+	}
+	menus := make(chan menu, 2)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botfake/setChatMenuButton" {
+			t.Errorf("unexpected Telegram method: %s", r.URL.Path)
+		}
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		var button menu
+		if err := json.Unmarshal([]byte(r.Form.Get("menu_button")), &button); err != nil {
+			t.Error(err)
+		}
+		if r.Form.Get("chat_id") != "101" {
+			t.Errorf("unexpected chat ID: %s", r.Form.Get("chat_id"))
+		}
+		menus <- button
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	})
+	var err error
+	b.cfg.MiniApp, err = luxmed.NewMiniApp("http://localhost", "https://app.example", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	for _, tc := range []struct{ locale, label string }{
+		{locale: "pl", label: "Otwórz aplikację"},
+		{locale: "uk", label: "Відкрити застосунок"},
+	} {
+		if err := b.db.SetUserPreferences(t.Context(), user.ID, tc.locale, domain.City{}); err != nil {
+			t.Fatal(err)
+		}
+		b.SyncAppMenu(t.Context(), user.ID)
+		select {
+		case got := <-menus:
+			if got.Text != tc.label || got.WebApp.URL != "https://app.example/app?lang="+tc.locale {
+				t.Errorf("menu after saving %s: %+v", tc.locale, got)
+			}
+		default:
+			t.Fatalf("menu was not synced after saving %s", tc.locale)
+		}
+	}
+}
+
+func TestAppMenuRetriesTemporaryTelegramFailures(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		firstStatus  int
+		secondStatus int
+		wantAttempts int32
+	}{
+		{name: "recovers from gateway failure", firstStatus: http.StatusServiceUnavailable, secondStatus: http.StatusOK, wantAttempts: 2},
+		{name: "stops after one retry", firstStatus: http.StatusServiceUnavailable, secondStatus: http.StatusServiceUnavailable, wantAttempts: 2},
+		{name: "does not retry a rejected request", firstStatus: http.StatusBadRequest, wantAttempts: 1},
+		{name: "does not retry a rate limit immediately", firstStatus: http.StatusTooManyRequests, wantAttempts: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/botfake/setChatMenuButton" {
+					t.Errorf("unexpected Telegram method: %s", r.URL.Path)
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+				}
+				var button struct {
+					Text   string
+					WebApp struct{ URL string } `json:"web_app"`
+				}
+				if err := json.Unmarshal([]byte(r.Form.Get("menu_button")), &button); err != nil {
+					t.Error(err)
+				}
+				if button.Text != "Відкрити застосунок" || button.WebApp.URL != "https://app.example/app?lang=uk" {
+					t.Errorf("unexpected menu payload: %+v", button)
+				}
+				status := tc.firstStatus
+				if attempts.Add(1) > 1 && tc.secondStatus != 0 {
+					status = tc.secondStatus
+				}
+				switch status {
+				case http.StatusOK:
+					fmt.Fprint(w, `{"ok":true,"result":true}`)
+				case http.StatusServiceUnavailable:
+					http.Error(w, "upstream unavailable", status)
+				default:
+					w.WriteHeader(status)
+					fmt.Fprintf(w, `{"ok":false,"error_code":%d,"parameters":{"retry_after":10}}`, status)
+				}
+			})
+			var err error
+			b.cfg.MiniApp, err = luxmed.NewMiniApp("http://localhost", "https://app.example", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			user := createUser(t, b, 101, domain.UserStatusActive)
+			if err := b.db.SetUserPreferences(t.Context(), user.ID, "uk", domain.City{}); err != nil {
+				t.Fatal(err)
+			}
+			b.SyncAppMenu(t.Context(), user.ID)
+			if got := attempts.Load(); got != tc.wantAttempts {
+				t.Errorf("menu updates = %d, want %d", got, tc.wantAttempts)
+			}
+		})
 	}
 }
