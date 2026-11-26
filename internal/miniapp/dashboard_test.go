@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -57,10 +58,15 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		t.Fatal(err)
 	}
 	const origin = "https://app.example"
+	var unauthorized atomic.Bool
 	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/session" {
 			t.Errorf("unexpected browser route: %s", r.URL.Path)
 			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if unauthorized.Load() {
+			w.WriteHeader(http.StatusUnauthorized)
 		}
 	}))
 	t.Cleanup(worker.Close)
@@ -173,6 +179,31 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 			}
 		}
 	}
+	unauthorized.Store(true)
+	probe := request("account", "{}", origin, otherToken, http.StatusOK)
+	if !strings.Contains(probe.Body.String(), `"state":"needs_login","ReconnectRequired":false`) {
+		t.Fatalf("standalone 401 should request login: %s", probe.Body)
+	}
+	if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	d.checkAccount = func(ctx context.Context, user domain.User) (bool, error) {
+		required, err := runner.CheckBrowserSession(ctx, user)
+		// Simulate background recovery winning as soon as the probe releases the account.
+		if resolveErr := db.ResolveLuxMedReconnect(ctx, user.ID); resolveErr != nil {
+			t.Error(resolveErr)
+		}
+		return required, err
+	}
+	probe = request("account", "{}", origin, otherToken, http.StatusOK)
+	if !strings.Contains(probe.Body.String(), `"state":"needs_login","ReconnectRequired":true`) {
+		t.Fatalf("probe lost the episode it observed: %s", probe.Body)
+	}
+	if load := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(load.Body.String(), `"ReconnectRequired":false`) {
+		t.Fatalf("load did not observe the subsequent recovery: %s", load.Body)
+	}
+	d.checkAccount = runner.CheckBrowserSession
+	unauthorized.Store(false)
 	request("load", "{}", origin, d.sessions.issue(owner.TelegramUserID, time.Now().Add(-2*time.Hour)), http.StatusUnauthorized)
 	request("load", "{}", origin, "", http.StatusUnauthorized)
 	request("settings", `{"Locale":"pl","CityID":1}`, origin, token, http.StatusNoContent)

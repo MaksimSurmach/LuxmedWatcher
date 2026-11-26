@@ -415,10 +415,11 @@ func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
 }
 
 // CheckBrowserSession confirms a manual sign-in and restores saved active searches.
-func (r *Runner) CheckBrowserSession(ctx context.Context, user domain.User) error {
+// On authentication failure it also reports whether a reconnect episode was open during the probe.
+func (r *Runner) CheckBrowserSession(ctx context.Context, user domain.User) (bool, error) {
 	browser := r.browsers[user.TelegramUserID]
 	if browser == nil {
-		return luxmed.ErrAuthentication
+		return false, luxmed.ErrAuthentication
 	}
 	return r.probeBrowserSession(ctx, user, browser, false)
 }
@@ -428,37 +429,49 @@ func (r *Runner) renewBrowserSession(ctx context.Context, telegramID int64, brow
 	if err != nil {
 		return fmt.Errorf("load LuxMed browser session owner: %w", err)
 	}
-	return r.probeBrowserSession(ctx, user, browser, true)
+	_, err = r.probeBrowserSession(ctx, user, browser, true)
+	return err
 }
 
-func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, browser *luxmed.Browser, background bool) error {
+func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, browser *luxmed.Browser, background bool) (bool, error) {
 	if !user.IsActive() {
-		return nil
+		return false, nil
 	}
 	state, _ := r.acquireAccount(user.ID, false)
 	if state == nil {
-		return luxmed.ErrBrowserBusy
+		return false, luxmed.ErrBrowserBusy
 	}
 	defer r.releaseAccount(state)
 
 	if browser == nil {
-		return r.deliverReconnect(ctx, user, time.Now())
+		return false, r.deliverReconnect(ctx, user, time.Now())
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	err := browser.Check(probeCtx)
 	cancel()
 	if err == nil {
-		return r.resolveReconnect(ctx, user.ID)
+		return false, r.resolveReconnect(ctx, user.ID)
 	}
-	if !background || errors.Is(err, luxmed.ErrBrowserBusy) {
-		return err
+	if !background {
+		if !errors.Is(err, luxmed.ErrAuthentication) {
+			return false, err
+		}
+		// Keep the episode and the rejected probe in the same account operation.
+		required, readErr := r.db.LuxMedReconnectRequired(ctx, user.ID)
+		if readErr != nil {
+			return false, fmt.Errorf("read LuxMed reconnect status: %w", readErr)
+		}
+		return required, err
+	}
+	if errors.Is(err, luxmed.ErrBrowserBusy) {
+		return false, err
 	}
 	if errors.Is(err, luxmed.ErrAuthentication) {
 		recordCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return r.requireReconnect(recordCtx, user)
+		return false, r.requireReconnect(recordCtx, user)
 	}
-	return errors.Join(err, r.deliverReconnect(ctx, user, time.Now()))
+	return false, errors.Join(err, r.deliverReconnect(ctx, user, time.Now()))
 }
 
 func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accountCheck) (luxmed.Client, bool, error) {

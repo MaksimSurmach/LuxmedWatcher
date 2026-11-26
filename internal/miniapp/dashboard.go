@@ -36,7 +36,7 @@ type dashboard struct {
 	db           *storage.DB
 	browsers     map[int64]*luxmed.Browser
 	connect      func(context.Context, int64) (string, error)
-	checkAccount func(context.Context, domain.User) error
+	checkAccount func(context.Context, domain.User) (bool, error)
 }
 
 func Dashboard(
@@ -44,7 +44,7 @@ func Dashboard(
 	db *storage.DB,
 	browsers map[int64]*luxmed.Browser,
 	app *luxmed.MiniApp,
-	checkAccount func(context.Context, domain.User) error,
+	checkAccount func(context.Context, domain.User) (bool, error),
 ) http.Handler {
 	d := &dashboard{
 		cfg: cfg, key: productionKey(), sessions: newSessions(), db: db, browsers: browsers,
@@ -424,7 +424,7 @@ func (d *dashboard) setStatus(w http.ResponseWriter, r *http.Request, user domai
 
 func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {
 	ctx := r.Context()
-	err := d.checkAccount(ctx, user)
+	required, err := d.checkAccount(ctx, user)
 	result := struct {
 		State             string `json:"state"`
 		ReconnectRequired bool
@@ -434,7 +434,7 @@ func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.
 	case err == nil:
 	case errors.Is(err, luxmed.ErrAuthentication):
 		result.State = "needs_login"
-		result.ReconnectRequired, err = d.db.LuxMedReconnectRequired(ctx, user.ID)
+		result.ReconnectRequired = required
 	case errors.Is(err, luxmed.ErrBrowserBusy):
 		reply(w, http.StatusTooManyRequests, nil)
 		return
@@ -442,7 +442,7 @@ func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
-	dashboardResult(w, result, err)
+	reply(w, http.StatusOK, result)
 }
 
 func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User) {

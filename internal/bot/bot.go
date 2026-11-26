@@ -102,36 +102,49 @@ func (b *Bot) Run(ctx context.Context) error {
 	var delay time.Duration
 	for ctx.Err() == nil {
 		updates, err := b.getUpdates(config)
-		if err != nil {
-			b.logger.Warn("Telegram polling failed", "retrying", true)
-			delay = min(30*time.Second, max(time.Second, 2*delay))
-			if apiErr, ok := errors.AsType[*tgbotapi.Error](err); ok && apiErr.RetryAfter > 0 {
-				delay = max(delay, time.Duration(apiErr.RetryAfter)*time.Second)
-			}
-			timer := time.NewTimer(delay + time.Duration(randv2.IntN(500))*time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil
-			case <-timer.C:
-			}
+		if err == nil {
+			err = b.processUpdates(ctx, &config, updates)
+		}
+		if err == nil {
+			delay = 0
 			continue
 		}
-		delay = 0
-		for _, update := range updates {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if update.UpdateID < config.Offset {
-				continue
-			}
-			if update.WidgetQuery != nil {
-				b.handleWidgetQuery(ctx, update.WidgetQuery)
-			} else {
-				b.handleUpdate(ctx, update.Update)
-			}
-			config.Offset = update.UpdateID + 1
+		b.logger.Warn("Telegram update loop failed", "retrying", true)
+		delay = min(30*time.Second, max(time.Second, 2*delay))
+		if apiErr, ok := errors.AsType[*tgbotapi.Error](err); ok && apiErr.RetryAfter > 0 {
+			delay = max(delay, time.Duration(apiErr.RetryAfter)*time.Second)
 		}
+		timer := time.NewTimer(delay + time.Duration(randv2.IntN(500))*time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
+func (b *Bot) processUpdates(ctx context.Context, config *tgbotapi.UpdateConfig, updates []telegramUpdate) error {
+	for _, update := range updates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if update.UpdateID < config.Offset {
+			continue
+		}
+		switch {
+		case update.MyChatMember != nil:
+			// Advancing past any later update would acknowledge this one as well.
+			if err := b.handleBotMembership(ctx, update.MyChatMember); err != nil {
+				return err
+			}
+		case update.WidgetQuery != nil:
+			b.handleWidgetQuery(ctx, update.WidgetQuery)
+		default:
+			b.handleUpdate(ctx, update.Update)
+		}
+		config.Offset = update.UpdateID + 1
 	}
 	return nil
 }
@@ -225,10 +238,6 @@ func truncateMessage(text string, limit int) string {
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
-	if update.MyChatMember != nil {
-		b.handleBotMembership(ctx, update.MyChatMember)
-		return
-	}
 	if update.CallbackQuery != nil {
 		b.handleCallback(ctx, update.CallbackQuery)
 		return

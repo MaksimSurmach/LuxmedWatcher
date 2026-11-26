@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 	_ "time/tzdata"
 
@@ -20,6 +21,7 @@ type DB struct {
 	sql                *sql.DB
 	postgres           bool
 	reconnectDirectory string
+	pendingRejections  sync.Map // user ID to a confirmed rejection awaiting a durable write
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {

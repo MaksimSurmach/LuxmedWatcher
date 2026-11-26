@@ -137,8 +137,12 @@ func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
 	err := db.sql.QueryRowContext(ctx, reconnectRequiredQuery+`
 		OR EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status IN ($2, $3) AND `+watchSignInError+`)`,
 		userID, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&pending)
-	if err != nil || !pending {
+	if err != nil {
 		return err
+	}
+	if !pending {
+		db.pendingRejections.Delete(userID)
+		return nil
 	}
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -149,7 +153,11 @@ func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
 	if err := resolveLuxMedReconnect(ctx, tx, userID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	db.pendingRejections.Delete(userID)
+	return nil
 }
 
 func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64) error {

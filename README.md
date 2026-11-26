@@ -25,7 +25,7 @@ Set `DATABASE_URL` to a PostgreSQL URL to select PostgreSQL. If the URL is empty
 
 Selecting another database starts from the data already in that database. Keep the SQLite volume if it contains accounts or watches you want to retain. Back up the database and keep `APP_MASTER_KEY` separately.
 
-Set `RECONNECT_JOURNAL_DIR` to a writable directory on persistent storage to preserve confirmed Telegram rejections across a restart during a database outage. The default is `<DATABASE_PATH>.reconnect`. If PostgreSQL is configured and that default is unavailable, the app logs a warning and starts using PostgreSQL alone for rejection records. When an attempt has no durable outcome, the app suppresses automatic retries to avoid a possible duplicate.
+Set `RECONNECT_JOURNAL_DIR` to a writable directory on persistent storage to preserve confirmed Telegram rejections across a restart during a database outage. The default is `<DATABASE_PATH>.reconnect`. If PostgreSQL is configured and that default is unavailable, the app logs a warning and starts using PostgreSQL alone for durable rejection records. If neither store is available, the running process holds confirmed rejections in memory and retries writing them when the database recovers. After a restart, attempts without a durable outcome stay paused to avoid a possible duplicate.
 
 ## Telegram workflow
 

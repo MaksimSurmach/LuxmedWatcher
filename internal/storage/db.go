@@ -172,7 +172,11 @@ func (db *DB) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.LuxM
 	if err := resolveLuxMedReconnect(ctx, tx, account.UserID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	db.pendingRejections.Delete(account.UserID)
+	return nil
 }
 
 func (db *DB) LuxMedAccount(ctx context.Context, userID int64) (domain.LuxMedAccount, error) {

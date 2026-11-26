@@ -820,6 +820,47 @@ func TestReconnectJournalReplayIsScopedToDeliveryClaim(t *testing.T) {
 	})
 }
 
+func TestReconnectRejectionIsRetriedWithoutDiskJournal(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		db.reconnectDirectory = ""
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		must(err)
+		unavailable, cancel := context.WithCancel(ctx)
+		cancel()
+		retryAt := now.Add(time.Hour)
+		if err := db.JournalReconnectRejection(unavailable, user.ID, claim, retryAt, 4); !errors.Is(err, context.Canceled) {
+			t.Fatalf("write failure = %v", err)
+		}
+		if err := db.ReplayReconnectRejection(unavailable, user.ID); !errors.Is(err, context.Canceled) {
+			t.Fatalf("replay during outage = %v", err)
+		}
+		must(db.ReplayReconnectRejection(ctx, user.ID))
+		must(db.ReplayReconnectRejection(ctx, user.ID))
+		early, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(time.Minute))
+		must(err)
+		if early.Attempt != 0 {
+			t.Fatalf("retry ignored its cooldown: %+v", early)
+		}
+		next, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, retryAt.Add(time.Second))
+		must(err)
+		if next.Attempt != 2 || next.ID == claim.ID {
+			t.Fatalf("retry was not restored: %+v", next)
+		}
+	})
+}
+
 func TestWatchesAndReconnectStateStayConsistentDuringRecovery(t *testing.T) {
 	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
 		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})

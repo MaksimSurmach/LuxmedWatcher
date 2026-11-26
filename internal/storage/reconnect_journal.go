@@ -40,21 +40,29 @@ func (db *DB) JournalReconnectRejection(
 	retryAt time.Time,
 	forbiddenLimit int,
 ) error {
-	if db.reconnectDirectory == "" {
-		return db.RecordLuxMedReconnectRejection(ctx, userID, claim, retryAt, forbiddenLimit)
-	}
 	outcome := reconnectRejection{Claim: claim, RetryAt: retryAt, ForbiddenLimit: forbiddenLimit}
-	if err := db.writeReconnectRejection(userID, outcome); err != nil {
-		// The primary database can still preserve the outcome if the local journal fails.
-		if dbErr := db.RecordLuxMedReconnectRejection(ctx, userID, claim, retryAt, forbiddenLimit); dbErr != nil {
-			return errors.Join(fmt.Errorf("write reconnect journal: %w", err), dbErr)
+	var journalErr error
+	if db.reconnectDirectory != "" {
+		journalErr = db.writeReconnectRejection(userID, outcome)
+		if journalErr == nil {
+			return db.ReplayReconnectRejection(ctx, userID)
 		}
-		return nil
+		journalErr = fmt.Errorf("write reconnect journal: %w", journalErr)
 	}
-	return db.ReplayReconnectRejection(ctx, userID)
+	if err := db.persistReconnectRejection(ctx, userID, outcome); err != nil {
+		db.pendingRejections.Store(userID, outcome)
+		return errors.Join(journalErr, err)
+	}
+	return nil
 }
 
 func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error {
+	if pending, ok := db.pendingRejections.Load(userID); ok {
+		if err := db.persistReconnectRejection(ctx, userID, pending.(reconnectRejection)); err != nil {
+			return fmt.Errorf("persist pending reconnect rejection: %w", err)
+		}
+		db.pendingRejections.CompareAndDelete(userID, pending)
+	}
 	if db.reconnectDirectory == "" {
 		return nil
 	}
@@ -70,14 +78,15 @@ func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error 
 	if err := json.Unmarshal(payload, &outcome); err != nil {
 		return fmt.Errorf("decode reconnect journal: %w", err)
 	}
-	err = db.RecordLuxMedReconnectRejection(
-		ctx, userID, outcome.Claim, outcome.RetryAt, outcome.ForbiddenLimit,
-	)
-	if err != nil {
+	if err := db.persistReconnectRejection(ctx, userID, outcome); err != nil {
 		return fmt.Errorf("persist reconnect journal: %w", err)
 	}
 	// The SQL update is idempotent and scoped to the original delivery claim.
 	return os.Remove(path)
+}
+
+func (db *DB) persistReconnectRejection(ctx context.Context, userID int64, outcome reconnectRejection) error {
+	return db.RecordLuxMedReconnectRejection(ctx, userID, outcome.Claim, outcome.RetryAt, outcome.ForbiddenLimit)
 }
 
 func (db *DB) reconnectRejectionPath(userID int64) string {

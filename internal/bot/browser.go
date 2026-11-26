@@ -21,22 +21,20 @@ import (
 
 const reconnectForbiddenLimit = 4
 
-func (b *Bot) handleBotMembership(ctx context.Context, update *tgbotapi.ChatMemberUpdated) {
+func (b *Bot) handleBotMembership(ctx context.Context, update *tgbotapi.ChatMemberUpdated) error {
 	if b.runner == nil || !privateChat(&update.Chat, &update.From) ||
 		update.OldChatMember.Status != "kicked" || update.NewChatMember.Status != "member" ||
 		update.NewChatMember.User == nil || update.NewChatMember.User.ID != b.api.Self.ID {
-		return
+		return nil
 	}
 	user, err := b.db.UserByTelegramID(ctx, update.From.ID)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !user.IsActive()) {
-		return
-	}
-	if err == nil {
-		err = b.runner.ResumeLuxMedReconnectDelivery(ctx, user.ID, reconnectForbiddenLimit)
+		return nil
 	}
 	if err != nil {
-		b.logger.Warn("resume reconnect warning after Telegram unblock", "err", err)
+		return err
 	}
+	return b.runner.ResumeLuxMedReconnectDelivery(ctx, user.ID, reconnectForbiddenLimit)
 }
 
 func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error {
@@ -118,7 +116,8 @@ func (c *reconnectHTTP) Do(req *http.Request) (*http.Response, error) {
 func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
 	if b.cfg.Browsers != nil {
 		if b.runner != nil {
-			return b.runner.CheckBrowserSession(ctx, user)
+			_, err := b.runner.CheckBrowserSession(ctx, user)
+			return err
 		}
 		browser := b.cfg.Browsers[user.TelegramUserID]
 		if browser == nil {

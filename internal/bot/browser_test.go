@@ -3,12 +3,14 @@ package bot
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
+	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
 func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
@@ -34,13 +37,21 @@ func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":42}}`)
 	})
 	ctx := t.Context()
-	user := createUser(t, b, 42, domain.UserStatusActive)
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
+	path := filepath.Join(t.TempDir(), "unblock.sqlite")
+	db, err := storage.Open(ctx, path)
+	must(err)
+	t.Cleanup(func() { db.Close() })
+	b.db = db
+	faults, err := sql.Open("sqlite", path)
+	must(err)
+	t.Cleanup(func() { faults.Close() })
+	user := createUser(t, b, 42, domain.UserStatusActive)
 	id, err := b.db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 1, NextDays: 1})
 	must(err)
 	watch, err := b.db.Watch(ctx, id)
@@ -76,8 +87,24 @@ func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
 	if len(updates) != 1 {
 		t.Fatalf("received %d membership updates", len(updates))
 	}
+	updates = append(updates, telegramUpdate{Update: tgbotapi.Update{UpdateID: 2}})
+	config := tgbotapi.NewUpdate(0)
+	_, err = faults.ExecContext(ctx, `
+		CREATE TRIGGER fail_rearm BEFORE UPDATE ON luxmed_reconnect_delivery
+		BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END
+	`)
+	must(err)
+	if err := b.processUpdates(ctx, &config, updates); err == nil || config.Offset != 0 {
+		t.Fatalf("failed rearm acknowledged an update: offset=%d err=%v", config.Offset, err)
+	}
+	_, err = faults.ExecContext(ctx, `DROP TRIGGER fail_rearm`)
+	must(err)
 	for range 2 {
-		b.handleUpdate(ctx, updates[0].Update)
+		config.Offset = 0 // Telegram can redeliver an unacknowledged update after restart.
+		must(b.processUpdates(ctx, &config, updates))
+		if config.Offset != 3 {
+			t.Fatalf("successful retry did not advance the offset: %d", config.Offset)
+		}
 		if err := runner.CheckWatch(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
 			t.Fatalf("check watch: %v", err)
 		}
