@@ -5,7 +5,97 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { checkPortal, observeSession, openProfile, waitForLogin } from './session.mjs';
+import { checkPortal, observeSession, openProfile, probePortal, waitForLogin } from './session.mjs';
+
+test('only the current navigation can confirm an expired session', async () => {
+  const origin = 'https://portal.example.test';
+  const login = `${origin}/PatientPortal/NewPortal/Page/Account/Login`;
+  const page = Object.assign(new EventEmitter(), {
+    url: () => login,
+    goto: async target => ({ url: () => target, status: () => 401, ok: () => false }),
+  });
+  assert.equal(await checkPortal(page, origin), 'needs_login');
+  page.goto = async () => { throw new Error('navigation timed out before receiving a response'); };
+  assert.equal(await checkPortal(page, origin), 'unavailable');
+  page.goto = async target => ({ url: () => target, status: () => 503, ok: () => false });
+  assert.equal(await checkPortal(page, origin), 'unavailable');
+  page.goto = async () => ({ url: () => login, status: () => 200, ok: () => true });
+  assert.equal(await checkPortal(page, origin), 'needs_login');
+});
+
+test('a login document reached by script during the current reservation check is confirmed', async () => {
+  const origin = 'https://portal.example.test';
+  const frame = {};
+  const response = (url, status, navigation = true) => ({
+    url: () => url,
+    status: () => status,
+    ok: () => status === 200,
+    request: () => ({ isNavigationRequest: () => navigation, frame: () => frame }),
+  });
+  const login = `${origin}/PatientPortal/NewPortal/Page/Account/Login`;
+  const page = Object.assign(new EventEmitter(), {
+    mainFrame: () => frame,
+    goto: async target => response(target, 200),
+    getByPlaceholder: () => ({
+      waitFor: async () => {
+        page.emit('response', response(login, 200, false));
+        page.emit('response', response(login, 503));
+        page.emit('response', response(login, 200));
+        throw new Error('reservation form was replaced by the login document');
+      },
+    }),
+  });
+  assert.equal(await checkPortal(page, origin), 'needs_login');
+  page.goto = async target => {
+    page.emit('response', response(target, 200));
+    page.emit('response', response(login, 200));
+    throw new Error('reservation navigation was interrupted by the login document');
+  };
+  assert.equal(await checkPortal(page, origin), 'needs_login');
+  page.goto = async target => {
+    page.emit('response', response(target, 401));
+    throw new Error('navigation interrupted after HTTP 401');
+  };
+  assert.equal(await checkPortal(page, origin), 'needs_login');
+  assert.equal(page.listenerCount('response'), 0);
+});
+
+test('the reservation probe preserves 429 and Retry-After from the current portal navigation', async () => {
+  const origin = 'https://portal.example.test';
+  const frame = {};
+  const response = (url, retryAfter, navigation = true, requestFrame = frame) => ({
+    url: () => url,
+    status: () => 429,
+    ok: () => false,
+    headers: () => retryAfter ? { 'retry-after': retryAfter } : {},
+    request: () => ({ isNavigationRequest: () => navigation, frame: () => requestFrame }),
+  });
+  const retryAfter = 'Wed, 02 Dec 2026 12:00:00 GMT';
+  const page = Object.assign(new EventEmitter(), {
+    mainFrame: () => frame,
+    goto: async target => response(target, retryAfter),
+  });
+
+  assert.deepEqual(await probePortal(page, origin), { status: 429, retryAfter });
+  assert.equal(await checkPortal(page, origin), 'unavailable');
+  page.goto = async target => response(target);
+  assert.deepEqual(await probePortal(page, origin), { status: 429 });
+
+  page.goto = async target => {
+    page.emit('response', response(target, '120'));
+    throw new Error('navigation interrupted after receiving 429');
+  };
+  assert.deepEqual(await probePortal(page, origin), { status: 429, retryAfter: '120' });
+
+  page.goto = async target => {
+    page.emit('response', response(target, '120', false));
+    page.emit('response', response(target, '120', true, {}));
+    page.emit('response', response(target.replace(origin, 'https://other.example.test'), '120'));
+    throw new Error('navigation timed out without a reservation response');
+  };
+  assert.deepEqual(await probePortal(page, origin), { status: 503 });
+  assert.equal(page.listenerCount('response'), 0);
+});
 
 test('the same Chrome profile can retain a portal session and report expiration', { timeout: 40_000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'luxmed-profile-test-'));

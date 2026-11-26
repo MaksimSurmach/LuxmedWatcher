@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 	_ "time/tzdata"
 
@@ -17,8 +18,10 @@ import (
 )
 
 type DB struct {
-	sql      *sql.DB
-	postgres bool
+	sql                *sql.DB
+	postgres           bool
+	reconnectDirectory string
+	pendingRejections  sync.Map // reconnectJournalKey to an outcome awaiting a durable write
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {
@@ -31,7 +34,7 @@ func Open(ctx context.Context, path string) (*DB, error) {
 		return nil, fmt.Errorf("open SQLite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	return open(ctx, &DB{sql: db})
+	return open(ctx, &DB{sql: db, reconnectDirectory: path + ".reconnect"})
 }
 
 func OpenPostgres(ctx context.Context, dsn string) (*DB, error) {
@@ -105,17 +108,21 @@ func (db *DB) Migrate(ctx context.Context) error {
 		return fmt.Errorf("apply storage schema: %w", err)
 	}
 	if !db.postgres {
-		for _, column := range []struct{ name, definition string }{
-			{"preferred_city_id", "INTEGER"},
-			{"preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
+		for _, column := range []struct{ table, name, definition string }{
+			{"users", "preferred_city_id", "INTEGER"},
+			{"users", "preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
 		} {
 			var exists bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM pragma_table_info('users') WHERE name=$1)`, column.name).Scan(&exists); err != nil {
-				return fmt.Errorf("inspect SQLite users schema: %w", err)
+			err := tx.QueryRowContext(ctx, `
+				SELECT EXISTS (SELECT 1 FROM pragma_table_info($1) WHERE name=$2)
+			`, column.table, column.name).Scan(&exists)
+			if err != nil {
+				return fmt.Errorf("inspect SQLite %s schema: %w", column.table, err)
 			}
 			if !exists {
-				if _, err := tx.ExecContext(ctx, `ALTER TABLE users ADD COLUMN `+column.name+` `+column.definition); err != nil {
-					return fmt.Errorf("add SQLite users column %s: %w", column.name, err)
+				query := `ALTER TABLE ` + column.table + ` ADD COLUMN ` + column.name + ` ` + column.definition
+				if _, err := tx.ExecContext(ctx, query); err != nil {
+					return fmt.Errorf("add SQLite %s column %s: %w", column.table, column.name, err)
 				}
 			}
 		}

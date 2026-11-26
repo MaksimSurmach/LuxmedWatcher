@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
 func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.User, error) {
@@ -147,8 +148,23 @@ func HashInviteCode(code string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
-	_, err := db.sql.ExecContext(ctx, `
+func (db *DB) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	return db.saveLuxMedAccount(ctx, account, true)
+}
+
+// SavePendingLuxMedAccount saves encrypted credentials and schedules access verification.
+func (db *DB) SavePendingLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	return db.saveLuxMedAccount(ctx, account, false)
+}
+
+func (db *DB) saveLuxMedAccount(ctx context.Context, account domain.LuxMedAccount, verified bool) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT(user_id) DO UPDATE SET
@@ -160,7 +176,29 @@ func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAcco
 			last_login_error=excluded.last_login_error,
 			status=excluded.status
 	`, account.UserID, account.Login, account.EncryptedPassword, account.EncryptedSessionData, nullableTime(account.SessionExpiresAt), nullableTime(account.LastLoginAt), account.LastLoginError, account.Status)
-	return err
+	if err != nil {
+		return err
+	}
+	if verified {
+		if err := db.resolveLuxMedReconnectTx(ctx, tx, account.UserID, true); err != nil {
+			return err
+		}
+	} else {
+		first, end := luxmed.SearchDateBounds(time.Now())
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE watches SET last_checked_at=NULL WHERE user_id=$1 AND status=$2
+				AND `+db.currentSearchWindow("$3", "$4")+`
+		`, account.UserID, domain.WatchStatusActive, first.UTC(), end.UTC()); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if verified {
+		db.clearPendingReconnectRejections(account.UserID)
+	}
+	return nil
 }
 
 func (db *DB) LuxMedAccount(ctx context.Context, userID int64) (domain.LuxMedAccount, error) {
@@ -219,11 +257,14 @@ func (db *DB) CreateWatch(ctx context.Context, watch domain.Watch) (int64, error
 }
 
 func (db *DB) UpdateWatch(ctx context.Context, watch domain.Watch) error {
+	// Preserve a legacy sign-in error until the account has its own verification requirement.
 	res, err := db.sql.ExecContext(ctx, `
 		UPDATE watches SET name=$1, city_id=$2, city_name=$3, service_id=$4, service_name=$5, doctor_id=$6,
 			doctor_name=$7, doctor_mode=$8, facility_mode=$9, facility_ids=$10, facility_names=$11, date_from=$12,
 			date_to=$13, next_days=$14, time_windows=$15, check_interval_seconds=$16, updated_at=$17,
-			last_checked_at=NULL, last_success_at=NULL, last_error=''
+			last_checked_at=NULL, last_success_at=NULL,
+			last_error=CASE WHEN `+watchSignInError+` AND NOT `+hasAccountTermsRequirement("$19")+`
+				THEN last_error ELSE '' END
 		WHERE id=$18 AND user_id=$19 AND status <> $20
 	`, append(watchParameters(watch), time.Now().UTC(), watch.ID, watch.UserID, domain.WatchStatusDeleted)...)
 	return requireOneRow(res, err)
@@ -239,7 +280,15 @@ func watchParameters(watch domain.Watch) []any {
 }
 
 func (db *DB) WatchesByUser(ctx context.Context, userID int64) ([]domain.Watch, error) {
-	rows, err := db.sql.QueryContext(ctx, watchSelect()+` WHERE user_id=$1 AND status <> $2 ORDER BY created_at DESC`, userID, domain.WatchStatusDeleted)
+	return watchesByUser(ctx, db.sql, userID)
+}
+
+type watchQueryer interface {
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+}
+
+func watchesByUser(ctx context.Context, db watchQueryer, userID int64) ([]domain.Watch, error) {
+	rows, err := db.QueryContext(ctx, watchSelect()+` WHERE user_id=$1 AND status <> $2 ORDER BY created_at DESC`, userID, domain.WatchStatusDeleted)
 	if err != nil {
 		return nil, err
 	}
@@ -248,12 +297,37 @@ func (db *DB) WatchesByUser(ctx context.Context, userID int64) ([]domain.Watch, 
 }
 
 func (db *DB) ActiveWatchTelegramIDs(ctx context.Context) ([]int64, error) {
+	return db.activeWatchTelegramIDs(ctx, false, nil)
+}
+
+func (db *DB) ReconnectWatchTelegramIDs(ctx context.Context, browserIDs []int64) ([]int64, error) {
+	return db.activeWatchTelegramIDs(ctx, true, browserIDs)
+}
+
+func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool, browserIDs []int64) ([]int64, error) {
+	args := []any{domain.UserStatusActive, domain.WatchStatusActive, reconnectOnly, domain.AccountStatusActive, domain.WatchStatusPaused}
+	credentials := `EXISTS (SELECT 1 FROM luxmed_accounts a WHERE a.user_id=u.id AND a.status=$4)`
+	if len(browserIDs) != 0 {
+		params := make([]string, 0, len(browserIDs))
+		for _, id := range browserIDs {
+			args = append(args, id)
+			params = append(params, "$"+strconv.Itoa(len(args)))
+		}
+		credentials += ` OR u.telegram_user_id IN (` + strings.Join(params, ",") + `)`
+	}
 	rows, err := db.sql.QueryContext(ctx, `
-		SELECT DISTINCT u.telegram_user_id
-		FROM users u JOIN watches w ON w.user_id=u.id
-		WHERE u.status=$1 AND u.role <> '' AND w.status=$2
+		SELECT u.telegram_user_id
+		FROM users u
+		WHERE u.status=$1 AND u.role <> ''
+			AND (($3 AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status IN ($2, $5)) AND (
+				EXISTS (SELECT 1 FROM luxmed_reconnect r WHERE r.user_id=u.id)
+				OR ((`+credentials+`)
+					AND (`+hasAccountTermsRequirement("u.id")+`
+						OR EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status IN ($2, $5) AND `+watchSignInError+`)))
+			))
+				OR (NOT $3 AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status=$2)))
 		ORDER BY u.telegram_user_id
-	`, domain.UserStatusActive, domain.WatchStatusActive)
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -270,6 +344,8 @@ func (db *DB) ActiveWatchTelegramIDs(ctx context.Context) ([]int64, error) {
 }
 
 func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error) {
+	now := time.Now()
+	first, end := luxmed.SearchDateBounds(now)
 	due := db.dateTimeSQL("last_checked_at") + ` <= ` + db.dateTimeSQL("$2") + ` - check_interval_seconds / 86400.0`
 	if db.postgres {
 		due = `last_checked_at + check_interval_seconds * interval '1 second' <= $2`
@@ -277,10 +353,11 @@ func (db *DB) DueWatches(ctx context.Context, limit int) ([]domain.Watch, error)
 	query := watchSelect() + `
 		WHERE status=$1 AND (last_checked_at IS NULL OR ` + due + `)
 		AND user_id IN (SELECT id FROM users WHERE status=$3)
+		AND ` + db.currentSearchWindow("$4", "$5") + `
 		ORDER BY COALESCE(last_checked_at, created_at), id`
-	args := []any{domain.WatchStatusActive, time.Now().UTC(), domain.UserStatusActive}
+	args := []any{domain.WatchStatusActive, now.UTC(), domain.UserStatusActive, first.UTC(), end.UTC()}
 	if limit > 0 {
-		query += ` LIMIT $4`
+		query += ` LIMIT $6`
 		args = append(args, limit)
 	}
 	rows, err := db.sql.QueryContext(ctx, query, args...)
@@ -319,13 +396,29 @@ func (db *DB) SetUserWatchStatus(ctx context.Context, userID, id int64, status d
 }
 
 func (db *DB) MarkWatchChecked(ctx context.Context, id int64, success bool, errText string) error {
-	now := time.Now().UTC()
-	if success {
-		_, err := db.sql.ExecContext(ctx, `UPDATE watches SET last_checked_at=$1, last_success_at=$2, last_error='', updated_at=$3 WHERE id=$4`, now, now, now, id)
-		return err
-	}
-	_, err := db.sql.ExecContext(ctx, `UPDATE watches SET last_checked_at=$1, last_error=$2, updated_at=$3 WHERE id=$4`, now, errText, now, id)
+	_, err := db.sql.ExecContext(ctx, markWatchChecked+watchCheckError+` WHERE id=$4`, time.Now().UTC(), success, errText, id)
 	return err
+}
+
+const markWatchChecked = `
+	UPDATE watches
+	SET last_checked_at=$1, last_success_at=CASE WHEN $2 THEN $1 ELSE last_success_at END, updated_at=$1, last_error=
+`
+const watchCheckError = `CASE WHEN $2 THEN '' ELSE $3 END`
+
+func (db *DB) MarkWatchCheckedIfUnchanged(ctx context.Context, watch domain.Watch, success bool, errText string) error {
+	// Protected verification clears a sign-in error before writing the search result.
+	// While the error is still present it keeps the account queued for verification.
+	update := markWatchChecked + ` CASE WHEN ` + watchSignInError + ` AND $3 NOT IN ` + signInErrorsSQL +
+		` THEN last_error ELSE ` + watchCheckError + ` END WHERE id=$4 AND status=$5`
+	query := update + ` AND updated_at=$6`
+	args := []any{time.Now().UTC(), success, errText, watch.ID, domain.WatchStatusActive, watch.UpdatedAt}
+	if !db.postgres {
+		// Older SQLite rows stored UTC timestamps in Go's default format.
+		query = update + ` AND updated_at IN ($6, $7)`
+		args = append(args, watch.UpdatedAt.UTC().String())
+	}
+	return requireOneRow(db.sql.ExecContext(ctx, query, args...))
 }
 
 func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {

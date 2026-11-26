@@ -2,13 +2,16 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -50,6 +53,9 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	defer db.Close()
+	if err := a.configureReconnectJournal(db); err != nil {
+		return err
+	}
 
 	catalog, err := i18n.Load(a.cfg.DefaultLocale)
 	if err != nil {
@@ -59,7 +65,11 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	httpClient := &http.Client{Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second}
+	httpClient := &http.Client{
+		Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second,
+		// Keep delivery tracing scoped to a single Telegram request.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 	api, err := tgbotapi.NewBotAPIWithClient(a.cfg.TelegramToken, tgbotapi.APIEndpoint, telegramHTTP{
 		ctx: ctx, client: httpClient,
 	})
@@ -115,7 +125,7 @@ func (a *App) Run(ctx context.Context) error {
 	var dashboard http.Handler
 	if miniApp != nil {
 		dashboardCfg.Origin, dashboardCfg.BotID = miniApp.Origin(), api.Self.ID
-		dashboard = miniapp.Dashboard(dashboardCfg, db, browsers, miniApp)
+		dashboard = miniapp.Dashboard(dashboardCfg, db, browsers, miniApp, runner.CheckBrowserSession)
 	}
 	var workers sync.WaitGroup
 	if a.cfg.ControlKey != "" {
@@ -160,11 +170,59 @@ func (a *App) Run(ctx context.Context) error {
 	return err
 }
 
+func (a *App) configureReconnectJournal(db *storage.DB) error {
+	if a.cfg.ReconnectJournalDir == "-" && a.cfg.DatabaseURL != "" {
+		return nil
+	}
+	if a.cfg.ReconnectJournalDir != "" {
+		return db.SetReconnectJournalDirectory(a.cfg.ReconnectJournalDir)
+	}
+	if a.cfg.DatabasePath != "" || a.cfg.DatabaseURL == "" {
+		err := db.SetReconnectJournalDirectory(a.cfg.DatabasePath + ".reconnect")
+		if err == nil || a.cfg.DatabaseURL == "" {
+			return err
+		}
+	}
+	dir, err := postgresReconnectJournal(a.cfg.DatabaseURL)
+	if err == nil {
+		err = db.SetReconnectJournalDirectory(dir)
+	}
+	if err != nil {
+		a.logger.Warn("reconnect journal unavailable, using PostgreSQL for rejection records", "err", err)
+	}
+	return nil
+}
+
+func postgresReconnectJournal(databaseURL string) (string, error) {
+	state := os.Getenv("XDG_STATE_HOME")
+	if !filepath.IsAbs(state) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		state = filepath.Join(home, ".local", "state")
+	}
+	database, err := url.Parse(databaseURL)
+	if err != nil {
+		return "", errors.New("invalid database URL for reconnect journal")
+	}
+	// Keep the same path across credential rotation.
+	options := database.Query()
+	identity := database.Host + database.Path + "?" + options.Get("host") + ":" +
+		options.Get("port") + ":" + options.Get("search_path")
+	key := sha256.Sum256([]byte(identity))
+	return filepath.Join(state, "luxmed-watcher", fmt.Sprintf("reconnect-%x", key[:16])), nil
+}
+
 type telegramHTTP struct {
 	ctx    context.Context
 	client *http.Client
 }
 
 func (c telegramHTTP) Do(req *http.Request) (*http.Response, error) {
-	return c.client.Do(req.WithContext(c.ctx))
+	// Bot API requests have no context unless the caller supplies one.
+	if req.Context() == context.Background() {
+		req = req.WithContext(c.ctx)
+	}
+	return c.client.Do(req)
 }

@@ -98,40 +98,50 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.registerCommands()
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = b.cfg.PollTimeout
-	config.AllowedUpdates = []string{"message", "callback_query", "widget_query"}
+	config.AllowedUpdates = []string{"message", "callback_query", "widget_query", "my_chat_member"}
 	var delay time.Duration
 	for ctx.Err() == nil {
 		updates, err := b.getUpdates(config)
-		if err != nil {
-			b.logger.Warn("Telegram polling failed", "retrying", true)
-			delay = min(30*time.Second, max(time.Second, 2*delay))
-			if apiErr, ok := errors.AsType[*tgbotapi.Error](err); ok && apiErr.RetryAfter > 0 {
-				delay = max(delay, time.Duration(apiErr.RetryAfter)*time.Second)
-			}
-			timer := time.NewTimer(delay + time.Duration(randv2.IntN(500))*time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return nil
-			case <-timer.C:
-			}
+		if err == nil {
+			err = b.processUpdates(ctx, &config, updates)
+		}
+		if err == nil {
+			delay = 0
 			continue
 		}
-		delay = 0
-		for _, update := range updates {
-			if ctx.Err() != nil {
-				return nil
-			}
-			if update.UpdateID < config.Offset {
-				continue
-			}
-			if update.WidgetQuery != nil {
-				b.handleWidgetQuery(ctx, update.WidgetQuery)
-			} else {
-				b.handleUpdate(ctx, update.Update)
-			}
-			config.Offset = update.UpdateID + 1
+		b.logger.Warn("Telegram update loop failed", "retrying", true)
+		delay = min(30*time.Second, max(time.Second, 2*delay))
+		if apiErr, ok := errors.AsType[*tgbotapi.Error](err); ok && apiErr.RetryAfter > 0 {
+			delay = max(delay, time.Duration(apiErr.RetryAfter)*time.Second)
 		}
+		timer := time.NewTimer(delay + time.Duration(randv2.IntN(500))*time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+	return nil
+}
+
+func (b *Bot) processUpdates(ctx context.Context, config *tgbotapi.UpdateConfig, updates []telegramUpdate) error {
+	for _, update := range updates {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if update.UpdateID < config.Offset {
+			continue
+		}
+		switch {
+		case update.MyChatMember != nil:
+			b.handleTelegramUnblock(ctx, update.MyChatMember)
+		case update.WidgetQuery != nil:
+			b.handleWidgetQuery(ctx, update.WidgetQuery)
+		default:
+			b.handleUpdate(ctx, update.Update)
+		}
+		config.Offset = update.UpdateID + 1
 	}
 	return nil
 }
@@ -370,7 +380,8 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, "flow.account.password"), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		if err := b.newClient(false).Authenticate(ctx, luxmed.Credentials{Login: state.Login, Password: text}); err != nil {
+		client := b.newClient(false)
+		if err := client.Authenticate(ctx, luxmed.Credentials{Login: state.Login, Password: text}); err != nil {
 			key := "errors.auth_failed"
 			if errors.Is(err, luxmed.ErrUnavailable) {
 				key = "errors.luxmed_unavailable"
@@ -384,7 +395,11 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			return
 		}
 		now := time.Now().UTC()
-		err = b.db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
+		save := b.db.SavePendingLuxMedAccount
+		if b.runner != nil {
+			save = b.runner.SavePendingLuxMedAccount
+		}
+		err = save(ctx, domain.LuxMedAccount{
 			UserID:            user.ID,
 			Login:             state.Login,
 			EncryptedPassword: encrypted,
@@ -396,7 +411,11 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
-		b.send(user, b.catalog.T(user.Locale, "flow.account.saved"), mainKeyboard(b.catalog, user.Locale))
+		key := "flow.account.saved"
+		if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err == nil && required {
+			key = "flow.account.verification_pending"
+		}
+		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
 	case flowWatchCity:
 		b.showCityPicker(ctx, user, state.CitySettings, 0)
 	case flowCitySearch:
@@ -1522,14 +1541,10 @@ func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domai
 
 func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (luxmed.Client, error) {
 	if b.cfg.Browsers != nil {
-		browser := b.cfg.Browsers[user.TelegramUserID]
-		if browser == nil {
-			return nil, luxmed.ErrAuthentication
-		}
-		if err := browser.Check(ctx); err != nil {
+		if err := b.checkAccount(ctx, user); err != nil {
 			return nil, err
 		}
-		return browser.Client(), nil
+		return b.cfg.Browsers[user.TelegramUserID].Client(), nil
 	}
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil {

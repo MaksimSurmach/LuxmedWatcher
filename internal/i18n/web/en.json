@@ -1,5 +1,8 @@
 {
+  "account.connect_luxmed": "Connect LUX MED",
+  "account.search_paused": "Search paused. Sign in to LUX MED so we can check for available appointments again.",
   "account.connected": "LUX MED connected",
+  "account.verification_pending": "Waiting for the next LUX MED access check.",
   "account.instructions": "Sign in through a remote browser. If LUX MED asks for a code, enter it there, then return and check the connection.",
   "account.needs_login": "Sign-in required.",
   "account.settings": "Go to settings",
@@ -128,7 +131,7 @@
   "watches.check_partial": "Only some dates were checked. Check the remaining dates in the LUX MED portal.",
   "watches.checked": "Last check",
   "watches.deleted": "Search deleted",
-  "watches.empty": "No searches yet",
+  "watches.empty": "No saved searches",
   "watches.empty_hint": "Choose a service and dates. The bot will message you when it finds an appointment.",
   "watches.new": "New search",
   "watches.pause": "Pause",

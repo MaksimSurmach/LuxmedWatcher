@@ -105,3 +105,20 @@ test('account checks use the authenticated cities endpoint and expose only the s
   });
   assert.deepEqual(await requestPortalResource(dir, '1', '/session', { origin }), { status: 200 });
 });
+
+test('an HTML maintenance response to refresh is temporary and preserves the saved session', async t => {
+  const { dir, origin } = await fixture(t, (req, res) => {
+    assert.equal(req.url, refreshPath);
+    res.writeHead(200, {
+      'Content-Type': 'text/html',
+      'Set-Cookie': 'RefreshToken=; Max-Age=0; Path=/',
+    }).end('<html>Maintenance</html>');
+  });
+  const initial = { cookies: [
+    cookie('Authorization-Token', jwt(Math.floor(Date.now() / 1000) - 60)), cookie('RefreshToken', 'fixture'),
+  ], origins: [] };
+  await writeProfile(dir, '1', initial);
+  const result = await requestPortalResource(dir, '1', '/session', { origin, report() {} });
+  assert.equal(result.status, 502);
+  assert.deepEqual(await readProfile(dir, '1'), initial);
+});

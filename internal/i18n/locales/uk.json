@@ -1,4 +1,6 @@
 {
+  "button.connect_luxmed": "Підключити LUX MED",
+  "notification.search_paused": "Пошук призупинено. Увійдіть до LUX MED, щоб ми знову перевіряли вільні записи.",
   "button.connect": "Підключити LUX MED",
   "button.account": "Акаунт LUX MED",
   "button.afternoon": "12:00–16:00",
@@ -68,6 +70,7 @@
   "flow.account.password": "Надішліть пароль LUX MED.",
   "flow.account.removed": "Акаунт LUX MED відключено. Пошуки призупинено.",
   "flow.account.saved": "Акаунт LUX MED збережено.",
+  "flow.account.verification_pending": "Дані LUX MED збережено. Доступ буде перевірено під час наступного дозволеного пошуку.",
   "flow.city_not_found": "Місто не знайдено. Спробуйте інше написання.",
   "flow.city_results": "Виберіть місто з результатів пошуку.",
   "flow.city_search": "Введіть назву міста. Можна з польськими літерами або звичайною латиницею.",
