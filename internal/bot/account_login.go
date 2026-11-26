@@ -91,7 +91,30 @@ func (b *Bot) selectChrome(telegramID int64, action string) *storage.ChromeChoic
 	return b.db.SelectBrowserLogin(telegramID, "", *revisions, mode == "switch")
 }
 
-const loginDeliveryGrace = 2 * time.Minute
+type loginNotice struct {
+	user  domain.User
+	key   string
+	retry *flow
+}
+
+func (b *Bot) deliverLoginNotice(notice *loginNotice) *flow {
+	user := notice.user
+	markup := mainKeyboard(b.catalog, user.Locale)
+	if notice.retry != nil {
+		markup = cancelKeyboard(b.catalog, user.Locale)
+	}
+	if b.send(user, b.catalog.T(user.Locale, notice.key), markup) {
+		return notice.retry
+	}
+	return &flow{Kind: flowAccountCheck, notice: notice}
+}
+
+func (b *Bot) retryLoginNotice(telegramID int64, state *flow) {
+	if state.notice != nil && b.getFlow(telegramID) == state {
+		next := b.deliverLoginNotice(state.notice)
+		b.finishLogin(telegramID, state, next, false)
+	}
+}
 
 type loginVerification struct {
 	user            domain.User
@@ -128,7 +151,7 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 		err := b.saveLogin(user, creds, attempt)
 		verification.err = err
 		if parent.Err() != nil || errors.Is(ctx.Err(), context.Canceled) ||
-			errors.Is(err, storage.ErrCredentialsChanged) || !b.ownsLogin(user.TelegramUserID, pending, false) {
+			!b.ownsLogin(user.TelegramUserID, pending, false) {
 			return
 		}
 		if err != nil {
@@ -141,19 +164,17 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 			case errors.Is(err, luxmed.ErrBrowserBusy):
 				key = "watch.browser_busy"
 			}
-			retry = &flow{Kind: flowAccountPass, Login: creds.Login}
-			if !b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale)) {
-				retry.sensitiveUntil = time.Now().Add(loginDeliveryGrace)
-			}
+			retry = b.deliverLoginNotice(&loginNotice{
+				user: user, key: key, retry: &flow{Kind: flowAccountPass, Login: creds.Login},
+			})
 			return
 		}
 		key := "flow.account.saved"
 		if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err == nil && required {
 			key = "flow.account.verification_pending"
 		}
-		if b.ownsLogin(user.TelegramUserID, pending, false) &&
-			!b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale)) {
-			retry = &flow{Kind: flowAccountCheck, sensitiveUntil: time.Now().Add(loginDeliveryGrace)}
+		if b.ownsLogin(user.TelegramUserID, pending, false) {
+			retry = b.deliverLoginNotice(&loginNotice{user: user, key: key})
 		}
 	})
 }
@@ -178,7 +199,13 @@ func (b *Bot) cancelLogin(ctx context.Context, telegramID int64, pending *flow) 
 	b.flowMu.Unlock()
 
 	b.workers.Go(func() {
-		defer b.finishLogin(telegramID, pending, nil, true)
+		var next *flow
+		defer func() {
+			if ctx.Err() != nil {
+				next = nil
+			}
+			b.finishLogin(telegramID, pending, next, true)
+		}()
 		select {
 		case <-ctx.Done():
 			return
@@ -191,8 +218,7 @@ func (b *Bot) cancelLogin(ctx context.Context, telegramID int64, pending *flow) 
 		if verification.err == nil {
 			key = "flow.account.already_saved"
 		}
-		user := verification.user
-		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+		next = b.deliverLoginNotice(&loginNotice{user: verification.user, key: key})
 	})
 	return true
 }
@@ -207,13 +233,29 @@ func (b *Bot) ownsLogin(telegramID int64, pending *flow, canceled bool) bool {
 func (b *Bot) finishLogin(telegramID int64, pending, retry *flow, canceled bool) {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	if b.flowState[telegramID] != pending || pending.verification.cancelRequested != canceled {
+	if b.flowState[telegramID] != pending || (pending.verification != nil && pending.verification.cancelRequested != canceled) {
 		return
 	}
 	if retry == nil {
 		delete(b.flowState, telegramID)
 	} else {
 		b.flowState[telegramID] = retry
+	}
+}
+
+func (b *Bot) clearCredentialFlow(telegramID int64) {
+	b.flowMu.Lock()
+	defer b.flowMu.Unlock()
+	state := b.flowState[telegramID]
+	if state == nil {
+		return
+	}
+	switch state.Kind {
+	case flowAccountLogin, flowAccountPass, flowAccountCheck:
+		if state.cancel != nil {
+			state.cancel()
+		}
+		delete(b.flowState, telegramID)
 	}
 }
 

@@ -80,7 +80,7 @@ type flow struct {
 	Kind                 flowKind
 	cancel               context.CancelFunc
 	verification         *loginVerification
-	sensitiveUntil       time.Time
+	notice               *loginNotice
 	Login                string
 	CitySettings         bool
 	ProcedureSearchQuery string
@@ -270,6 +270,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 			return
 		}
 		if state.Kind == flowAccountCheck {
+			b.retryLoginNotice(telegramID, state)
 			return
 		}
 	}
@@ -346,6 +347,7 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 			b.tryRedeemInvite(ctx, user, arg)
 			return
 		}
+		b.clearCredentialFlow(user.TelegramUserID)
 		b.showStart(ctx, user, false)
 	case "menu":
 		b.clearFlow(user.TelegramUserID)
@@ -355,7 +357,7 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 	case "app":
 		b.showApp(ctx, user, "")
 	case "connect":
-		b.clearFlow(user.TelegramUserID)
+		b.clearCredentialFlow(user.TelegramUserID)
 		b.showConnect(ctx, user)
 	case "watches":
 		b.showWatches(ctx, user)
@@ -406,10 +408,10 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		state.Login = text
-		state.Kind = flowAccountPass
-		b.setFlow(user.TelegramUserID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.account.password"), nil)
+		next := b.deliverLoginNotice(&loginNotice{
+			user: user, key: "flow.account.password", retry: &flow{Kind: flowAccountPass, Login: text},
+		})
+		b.setFlow(user.TelegramUserID, next)
 	case flowAccountPass:
 		if text == "" || len(text) > 1024 {
 			b.send(user, b.catalog.T(user.Locale, "flow.account.password"), cancelKeyboard(b.catalog, user.Locale))
@@ -529,7 +531,6 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
-		b.clearFlow(user.TelegramUserID)
 		b.showAccount(ctx, user)
 	case credentialMode == "forget":
 		if b.cfg.Browsers[user.TelegramUserID] == nil {
@@ -701,7 +702,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 }
 
 func (b *Bot) startWatchFlow(ctx context.Context, user domain.User) {
-	if err := b.checkAccount(ctx, user); err != nil {
+	if err := b.checkWatchAccount(ctx, user); err != nil {
 		key := accountCheckMessage(err)
 		markup := b.withAccountRecovery(user, key, mainKeyboard(b.catalog, user.Locale))
 		b.send(user, b.catalog.T(user.Locale, key), markup)
@@ -1838,12 +1839,7 @@ func (b *Bot) setFlow(telegramID int64, state *flow) {
 func (b *Bot) getFlow(telegramID int64) *flow {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	state := b.flowState[telegramID]
-	if state != nil && !state.sensitiveUntil.IsZero() && !time.Now().Before(state.sensitiveUntil) {
-		delete(b.flowState, telegramID)
-		return nil
-	}
-	return state
+	return b.flowState[telegramID]
 }
 
 func (b *Bot) clearFlow(telegramID int64) {

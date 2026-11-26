@@ -738,7 +738,7 @@ func TestTelegramBrowserAccountCheckLeavesSearchVerificationPending(t *testing.T
 	runner.UseBrowsers(b.cfg.Browsers)
 	b.SetRunner(runner)
 
-	if err := b.checkAccount(ctx, user); err != nil {
+	if err := b.checkWatchAccount(ctx, user); err != nil {
 		t.Fatal(err)
 	}
 	_, access, err := b.db.WatchesWithReconnectState(ctx, user.ID)
@@ -1225,7 +1225,10 @@ func TestTelegramCancelButtonStopsLoginBeforeAcknowledgmentAndDatabase(t *testin
 }
 
 func TestTelegramLoginKeepsScrubbingUntilResultDelivery(t *testing.T) {
-	for _, outcome := range []string{"saved", "cancel after commit", "Telegram failure", "new flow", "shutdown"} {
+	for _, outcome := range []string{
+		"saved", "cancel after commit", "authentication notice failure", "saved notice failure",
+		"cancellation notice failure", "restart after failed notice", "new flow", "shutdown",
+	} {
 		t.Run(outcome, func(t *testing.T) {
 			ctx, stop := context.WithCancel(t.Context())
 			defer stop()
@@ -1234,6 +1237,7 @@ func TestTelegramLoginKeepsScrubbingUntilResultDelivery(t *testing.T) {
 			unblock := sync.OnceFunc(func() { close(release) })
 			var deleted atomic.Int32
 			var notified atomic.Value
+			var cancelNoticeFailed atomic.Bool
 			b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasSuffix(r.URL.Path, "/deleteMessage") {
 					deleted.Add(1)
@@ -1242,12 +1246,16 @@ func TestTelegramLoginKeepsScrubbingUntilResultDelivery(t *testing.T) {
 						notified.Store(r.FormValue("text"))
 						close(sending)
 						<-release
-						if outcome == "Telegram failure" {
+						if outcome == "authentication notice failure" || outcome == "saved notice failure" || outcome == "restart after failed notice" {
 							w.WriteHeader(http.StatusServiceUnavailable)
 							return
 						}
 					} else {
 						notified.Store(r.FormValue("text"))
+						if outcome == "cancellation notice failure" && cancelNoticeFailed.CompareAndSwap(false, true) {
+							w.WriteHeader(http.StatusServiceUnavailable)
+							return
+						}
 					}
 				}
 				fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
@@ -1269,7 +1277,7 @@ func TestTelegramLoginKeepsScrubbingUntilResultDelivery(t *testing.T) {
 				return
 			}
 			b.newClient = func(bool) luxmed.Client {
-				if outcome == "Telegram failure" {
+				if outcome == "authentication notice failure" {
 					return authClient{err: luxmed.ErrAuthentication}
 				}
 				return authClient{}
@@ -1286,7 +1294,7 @@ func TestTelegramLoginKeepsScrubbingUntilResultDelivery(t *testing.T) {
 			}
 			var wantFlow *flow
 			switch outcome {
-			case "cancel after commit":
+			case "cancel after commit", "cancellation notice failure":
 				loginMessage(b, ctx, user, "/cancel", 2)
 			case "new flow":
 				wantFlow = &flow{Kind: flowWatchCity}
@@ -1294,24 +1302,34 @@ func TestTelegramLoginKeepsScrubbingUntilResultDelivery(t *testing.T) {
 			}
 			unblock()
 			b.workers.Wait()
-			if outcome == "Telegram failure" {
-				retry := b.getFlow(user.TelegramUserID)
-				if retry == nil || retry.Kind != flowAccountPass || retry.sensitiveUntil.IsZero() {
-					t.Fatal("failed delivery did not leave a bounded password retry")
+			switch outcome {
+			case "authentication notice failure", "saved notice failure", "cancellation notice failure":
+				pending := b.getFlow(user.TelegramUserID)
+				if pending == nil || pending.Kind != flowAccountCheck || pending.notice == nil {
+					t.Fatal("failed delivery did not keep sensitive input protected")
 				}
 				loginMessage(b, ctx, user, "second fixture", 3)
-				b.workers.Wait()
-				if deleted.Load() != 2 {
-					t.Fatal("password was not removed after failed delivery")
+				if deleted.Load() != 2 || b.getFlow(user.TelegramUserID) != pending.notice.retry {
+					t.Fatal("repeated password was not scrubbed or notice retry did not restore the right flow")
 				}
-				// Expire the original grace period without sleeping.
-				retry.sensitiveUntil = time.Now().Add(-time.Second)
-				b.setFlow(user.TelegramUserID, retry)
-				if b.getFlow(user.TelegramUserID) != nil {
-					t.Fatal("expired protection kept intercepting messages")
+				if outcome != "authentication notice failure" {
+					loginMessage(b, ctx, user, "ordinary message", 4)
+					if deleted.Load() != 2 {
+						t.Fatal("delivered notice kept intercepting ordinary messages")
+					}
 				}
-			} else if b.getFlow(user.TelegramUserID) != wantFlow {
-				t.Fatal("completion left its old flow or replaced a newer flow")
+			case "restart after failed notice":
+				loginMessage(b, ctx, user, "/connect", 3)
+				if flow := b.getFlow(user.TelegramUserID); flow == nil || flow.Kind != flowAccountLogin {
+					t.Fatal("explicit restart did not replace the undelivered notice")
+				}
+				if deleted.Load() != 1 {
+					t.Fatal("explicit restart was treated as credential text")
+				}
+			default:
+				if b.getFlow(user.TelegramUserID) != wantFlow {
+					t.Fatal("completion left its old flow or replaced a newer flow")
+				}
 			}
 			if outcome == "cancel after commit" {
 				if _, err := b.db.LoginAccount(ctx, user.ID, true); err != nil ||
@@ -1332,4 +1350,91 @@ func loginMessage(b *Bot, ctx context.Context, user domain.User, text string, id
 		msg.Entities = []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(text)}}
 	}
 	b.handleUpdate(ctx, tgbotapi.Update{Message: msg})
+}
+
+func TestChromeReconnectPreservesPendingWatchConfirmation(t *testing.T) {
+	ctx := t.Context()
+	var signedIn atomic.Bool
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/session":
+			if !signedIn.Load() {
+				w.WriteHeader(http.StatusUnauthorized)
+			}
+		case "/viewer":
+			signedIn.Store(true)
+			fmt.Fprintf(w, `{"ticket":%q}`, strings.Repeat("a", 64))
+		default:
+			t.Errorf("unexpected browser request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(worker.Close)
+	b := testBot(t)
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+	runner := scheduler.NewRunner(b.db, b.cryptor, nil, time.Minute, time.Hour, false)
+	runner.UseBrowsers(b.cfg.Browsers)
+	b.SetRunner(runner)
+	watch := domain.Watch{UserID: user.ID, CityID: 5, ServiceID: 6, NextDays: 7}
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowWatchConfirm, Watch: watch, Confirmation: "draft"})
+	b.handleAction(ctx, user.TelegramUserID, "confirm:draft", nil)
+	if saved, err := b.db.WatchesByUser(ctx, user.ID); err != nil || len(saved) != 0 {
+		t.Fatalf("watch saved before reconnect: count=%d err=%v", len(saved), err)
+	}
+
+	b.handleAction(ctx, user.TelegramUserID, "account", nil)
+	loginMessage(b, ctx, user, "/connect", 1)
+	action := credentialAction("chrome", user.CredentialRevisions())
+	b.handleAction(ctx, user.TelegramUserID, action, b.selectChrome(user.TelegramUserID, action))
+	b.handleAction(ctx, user.TelegramUserID, "confirm:draft", nil)
+	saved, err := b.db.WatchesByUser(ctx, user.ID)
+	if err != nil || len(saved) != 1 || saved[0].CityID != watch.CityID ||
+		saved[0].ServiceID != watch.ServiceID || saved[0].NextDays != watch.NextDays {
+		t.Fatalf("reconnect lost the watch draft or confirmation: count=%d err=%v", len(saved), err)
+	}
+}
+
+func TestNewWatchUsesSavedLoginAndLocalCities(t *testing.T) {
+	for _, preferred := range []bool{true, false} {
+		name := "cached city picker"
+		if preferred {
+			name = "preferred city"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			b := testBot(t)
+			user := createUser(t, b, 42, domain.UserStatusActive)
+			b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: {}}
+			runner := scheduler.NewRunner(b.db, b.cryptor, nil, time.Minute, time.Hour, false)
+			runner.UseBrowsers(b.cfg.Browsers)
+			b.SetRunner(runner)
+			if err := b.db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
+				UserID: user.ID, UseSavedLogin: true, EncryptedPassword: "offline fixture",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			city := domain.City{ID: 5, Name: "Fixture"}
+			if err := b.db.UpsertCities(ctx, []domain.City{city}); err != nil {
+				t.Fatal(err)
+			}
+			if preferred {
+				if err := b.db.SetUserPreferences(ctx, user.ID, user.Locale, city); err != nil {
+					t.Fatal(err)
+				}
+				loginMessage(b, ctx, user, "/new", 1)
+			} else {
+				b.handleAction(ctx, user.TelegramUserID, "new", nil)
+			}
+			flow := b.getFlow(user.TelegramUserID)
+			if preferred && (flow == nil || flow.Kind != flowWatchService || flow.Watch.CityID != city.ID) ||
+				!preferred && (flow == nil || flow.Kind != flowWatchCity) {
+				t.Fatal("new watch did not start with saved login and local city data")
+			}
+		})
+	}
 }

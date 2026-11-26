@@ -123,13 +123,12 @@ func (c *reconnectHTTP) Do(req *http.Request) (*http.Response, error) {
 	return res, err
 }
 
-func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
-	if b.cfg.Browsers == nil {
-		_, err := b.db.LuxMedAccount(ctx, user.ID)
-		return err
-	}
+func (b *Bot) checkWatchAccount(ctx context.Context, user domain.User) error {
 	if b.runner != nil {
-		_, err := b.runner.CheckBrowserSession(ctx, user)
+		return b.runner.CheckWatchAccount(ctx, user)
+	}
+	_, err := b.db.LoginAccount(ctx, user.ID, b.cfg.Browsers != nil)
+	if !errors.Is(err, sql.ErrNoRows) || b.cfg.Browsers == nil {
 		return err
 	}
 	browser := b.cfg.Browsers[user.TelegramUserID]
@@ -137,17 +136,6 @@ func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
 		return luxmed.ErrAuthentication
 	}
 	return browser.Check(ctx)
-}
-
-func (b *Bot) checkWatchAccount(ctx context.Context, user domain.User) error {
-	if b.runner != nil {
-		return b.runner.CheckWatchAccount(ctx, user)
-	}
-	_, err := b.db.LoginAccount(ctx, user.ID, b.cfg.Browsers != nil)
-	if errors.Is(err, sql.ErrNoRows) && b.cfg.Browsers != nil {
-		return b.checkAccount(ctx, user)
-	}
-	return err
 }
 
 func accountCheckMessage(err error) string {
@@ -193,7 +181,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if !user.IsActive() || browser == nil {
 		return
 	}
-	b.clearFlow(user.TelegramUserID)
+	b.clearCredentialFlow(user.TelegramUserID)
 	if b.cfg.MiniApp != nil {
 		b.showMiniApp(ctx, user)
 		return
