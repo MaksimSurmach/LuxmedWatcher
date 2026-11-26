@@ -49,7 +49,10 @@ func TestCatalogManualCheckAndSaveShareAuthenticationAndRetryAfter(t *testing.T)
 		_, err := client.GetCities(ctx)
 		return err
 	}
-	response = &luxmed.HTTPError{StatusCode: http.StatusTooManyRequests, RetryAfter: time.Minute}
+	response = errors.Join(
+		&luxmed.HTTPError{StatusCode: http.StatusNotFound},
+		&luxmed.HTTPError{StatusCode: http.StatusServiceUnavailable, RetryAfter: time.Minute},
+	)
 	if err := runner.WithLuxMedClient(ctx, user, query); !errors.Is(err, luxmed.ErrUnavailable) {
 		t.Fatalf("catalog throttle = %v", err)
 	}
@@ -67,16 +70,13 @@ func TestCatalogManualCheckAndSaveShareAuthenticationAndRetryAfter(t *testing.T)
 	}
 	runner.accounts[user.ID].retryAfter = time.Time{}
 
-	response = luxmed.ErrAuthentication
+	response = luxmed.ErrCredentialsRejected
 	if _, err := runner.CheckBrowserSession(ctx, user); !errors.Is(err, luxmed.ErrAuthentication) {
 		t.Fatalf("manual check rejection = %v", err)
 	}
 	for range 2 {
 		if err := runner.WithLuxMedClient(ctx, user, query); !errors.Is(err, luxmed.ErrAuthentication) {
 			t.Fatalf("catalog retried rejected credentials: %v", err)
-		}
-		if err := runner.SaveCredentials(ctx, user, creds); !errors.Is(err, luxmed.ErrAuthentication) {
-			t.Fatalf("save retried the rejected password: %v", err)
 		}
 	}
 	account, err := db.LuxMedAccount(ctx, user.ID)
@@ -86,12 +86,21 @@ func TestCatalogManualCheckAndSaveShareAuthenticationAndRetryAfter(t *testing.T)
 
 	response = nil
 	client.search = func(context.Context) ([]domain.Appointment, error) { return nil, nil }
-	if err := db.BeginLuxMedReconnect(ctx, user.ID); err != nil {
+	if err := runner.SaveCredentials(ctx, user, creds); err != nil {
 		t.Fatal(err)
 	}
-	if err := runner.SaveCredentials(ctx, user, luxmed.Credentials{Login: creds.Login, Password: "replacement"}); err != nil {
+	if client.logins != 2 {
+		t.Fatalf("explicit retry did not authenticate the same pair: %d", client.logins)
+	}
+	user, err = db.UserByID(ctx, user.ID)
+	if err != nil {
 		t.Fatal(err)
 	}
+	_, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+	if err != nil || access.Status != storage.LuxMedAccessPending || access.EpisodeID != "" {
+		t.Fatalf("dictionary access changed protected search status: %+v, %v", access, err)
+	}
+
 	if result, err := runner.CheckBrowserSession(ctx, user); err != nil || !result.VerificationPending {
 		t.Fatalf("dictionary check should leave the reconnect episode open: %+v, %v", result, err)
 	}
@@ -146,5 +155,100 @@ func TestCredentialVerificationCannotCommitAfterDeadlineOrChromeChoice(t *testin
 				t.Fatalf("original watch status=%s: %v", current.Status, err)
 			}
 		})
+	}
+}
+
+func TestPasswordSearchResultCannotCrossChromeSwitch(t *testing.T) {
+	for _, rejection := range []bool{false, true} {
+		name := "successful password search"
+		if rejection {
+			name = "rejected password search"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := t.Context()
+			runner, db, watch := testRunner(t, nil)
+			user, err := db.UserByID(ctx, watch.UserID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.SaveCredentials(ctx, runner.cryptor, user, luxmed.Credentials{
+				Login: "fixture", Password: "synthetic",
+			}); err != nil {
+				t.Fatal(err)
+			}
+			runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: {}})
+			if err := db.BeginLuxMedReconnect(ctx, user.ID); err != nil {
+				t.Fatal(err)
+			}
+			episode, err := db.LuxMedReconnectEpisode(ctx, user.ID)
+			if err != nil || episode == "" {
+				t.Fatalf("seed reconnect episode: %q, %v", episode, err)
+			}
+			runner.newClient = func(bool) luxmed.Client {
+				return &fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) {
+					if err := db.ForgetCredentials(ctx, user.ID); err != nil {
+						t.Fatal(err)
+					}
+					if rejection {
+						return nil, luxmed.ErrAuthentication
+					}
+					return []domain.Appointment{{Fingerprint: "stale", DateTime: time.Now().Add(time.Hour)}}, nil
+				}}
+			}
+
+			if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, ErrInactive) {
+				t.Fatalf("old check was accepted: %v", err)
+			}
+			watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+			if err != nil || access.Status != storage.LuxMedAccessPending || access.EpisodeID != episode {
+				t.Fatalf("old check altered Chrome status or episode: %+v, %v", access, err)
+			}
+			if watches[0].LastCheckedAt != nil || watches[0].LastError != "" {
+				t.Fatalf("old check changed the watch: %+v", watches[0])
+			}
+			slots, err := db.RecentHistory(ctx, user.ID, 10, 0)
+			if err != nil || len(slots) != 0 {
+				t.Fatalf("old check persisted slots: %+v, %v", slots, err)
+			}
+		})
+	}
+}
+
+func TestSearchAccessRejectionAllowsExplicitPasswordRetry(t *testing.T) {
+	ctx := t.Context()
+	runner, db, watch := testRunner(t, nil)
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds := luxmed.Credentials{Login: "fixture", Password: "synthetic"}
+	client := &catalogClient{cities: func(context.Context) error { return nil }}
+	client.search = func(context.Context) ([]domain.Appointment, error) { return nil, luxmed.ErrAuthentication }
+	runner.newClient = func(bool) luxmed.Client { return client }
+	if err := runner.SaveCredentials(ctx, user, creds); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
+		t.Fatalf("protected endpoint rejection = %v", err)
+	}
+	account, err := db.LuxMedAccount(ctx, user.ID)
+	if err != nil || account.Status != domain.AccountStatusActive {
+		t.Fatalf("search rejection mislabeled the password: %+v, %v", account.Status, err)
+	}
+	user, err = db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.SaveCredentials(ctx, user, creds); err != nil {
+		t.Fatal(err)
+	}
+	client.search = func(context.Context) ([]domain.Appointment, error) { return nil, nil }
+	if _, err := runner.ManualCheck(ctx, watch); err != nil {
+		t.Fatal(err)
+	}
+	watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+	if err != nil || access.Status != storage.LuxMedAccessConnected ||
+		access.EpisodeID != "" || watches[0].Status != domain.WatchStatusActive {
+		t.Fatalf("retry did not restore search access: %+v, %+v, %v", watches, access, err)
 	}
 }

@@ -2003,6 +2003,7 @@ func TestPausedLegacySignInErrorRecoversWithAlternativeProtectedFilter(t *testin
 	}
 	runner.mu.Lock()
 	runner.accounts[good.UserID].next = time.Time{}
+	runner.accounts[good.UserID].retryAfter = time.Time{}
 	runner.mu.Unlock()
 	scheduler.maintainReconnectSessions(ctx)
 	if !slices.Equal(filters, []int{99, 99, 12}) {
@@ -2257,6 +2258,7 @@ func TestEditedRejectedFilterResumesDespiteUnavailableFallback(t *testing.T) {
 			must(db.UpdateWatch(ctx, watch))
 			runner.mu.Lock()
 			runner.accounts[watch.UserID].next = time.Time{}
+			runner.accounts[watch.UserID].retryAfter = time.Time{}
 			runner.mu.Unlock()
 
 			if mode == "scheduled search" {
@@ -2303,6 +2305,7 @@ func TestBrowserReconnectWaitsForConfirmedAuthorizationFailure(t *testing.T) {
 		t.Fatalf("inconclusive session probe triggered a warning: sends=%d err=%v", sends, err)
 	}
 	status.Store(http.StatusUnauthorized)
+	runner.accounts[watch.UserID].retryAfter = time.Time{}
 	if err := runner.renewBrowserSession(ctx, 42, browser); err != nil || sends != 1 {
 		t.Fatalf("confirmed session rejection did not produce a warning: sends=%d err=%v", sends, err)
 	}

@@ -297,10 +297,11 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 }
 
 type procedurePicks struct {
-	Referred []domain.Service
-	Recent   []domain.Service
-	Saved    []domain.Service
-	Popular  []domain.Service
+	PortalIncomplete bool `json:",omitempty"`
+	Referred         []domain.Service
+	Recent           []domain.Service
+	Saved            []domain.Service
+	Popular          []domain.Service
 }
 
 func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -316,10 +317,6 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 	}
 	portalCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if err := d.ensureProcedureCatalog(portalCtx, user, city); err != nil {
-		dashboardResult(w, nil, err)
-		return
-	}
 	watches, err := d.db.WatchesByUser(ctx, user.ID)
 	if err != nil {
 		dashboardResult(w, nil, err)
@@ -329,37 +326,35 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 	var saved []domain.Procedure
 	for _, watch := range watches {
 		if watch.CityID == city.ID {
-			saved = append(saved, domain.Procedure{ID: watch.ServiceID})
+			saved = append(saved, domain.Procedure{ID: watch.ServiceID, Name: watch.ServiceName})
 		}
 	}
 
+	portalErr := d.ensureProcedureCatalog(portalCtx, user, city)
 	var referred, recent, popular []domain.Procedure
-	err = d.runner.WithLuxMedClient(portalCtx, user, func(client luxmed.Client) error {
-		var err error
-		if referrals, ok := client.(interface {
-			GetReferredProcedures(context.Context) ([]domain.Procedure, error)
-		}); ok {
-			referred, err = referrals.GetReferredProcedures(portalCtx)
-			if catalogAccessError(err) {
-				return err
+	if !stopRecommendationRequests(portalErr) {
+		err := d.runner.WithLuxMedClient(portalCtx, user, func(client luxmed.Client) error {
+			var err, result error
+			if referrals, ok := client.(interface {
+				GetReferredProcedures(context.Context) ([]domain.Procedure, error)
+			}); ok {
+				referred, err = referrals.GetReferredProcedures(portalCtx)
+				result = errors.Join(result, err)
+				if stopRecommendationRequests(err) {
+					return result
+				}
 			}
-		}
-		recent, err = client.GetRecentProcedures(portalCtx)
-		if catalogAccessError(err) {
-			return err
-		}
-		popular, err = client.GetPopularProcedures(portalCtx)
-		if catalogAccessError(err) {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		dashboardResult(w, nil, err)
-		return
+			recent, err = client.GetRecentProcedures(portalCtx)
+			result = errors.Join(result, err)
+			if stopRecommendationRequests(err) {
+				return result
+			}
+			popular, err = client.GetPopularProcedures(portalCtx)
+			return errors.Join(result, err)
+		})
+		portalErr = errors.Join(portalErr, err)
 	}
-
-	var picks procedurePicks
+	picks := procedurePicks{PortalIncomplete: portalErr != nil}
 	seen := make(map[int]bool)
 	groups := []struct {
 		target     *[]domain.Service
@@ -371,7 +366,8 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 		{&picks.Popular, popular},
 	}
 	for _, group := range groups {
-		if group.target == &picks.Saved && len(picks.Recent) > 0 {
+		isSaved := group.target == &picks.Saved
+		if isSaved && len(picks.Recent) > 0 && !picks.PortalIncomplete {
 			continue
 		}
 		const limit = 4
@@ -381,9 +377,11 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 			}
 			service, err := d.db.Procedure(ctx, city.ID, item.ID)
 			if errors.Is(err, sql.ErrNoRows) {
-				continue
-			}
-			if err != nil {
+				if !isSaved || item.Name == "" {
+					continue
+				}
+				service.Name = item.Name
+			} else if err != nil {
 				dashboardResult(w, nil, err)
 				return
 			}
@@ -397,8 +395,8 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 	reply(w, http.StatusOK, picks)
 }
 
-func catalogAccessError(err error) bool {
-	return errors.Is(err, luxmed.ErrAuthentication) || errors.Is(err, luxmed.ErrUnavailable) ||
+func stopRecommendationRequests(err error) bool {
+	return errors.Is(err, luxmed.ErrAuthentication) || luxmed.RetryAfter(err) > 0 ||
 		errors.Is(err, luxmed.ErrBrowserBusy) || errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, context.Canceled)
 }

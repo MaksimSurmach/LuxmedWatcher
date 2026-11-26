@@ -183,9 +183,15 @@ func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAcco
 	return upsertLuxMedAccount(ctx, db.sql, account)
 }
 
-func upsertLuxMedAccount(ctx context.Context, exec interface {
+type sqlExecutor interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, account domain.LuxMedAccount) error {
+}
+
+type sqlRowReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func upsertLuxMedAccount(ctx context.Context, exec sqlExecutor, account domain.LuxMedAccount) error {
 	_, err := exec.ExecContext(ctx, `
         INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status, use_saved_login)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
@@ -285,7 +291,10 @@ func (db *DB) removeCredentials(ctx context.Context, userID int64, pauseWatches 
 		return err
 	}
 	if !pauseWatches {
-		if err := setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessUnchecked, false); err != nil {
+		if err := db.finalizeLuxMedAccountSave(ctx, tx, userID, false); err != nil {
+			return err
+		}
+		if err := db.setModeAccessStatus(ctx, tx, userID, LuxMedAccessUnchecked); err != nil {
 			return err
 		}
 	}
@@ -462,6 +471,16 @@ const markWatchChecked = `
 const watchCheckError = `CASE WHEN $2 THEN '' ELSE $3 END`
 
 func (db *DB) MarkWatchCheckedIfUnchanged(ctx context.Context, watch domain.Watch, success bool, errText string) error {
+	return db.markWatchCheckedIfUnchanged(ctx, db.sql, watch, success, errText)
+}
+
+func (db *DB) MarkWatchCheckedForMode(ctx context.Context, owner domain.User, watch domain.Watch, success bool, errText string) error {
+	return db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
+		return db.markWatchCheckedIfUnchanged(ctx, tx, watch, success, errText)
+	})
+}
+
+func (db *DB) markWatchCheckedIfUnchanged(ctx context.Context, exec sqlExecutor, watch domain.Watch, success bool, errText string) error {
 	// Protected verification clears a sign-in error before writing the search result.
 	// While the error is still present it keeps the account queued for verification.
 	update := markWatchChecked + ` CASE WHEN ` + watchSignInError + ` AND $3 NOT IN ` + signInErrorsSQL +
@@ -473,13 +492,17 @@ func (db *DB) MarkWatchCheckedIfUnchanged(ctx context.Context, watch domain.Watc
 		query = update + ` AND updated_at IN ($6, $7)`
 		args = append(args, watch.UpdatedAt.UTC().String())
 	}
-	return requireOneRow(db.sql.ExecContext(ctx, query, args...))
+	return requireOneRow(exec.ExecContext(ctx, query, args...))
 }
 
 func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {
+	return upsertAppointmentHistory(ctx, db.sql, watchID, app)
+}
+
+func upsertAppointmentHistory(ctx context.Context, reader sqlRowReader, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {
 	if app.LegacyFingerprint != "" {
 		var legacyAddress string
-		err := db.sql.QueryRowContext(ctx, `
+		err := reader.QueryRowContext(ctx, `
 			SELECT address FROM appointment_history WHERE watch_id=$1 AND fingerprint=$2
 		`, watchID, app.LegacyFingerprint).Scan(&legacyAddress)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -491,7 +514,7 @@ func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app d
 		}
 	}
 	now := time.Now().UTC()
-	row := db.sql.QueryRowContext(ctx, `
+	row := reader.QueryRowContext(ctx, `
 		INSERT INTO appointment_history (
 			watch_id, external_id, fingerprint, date_time, service_id, service_name, doctor_id, doctor_name,
 			facility_id, facility_name, address, city_id, city_name, booking_url, first_seen_at, last_seen_at, seen_count, status, raw_payload
@@ -510,7 +533,11 @@ func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app d
 }
 
 func (db *DB) MarkMissingAppointments(ctx context.Context, watchID int64, seenSince, notifiedBefore time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `
+	return db.markMissingAppointments(ctx, db.sql, watchID, seenSince, notifiedBefore)
+}
+
+func (db *DB) markMissingAppointments(ctx context.Context, exec sqlExecutor, watchID int64, seenSince, notifiedBefore time.Time) error {
+	_, err := exec.ExecContext(ctx, `
 		UPDATE appointment_history SET status=$1,
 			last_notified_at=CASE WHEN `+db.dateTimeSQL("last_notified_at")+` <= `+db.dateTimeSQL("$2")+` THEN NULL ELSE last_notified_at END
 		WHERE watch_id=$3 AND `+db.dateTimeSQL("last_seen_at")+` < `+db.dateTimeSQL("$4")+` AND status <> $5

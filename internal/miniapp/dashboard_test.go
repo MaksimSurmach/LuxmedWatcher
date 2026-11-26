@@ -535,6 +535,7 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 		}
 		return user
 	}
+	var failPopular atomic.Bool
 	owner := addUser(24, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.RequestURI() {
 		case luxmed.ReferralServicesURL:
@@ -542,6 +543,11 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 		case luxmed.RecentSearchesURL:
 			fmt.Fprint(w, `{"serviceVariantId":3,"searchName":"private metadata","searchParameters":[{"serviceVariantId":6,"searchName":"Already referred"},{"serviceVariantId":1,"searchName":"private search label"}]}`)
 		case luxmed.PopularServicesURL:
+			if failPopular.Load() {
+				w.Header().Set("Retry-After", "60")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			fmt.Fprint(w, `[{"serviceId":1,"serviceName":"Recent"},{"serviceId":2,"serviceName":"Upstream popular label"},{"serviceId":2,"serviceName":"Duplicate"},{"serviceId":99,"serviceName":"Unknown in this city"}]`)
 		case luxmed.ServiceVariantsGroupsURL:
 			fmt.Fprint(w, `[{"id":2,"name":"Popular"}]`)
@@ -597,8 +603,9 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 			Popular:  []domain.Service{{ID: 2, Name: "Popular"}},
 		}},
 		{"preserves saved searches and popular results if private sources fail", other, 1, procedurePicks{
-			Saved:   []domain.Service{{ID: 3, Name: "Other user's search"}},
-			Popular: []domain.Service{{ID: 2, Name: "Popular"}},
+			PortalIncomplete: true,
+			Saved:            []domain.Service{{ID: 3, Name: "Other user's search"}},
+			Popular:          []domain.Service{{ID: 2, Name: "Popular"}},
 		}},
 		{"loads a city catalog on first use", owner, 3, procedurePicks{Popular: []domain.Service{{ID: 2, Name: "Popular"}}}},
 	}
@@ -619,10 +626,59 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 			if strings.Contains(res.Body.String(), "private") || strings.Contains(res.Body.String(), "43210") {
 				t.Fatal("personal metadata was included in recommendations")
 			}
+			if picks.PortalIncomplete != tt.want.PortalIncomplete {
+				t.Fatalf("portal incomplete = %v, want %v", picks.PortalIncomplete, tt.want.PortalIncomplete)
+			}
 			if !slices.Equal(picks.Referred, tt.want.Referred) || !slices.Equal(picks.Recent, tt.want.Recent) ||
 				!slices.Equal(picks.Saved, tt.want.Saved) || !slices.Equal(picks.Popular, tt.want.Popular) {
 				t.Fatalf("picks = %+v, want %+v", picks, tt.want)
 			}
 		})
 	}
+
+	requestPicks := func(t *testing.T, cityID int) procedurePicks {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, dashboardPrefix+"procedure-picks",
+			strings.NewReader(fmt.Sprintf(`{"CityID":%d}`, cityID)))
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Authorization", "Bearer "+d.sessions.issue(owner.TelegramUserID, time.Now()))
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		var picks procedurePicks
+		if err := json.Unmarshal(res.Body.Bytes(), &picks); err != nil || res.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s, err = %v", res.Code, res.Body, err)
+		}
+		return picks
+	}
+	t.Run("busy account keeps a saved service without a catalog entry", func(t *testing.T) {
+		const uncachedCity = 4
+		if err := db.UpsertCities(ctx, []domain.City{{ID: uncachedCity, Name: "Gdańsk"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.CreateWatch(ctx, domain.Watch{
+			UserID: owner.ID, CityID: uncachedCity, ServiceID: 8, ServiceName: "Saved service",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		err := d.runner.WithLuxMedClient(ctx, owner, func(luxmed.Client) error {
+			picks := requestPicks(t, uncachedCity)
+			want := []domain.Service{{ID: 8, Name: "Saved service"}}
+			if !picks.PortalIncomplete || !slices.Equal(picks.Saved, want) {
+				t.Fatalf("saved recommendations lost while busy: %+v", picks)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+	t.Run("late portal failure keeps successful groups and saved services", func(t *testing.T) {
+		addWatch(owner, 1, 2)
+		failPopular.Store(true)
+		picks := requestPicks(t, 1)
+		if !picks.PortalIncomplete || len(picks.Referred) != 1 || len(picks.Recent) != 1 ||
+			!slices.Equal(picks.Saved, []domain.Service{{ID: 2, Name: "Popular"}}) || len(picks.Popular) != 0 {
+			t.Fatalf("partial recommendations lost: %+v", picks)
+		}
+	})
 }

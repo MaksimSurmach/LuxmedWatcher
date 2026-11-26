@@ -67,20 +67,6 @@ func (r *Runner) SaveCredentials(ctx context.Context, user domain.User, creds lu
 	if current.CredentialRevision != user.CredentialRevision || !current.IsActive() {
 		return storage.ErrCredentialsChanged
 	}
-	account, err := r.db.LuxMedAccount(ctx, user.ID)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("load saved LuxMed credentials: %w", err)
-	}
-	if err == nil && account.Status == domain.AccountStatusAuthFailed {
-		saved, err := r.cryptor.OpenCredentials(user.ID, account.EncryptedPassword)
-		if err != nil {
-			return fmt.Errorf("decrypt rejected LuxMed credentials: %w", err)
-		}
-		if saved == creds {
-			return luxmed.ErrAuthentication
-		}
-	}
-
 	client := r.newClient(r.rawPayloads)
 	// Leave time to commit and return a response after verification.
 	probeCtx, stop := context.WithTimeout(ctx, 12*time.Second)
@@ -98,6 +84,7 @@ func (r *Runner) SaveCredentials(ctx context.Context, user domain.User, creds lu
 	if err != nil {
 		return fmt.Errorf("save verified LuxMed credentials: %w", err)
 	}
+	state.useCredentialRevision(user.CredentialRevision + 1)
 	state.client = client
 	state.encryptedPassword = sealed
 	state.authenticatedAt = time.Now()
@@ -119,10 +106,13 @@ func (r *Runner) recordPasswordAccessFailure(
 	account domain.LuxMedAccount,
 	err error,
 ) error {
-	if account.UserID == 0 || !errors.Is(err, luxmed.ErrAuthentication) || errors.Is(err, luxmed.ErrUnavailable) {
+	if !errors.Is(err, luxmed.ErrAuthentication) || errors.Is(err, luxmed.ErrUnavailable) {
 		return err
 	}
 	state.client = nil
 	state.recoveryPending = false
-	return errors.Join(err, r.recordAuthFailure(ctx, account))
+	if account.UserID != 0 && errors.Is(err, luxmed.ErrCredentialsRejected) {
+		return errors.Join(err, r.recordAuthFailure(ctx, account))
+	}
+	return err
 }

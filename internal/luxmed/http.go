@@ -25,10 +25,11 @@ const (
 )
 
 var (
-	ErrAuthentication = errors.New("luxmed authentication required or rejected")
-	ErrUnavailable    = errors.New("luxmed temporarily unavailable")
-	ErrBrowserBusy    = errors.New("luxmed browser is busy")
-	ErrResponse       = errors.New("unexpected luxmed response")
+	ErrAuthentication      = errors.New("luxmed authentication required or rejected")
+	ErrCredentialsRejected = fmt.Errorf("luxmed login rejected: %w", ErrAuthentication)
+	ErrUnavailable         = errors.New("luxmed temporarily unavailable")
+	ErrBrowserBusy         = errors.New("luxmed browser is busy")
+	ErrResponse            = errors.New("unexpected luxmed response")
 )
 
 // HTTPError reports an upstream status without including query parameters or response data.
@@ -37,6 +38,25 @@ type HTTPError struct {
 	RetryAfter time.Duration
 	path       string
 	login      bool
+}
+
+// RetryAfter returns the longest upstream retry delay in an error chain.
+func RetryAfter(err error) time.Duration {
+	switch value := err.(type) {
+	case *HTTPError:
+		return value.RetryAfter
+	case interface{ Unwrap() []error }:
+		var delay time.Duration
+		for _, cause := range value.Unwrap() {
+			delay = max(delay, RetryAfter(cause))
+		}
+		return delay
+	default:
+		if cause := errors.Unwrap(err); cause != nil {
+			return RetryAfter(cause)
+		}
+		return 0
+	}
 }
 
 func (e *HTTPError) Error() string {
@@ -81,13 +101,13 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 	c.xsrfToken = ""
 	c.client.Jar, _ = cookiejar.New(nil)
 	if strings.TrimSpace(creds.Login) == "" || creds.Password == "" {
-		return ErrAuthentication
+		return ErrCredentialsRejected
 	}
 	body, _ := json.Marshal(map[string]string{"login": creds.Login, "password": creds.Password})
 	data, err := c.request(ctx, http.MethodPost, LoginURL, body)
 	var status *HTTPError
 	if errors.As(err, &status) && (status.StatusCode == http.StatusUnauthorized || status.StatusCode == http.StatusForbidden) {
-		return fmt.Errorf("%w: %w", ErrAuthentication, err)
+		return fmt.Errorf("%w: %w", ErrCredentialsRejected, err)
 	}
 	if err != nil {
 		return err
@@ -100,10 +120,10 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 		return fmt.Errorf("luxmed login: %w", ErrResponse)
 	}
 	if !*result.Succeeded {
-		return ErrAuthentication
+		return ErrCredentialsRejected
 	}
 	if result.Token == "" {
-		return fmt.Errorf("luxmed login did not grant a session: %w", ErrAuthentication)
+		return fmt.Errorf("luxmed login did not grant a session: %w", ErrCredentialsRejected)
 	}
 
 	c.accessToken = result.Token

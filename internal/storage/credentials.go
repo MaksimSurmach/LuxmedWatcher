@@ -42,21 +42,53 @@ func (db *DB) SaveCredentials(ctx context.Context, key *security.Cryptor, owner 
 	if err := db.finalizeLuxMedAccountSave(ctx, tx, owner.ID, false); err != nil {
 		return "", err
 	}
-	verification, err := luxMedReconnectVerification(ctx, tx, owner.ID)
-	if err != nil {
-		return "", err
-	}
-	status := LuxMedAccessConnected
-	if verification.RequiresTerms {
-		status = LuxMedAccessPending
-	}
-	if err := setLuxMedAccessStatus(ctx, tx, owner.ID, status, verification.RequiresTerms); err != nil {
+	if err := db.setModeAccessStatus(ctx, tx, owner.ID, LuxMedAccessConnected); err != nil {
 		return "", err
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err
 	}
 	return sealed, nil
+}
+
+// Hold the user row until the result commits, ordering it against a mode change.
+func (db *DB) withCredentialRevision(ctx context.Context, owner domain.User, write func(*sql.Tx) error) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	const current = ` WHERE id=$1 AND credential_revision=$2 AND status=$3 AND role <> ''`
+	if db.postgres {
+		var revision int64
+		err = tx.QueryRowContext(ctx, `SELECT credential_revision FROM users`+current+` FOR UPDATE`,
+			owner.ID, owner.CredentialRevision, domain.UserStatusActive).Scan(&revision)
+	} else {
+		err = requireOneRow(tx.ExecContext(ctx, `UPDATE users SET credential_revision=credential_revision`+current,
+			owner.ID, owner.CredentialRevision, domain.UserStatusActive))
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrCredentialsChanged
+	}
+	if err != nil {
+		return err
+	}
+	if err := write(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (db *DB) setModeAccessStatus(ctx context.Context, tx *sql.Tx, userID int64, status LuxMedAccessStatus) error {
+	verification, err := luxMedReconnectVerification(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
+	requiresTerms := verification.RequiresTerms || verification.HasSavedWatches
+	if requiresTerms {
+		status = LuxMedAccessPending
+	}
+	return setLuxMedAccessStatus(ctx, tx, userID, status, requiresTerms)
 }
 
 // A viewer link from an older tab cannot remove a saved login. Choosing Chrome

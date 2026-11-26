@@ -781,7 +781,7 @@ async function editor(watch, focusPicks = false) {
     picksStatus.textContent = t(cityID ? 'editor.loading_recommendations' : 'editor.choose_city');
     if (!cityID) return;
     try {
-      const { Referred, Recent, Saved, Popular } = await api('procedure-picks', { CityID: cityID });
+      const { Referred, Recent, Saved, Popular, PortalIncomplete } = await api('procedure-picks', { CityID: cityID });
       if (id !== renderID || request !== picksRequest) return;
       const groups = [
         ['editor.referred_services', Referred],
@@ -801,8 +801,11 @@ async function editor(watch, focusPicks = false) {
         const group = picksList.lastElementChild;
         for (const item of items) group.querySelector(`[data-service="${item.ID}"]`).onclick = () => selectService(item);
       }
-      picksStatus.hidden = picksList.childElementCount > 0;
-      if (!picksStatus.hidden) picksStatus.textContent = t('editor.no_recommendations');
+      picksStatus.hidden = !PortalIncomplete && picksList.childElementCount > 0;
+      if (!picksStatus.hidden) {
+        picksStatus.textContent = t(PortalIncomplete ? 'error.luxmed_unavailable' : 'editor.no_recommendations');
+      }
+      retryPicks.hidden = !PortalIncomplete;
       markSelection();
     } catch (error) {
       if (id !== renderID || request !== picksRequest) return;
