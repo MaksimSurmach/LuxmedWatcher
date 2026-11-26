@@ -385,21 +385,42 @@ func (db *DB) WatchHistory(ctx context.Context, userID, watchID int64, limit, of
 	`, userID, watchID, domain.HistoryStatusHidden, limit, offset)
 }
 
+type NotificationOptionsCursor struct {
+	DateTime  time.Time
+	ID        int64
+	Before    bool
+	Inclusive bool
+}
+
 func (db *DB) AvailableNotificationOptions(
-	ctx context.Context, userID, watchID, messageID int64, now time.Time, limit, offset int,
+	ctx context.Context, userID, watchID, messageID int64, now time.Time, limit int, cursor NotificationOptionsCursor,
 ) ([]domain.AppointmentHistory, error) {
 	date := db.dateTimeSQL("date_time")
-	return db.queryHistory(ctx, historySelect()+`
+	query := historySelect() + `
 		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1 AND id=$2 AND status <> $3)
-			AND status NOT IN ($4, $5) AND `+date+` > `+db.dateTimeSQL("$6")+`
+			AND status NOT IN ($4, $5) AND ` + date + ` > ` + db.dateTimeSQL("$6") + `
 			AND EXISTS (
 				SELECT 1 FROM notification_history AS n
 				WHERE n.watch_id=$2 AND n.appointment_fingerprint=appointment_history.fingerprint
 					AND n.appointment_history_id=appointment_history.id AND n.message_id=$7 AND n.status=$8
 			)
-		ORDER BY `+date+` ASC, id ASC LIMIT $9 OFFSET $10
-	`, userID, watchID, domain.WatchStatusDeleted, domain.HistoryStatusHidden, domain.HistoryStatusExpired,
-		now.UTC(), messageID, domain.NotificationStatusSent, limit, offset)
+	`
+	args := []any{userID, watchID, domain.WatchStatusDeleted, domain.HistoryStatusHidden, domain.HistoryStatusExpired,
+		now.UTC(), messageID, domain.NotificationStatusSent, limit}
+	order := " ASC"
+	if cursor.ID > 0 {
+		comparison := ">"
+		if cursor.Before {
+			comparison, order = "<", " DESC"
+		}
+		if cursor.Inclusive {
+			comparison += "="
+		}
+		query += " AND (" + date + ", id) " + comparison + " (" + db.dateTimeSQL("$10") + ", $11)"
+		args = append(args, cursor.DateTime.UTC(), cursor.ID)
+	}
+	query += " ORDER BY " + date + order + ", id" + order + " LIMIT $9"
+	return db.queryHistory(ctx, query, args...)
 }
 
 func (db *DB) queryHistory(ctx context.Context, query string, args ...any) ([]domain.AppointmentHistory, error) {

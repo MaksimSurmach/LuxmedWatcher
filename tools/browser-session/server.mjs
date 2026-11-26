@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { connect } from 'node:net';
 import { allowedPortalResources, fetchCatalog } from './portal-api.mjs';
 import { checkPortal, observeSession, portalOrigin } from './session.mjs';
+import { renderViewerPage } from './viewer-copy.mjs';
 
 const viewerOrigin = new URL(process.env.LUXMED_VIEWER_URL).origin;
 const context = await chromium.launchPersistentContext('/profile', {
@@ -77,14 +78,19 @@ const api = createServer(async (req, res) => {
 const web = createServer(async (req, res) => {
   try {
     if (req.method !== 'GET') return reply(res, 405);
-    const route = new URL(req.url, viewerOrigin).pathname;
-    const paths = { '/connect': ['viewer.html', 'text/html'], '/viewer.mjs': ['viewer.mjs', 'text/javascript'] };
+    const { pathname: route, searchParams } = new URL(req.url, viewerOrigin);
+    const paths = {
+      '/connect': ['viewer.html', 'text/html'],
+      '/viewer.mjs': ['viewer.mjs', 'text/javascript'],
+      '/viewer-copy.mjs': ['viewer-copy.mjs', 'text/javascript'],
+    };
     let file = paths[route];
     if (!file && /^\/vendor\/(core|vendor)\/[\w/.-]+\.js$/.test(route) && !route.includes('..')) {
       file = [`node_modules/@novnc/novnc/${route.slice(8)}`, 'text/javascript'];
     }
     if (!file) return reply(res, 404);
-    const body = await readFile(new URL(file[0], import.meta.url));
+    const source = await readFile(new URL(file[0], import.meta.url));
+    const body = route === '/connect' ? renderViewerPage(source.toString('utf8'), searchParams.get('lang')) : source;
     const socketOrigin = viewerOrigin.replace(/^http/, 'ws');
     res.writeHead(200, {
       'Content-Type': file[1], 'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',

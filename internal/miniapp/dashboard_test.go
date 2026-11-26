@@ -1,6 +1,7 @@
 package miniapp
 
 import (
+	"context"
 	"crypto/ed25519"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
@@ -56,6 +58,15 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	d := &dashboard{db: db, key: pub, sessions: newSessions(),
 		browsers: map[int64]*luxmed.Browser{owner.TelegramUserID: {}, other.TelegramUserID: {}},
 		cfg:      DashboardConfig{Origin: origin, BotID: 12, MinimumInterval: 2 * time.Minute}}
+	var syncedLocales []string
+	d.cfg.SyncAppMenu = func(ctx context.Context, userID int64) {
+		persisted, err := db.UserByID(ctx, userID)
+		if err != nil || userID != owner.ID {
+			t.Errorf("unexpected chat menu recipient %d: %v", userID, err)
+			return
+		}
+		syncedLocales = append(syncedLocales, persisted.Locale)
+	}
 	handler := d.handler()
 	request := func(action, body, requestOrigin, identity string, want int) *httptest.ResponseRecorder {
 		t.Helper()
@@ -96,6 +107,11 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	request("load", "{}", origin, d.sessions.issue(owner.TelegramUserID, time.Now().Add(-2*time.Hour)), http.StatusUnauthorized)
 	request("load", "{}", origin, "", http.StatusUnauthorized)
 	request("settings", `{"Locale":"pl","CityID":1}`, origin, token, http.StatusNoContent)
+	request("settings", `{"Locale":"fr","CityID":1}`, origin, token, http.StatusBadRequest)
+	request("settings", `{"Locale":"uk","CityID":999}`, origin, token, http.StatusNotFound)
+	if len(syncedLocales) != 1 || syncedLocales[0] != "pl" {
+		t.Fatalf("chat menu sync must use saved preferences, got %v", syncedLocales)
+	}
 	request("watch", `{"CityID":1,"ServiceID":2,"NextDays":14,"CheckMinutes":1}`, origin, token, http.StatusBadRequest)
 	request("watch", `{"CityID":1,"ServiceID":2,"NextDays":14,"CheckMinutes":5}`, origin, token, http.StatusNoContent)
 	res := request("load", "{}", origin, token, http.StatusOK)
@@ -126,18 +142,26 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if !strings.Contains(history, "Konsultacja okulistyczna") || strings.Contains(history, "private record") {
 		t.Fatalf("unexpected history response: %s", history)
 	}
-	request("settings", `{"Locale":"uk","CityID":1}`, origin, token, http.StatusNoContent)
+	for _, locale := range i18n.SupportedLocales {
+		request("settings", fmt.Sprintf(`{"Locale":%q,"CityID":1}`, locale), origin, token, http.StatusNoContent)
+		if got := syncedLocales[len(syncedLocales)-1]; got != locale {
+			t.Errorf("menu sync received %q, want %q", got, locale)
+		}
+		res = request("load", "{}", origin, token, http.StatusOK)
+		if err := json.Unmarshal(res.Body.Bytes(), &view); err != nil {
+			t.Fatal(err)
+		}
+		if view.Locale != locale || len(view.Watches) != 1 || view.Watches[0].ServiceName != "Konsultacja dermatologiczna" {
+			t.Fatalf("locale %s or provider service missing: %s", locale, res.Body)
+		}
+		history = request("history", "{}", origin, token, http.StatusOK).Body.String()
+		if !strings.Contains(history, item.ServiceName) {
+			t.Fatalf("locale %s changed the provider service in history: %s", locale, history)
+		}
+	}
 	res = request("procedures", `{"CityID":1,"Query":"дерматолога"}`, origin, token, http.StatusOK)
-	if !strings.Contains(res.Body.String(), "Консультація дерматолога") {
-		t.Fatalf("unexpected translated procedure response: %s", res.Body)
-	}
-	res = request("load", "{}", origin, token, http.StatusOK)
-	if !strings.Contains(res.Body.String(), "Консультація дерматолога") {
-		t.Fatalf("stored watch label was not localized: %s", res.Body)
-	}
-	history = request("history", "{}", origin, token, http.StatusOK).Body.String()
-	if !strings.Contains(history, "Консультація офтальмолога без огляду очного дна") {
-		t.Fatalf("stored history label was not localized: %s", history)
+	if !strings.Contains(res.Body.String(), "Konsultacja dermatologiczna") {
+		t.Fatalf("localized search did not return the provider name: %s", res.Body)
 	}
 	watch, err = db.Watch(ctx, id)
 	if err != nil || watch.ServiceName != "Konsultacja dermatologiczna" {

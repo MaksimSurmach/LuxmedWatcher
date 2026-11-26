@@ -100,6 +100,7 @@ func (a *App) Run(ctx context.Context) error {
 		PollTimeout:      a.cfg.PollTimeout,
 		Browsers:         browsers,
 		MiniApp:          miniApp,
+		MenuClient:       telegramHTTP{ctx: ctx, client: &http.Client{Timeout: 3 * time.Second}},
 	}, a.logger)
 	runner := scheduler.NewRunner(db, cryptor, tgBot, a.cfg.MinimumInterval, a.cfg.NotificationCooldown, a.cfg.EnableRawLuxMedPayload)
 	runner.UseBrowsers(browsers)
@@ -109,6 +110,7 @@ func (a *App) Run(ctx context.Context) error {
 	dashboardCfg := miniapp.DashboardConfig{
 		MinimumInterval: a.cfg.MinimumInterval,
 		DefaultInterval: a.cfg.DefaultInterval,
+		SyncAppMenu:     tgBot.SyncAppMenu,
 	}
 	var dashboard http.Handler
 	if miniApp != nil {

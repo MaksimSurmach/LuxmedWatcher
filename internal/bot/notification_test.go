@@ -27,7 +27,7 @@ func TestNotificationSingleSlot(t *testing.T) {
 	if shown != 1 || strings.Contains(text, "More options") {
 		t.Fatalf("shown=%d text=%q", shown, text)
 	}
-	for _, want := range []string{"<b>Krakow</b>\nClinic A\nMain 1\n<b>05.01.2030</b>\n09:30 · Dr A"} {
+	for _, want := range []string{"<b>Krakow</b>\nClinic A\nMain 1\n<b>Jan 5, 2030</b>\n09:30 · Dr A"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in %q", want, text)
 		}
@@ -45,7 +45,7 @@ func TestNotificationGroupsSameStreetOnceAndSortsTimes(t *testing.T) {
 	if strings.Count(text, "Main 1") != 1 || strings.Count(text, "Clinic A") != 1 {
 		t.Errorf("address repeated: %q", text)
 	}
-	order := []string{"05.01.2030", "09:00", "14:00", "06.01.2030", "08:00"}
+	order := []string{"Jan 5, 2030", "09:00", "14:00", "Jan 6, 2030", "08:00"}
 	last := -1
 	for _, part := range order {
 		i := strings.Index(text, part)
@@ -222,7 +222,11 @@ func TestAllOptionsCallbackShowsAvailableSlotsFromItsNotification(t *testing.T) 
 
 	items := make([]domain.AppointmentHistory, 0, 11)
 	for i := range 11 {
-		items = append(items, insert(watch.ID, fmt.Sprintf("Street %02d", i+1), now.Add(time.Duration(i+1)*time.Hour)))
+		hour := i + 1
+		if hour == 6 {
+			hour = 5 // Slots 5 and 6 have the same time across the page boundary.
+		}
+		items = append(items, insert(watch.ID, fmt.Sprintf("Street %02d", i+1), now.Add(time.Duration(hour)*time.Hour)))
 	}
 	if _, err := b.NotifyAppointments(ctx, user, watch, items[:3], 3); err != nil {
 		t.Fatal(err)
@@ -277,10 +281,19 @@ func TestAllOptionsCallbackShowsAvailableSlotsFromItsNotification(t *testing.T) 
 			t.Errorf("unexpected %q on first page: %q", excluded, first.text)
 		}
 	}
+	if err := b.db.HideAppointmentHistory(ctx, user.ID, items[0].ID); err != nil {
+		t.Fatal(err)
+	}
 	click(50, button(first, "Next"))
 	second := nextMessage()
 	if !strings.Contains(second.text, "Street 06") || strings.Contains(second.text, "Street 01") {
 		t.Errorf("unexpected second page: %q", second.text)
+	}
+	click(51, button(second, "Previous"))
+	previousPage := nextMessage()
+	if !strings.Contains(previousPage.text, "Street 02") || !strings.Contains(previousPage.text, "Street 05") ||
+		strings.Contains(previousPage.text, "Street 01") || strings.Contains(previousPage.text, "Street 06") {
+		t.Errorf("unexpected previous page after slot removal: %q", previousPage.text)
 	}
 	click(51, button(second, "Next"))
 	third := nextMessage()

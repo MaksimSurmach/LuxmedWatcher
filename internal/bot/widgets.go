@@ -14,7 +14,6 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
-	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
 type telegramUpdate struct {
@@ -93,9 +92,9 @@ type widgetSlot struct {
 	Address  string
 }
 
-func newWidgetSlot(item domain.AppointmentHistory) *widgetSlot {
+func newWidgetSlot(locale string, item domain.AppointmentHistory) *widgetSlot {
 	return &widgetSlot{
-		When:     item.DateTime.In(luxmed.Location()).Format("02.01.2006 · 15:04"),
+		When:     appointmentDateTime(locale, item.DateTime),
 		Doctor:   truncateMessage(item.DoctorName, 64),
 		Facility: truncateMessage(item.FacilityName, 90),
 		Address:  truncateMessage(item.Address, 64),
@@ -157,7 +156,7 @@ func (b *Bot) sendWidget(card widgetCard, caption string, fallback tgbotapi.Mess
 	params.AddNonEmpty("parse_mode", fallback.ParseMode)
 	// The client exposes Telegram errors and discards the HTTP status.
 	api := *b.api
-	client := &widgetHTTP{HTTPClient: api.Client}
+	client := &telegramStatusHTTP{HTTPClient: api.Client}
 	api.Client = client
 	res, err := api.MakeRequest("sendWidget", params)
 	if err != nil {
@@ -182,12 +181,12 @@ func (b *Bot) sendWidget(card widgetCard, caption string, fallback tgbotapi.Mess
 	return sent.MessageID, nil
 }
 
-type widgetHTTP struct {
+type telegramStatusHTTP struct {
 	tgbotapi.HTTPClient
 	status int
 }
 
-func (c *widgetHTTP) Do(req *http.Request) (*http.Response, error) {
+func (c *telegramStatusHTTP) Do(req *http.Request) (*http.Response, error) {
 	res, err := c.HTTPClient.Do(req)
 	if err == nil {
 		c.status = res.StatusCode

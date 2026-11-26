@@ -73,7 +73,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 		b.showMiniApp(ctx, user)
 		return
 	}
-	link, err := browser.ViewerLink(ctx)
+	link, err := browser.ViewerLink(ctx, i18n.Normalize(user.Locale, b.cfg.DefaultLocale))
 	if err != nil {
 		b.logger.Warn("open browser viewer failed", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)

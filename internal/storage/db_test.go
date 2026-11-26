@@ -607,6 +607,7 @@ func TestAvailableNotificationOptions(t *testing.T) {
 			{"later", 2 * time.Hour, 10, domain.NotificationStatusSent},
 			{"past", -time.Hour, 10, domain.NotificationStatusSent},
 			{"earliest", time.Hour, 10, domain.NotificationStatusSent},
+			{"same time", time.Hour, 10, domain.NotificationStatusSent},
 			{"other message", time.Minute, 11, domain.NotificationStatusSent},
 			{"failed", time.Minute, 10, domain.NotificationStatusFailed},
 		} {
@@ -620,11 +621,26 @@ func TestAvailableNotificationOptions(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		items, err := db.AvailableNotificationOptions(ctx, user.ID, watchID, 10, now, 5, 0)
-		if err != nil || len(items) != 2 || items[0].Fingerprint != "earliest" || items[1].Fingerprint != "later" {
+		items, err := db.AvailableNotificationOptions(ctx, user.ID, watchID, 10, now, 5, NotificationOptionsCursor{})
+		if err != nil || len(items) != 3 || items[0].Fingerprint != "earliest" ||
+			items[1].Fingerprint != "same time" || items[2].Fingerprint != "later" {
 			t.Fatalf("available options = %+v, err = %v", items, err)
 		}
-		items, err = db.AvailableNotificationOptions(ctx, user.ID+1, watchID, 10, now, 5, 0)
+		first, last := items[0], items[2]
+		if err := db.HideAppointmentHistory(ctx, user.ID, first.ID); err != nil {
+			t.Fatal(err)
+		}
+		items, err = db.AvailableNotificationOptions(ctx, user.ID, watchID, 10, now, 5,
+			NotificationOptionsCursor{DateTime: first.DateTime, ID: first.ID})
+		if err != nil || len(items) != 2 || items[0].Fingerprint != "same time" {
+			t.Fatalf("available options after hidden cursor = %+v, err = %v", items, err)
+		}
+		items, err = db.AvailableNotificationOptions(ctx, user.ID, watchID, 10, now, 5,
+			NotificationOptionsCursor{DateTime: last.DateTime, ID: last.ID, Before: true})
+		if err != nil || len(items) != 1 || items[0].Fingerprint != "same time" {
+			t.Fatalf("available options before cursor = %+v, err = %v", items, err)
+		}
+		items, err = db.AvailableNotificationOptions(ctx, user.ID+1, watchID, 10, now, 5, NotificationOptionsCursor{})
 		if err != nil || len(items) != 0 {
 			t.Fatalf("another user could list watch options: %+v, err = %v", items, err)
 		}

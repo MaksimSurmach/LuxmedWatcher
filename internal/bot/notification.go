@@ -29,7 +29,7 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 		limit = previewNotificationSlots
 	}
 	title := b.catalog.T(locale, "notification.title", count)
-	header := fmt.Sprintf("<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(locale, watch), 240)))
+	header := fmt.Sprintf("<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(watch), 240)))
 	footer := "\n\n" + html.EscapeString(b.catalog.T(locale, "notification.booking_hint"))
 
 	items := slices.Clone(histories[:min(limit, len(histories))])
@@ -61,7 +61,7 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 			}
 		}
 		if newDate {
-			fmt.Fprintf(&piece, "\n<b>%s</b>", dayOf(*item))
+			fmt.Fprintf(&piece, "\n<b>%s</b>", appointmentDate(locale, item.DateTime))
 		}
 		fmt.Fprintf(&piece, "\n%s", item.DateTime.In(luxmed.Location()).Format("15:04"))
 		if item.DoctorName != "" {

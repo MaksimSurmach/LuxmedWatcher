@@ -75,8 +75,8 @@ func TestControlScopesReadsAndChangesToAssignedUser(t *testing.T) {
 	req("POST", "/v1/preferences", key, `{"Locale":"uk","CityID":1}`, http.StatusNoContent)
 	req("POST", "/v1/searches", key, `{"CityID":1,"ServiceID":2,"NextDays":7,"CheckMinutes":1}`, http.StatusBadRequest)
 	req("POST", "/v1/searches", key, `{"CityID":1,"ServiceID":2,"NextDays":7,"CheckMinutes":5}`, http.StatusNoContent)
-	if view := req("GET", "/v1/workspace", key, "", http.StatusOK); !strings.Contains(view, "Консультація дерматолога") {
-		t.Fatal("saved search or localized procedure is missing")
+	if view := req("GET", "/v1/workspace", key, "", http.StatusOK); !strings.Contains(view, "Konsultacja dermatologiczna") {
+		t.Fatal("saved search with the provider procedure name is missing")
 	}
 	status := func(id int64, value string, want int) {
 		t.Helper()
