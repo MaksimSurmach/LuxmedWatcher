@@ -218,8 +218,9 @@ function autoBookDialog(button, watch) {
   const dialog = document.querySelector('#booking');
   dialog.querySelector('h2').textContent = t('watches.autobook_title');
   dialog.querySelector('dl').innerHTML = `<div><dt>${escape(watch.ServiceName || watch.Name)}</dt><dd>${escape(watch.CityName)}</dd></div>`;
-  const note = dialog.querySelector('.note');
+  const note = dialog.querySelector('#booking-note');
   note.className = 'muted note';
+  note.removeAttribute('role');
   note.textContent = t('watches.autobook_note');
   const open = dialog.querySelector('#booking-open');
   open.hidden = false;
@@ -275,7 +276,7 @@ function timeRow(slot, index, mixed) {
     return `<li><div class="slot-row expired" aria-label="${escape(t('history.unavailable_row', { time: when, doctor }))}">
       <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}<small>${text('history.expired')}</small></span></div></li>`;
   }
-  return `<li><button type="button" class="slot-row" data-slot="${index}" aria-label="${escape(t('history.row_label', { time: when, doctor, address: slot.Address || slot.Facility }))}">
+  return `<li><button type="button" class="slot-row" data-slot="${index}" aria-label="${escape(t('history.row_label', { time: when, doctor: mixed && slot.Service ? `${doctor}, ${slot.Service}` : doctor, address: slot.Address || slot.Facility }))}">
     <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}</span><span class="arrow" aria-hidden="true">›</span></button></li>`;
 }
 
@@ -317,10 +318,11 @@ function bookingDialog(slot) {
     [slot.Doctor || t('history.no_doctor'), slot.Facility],
     [slot.Address, ''],
   ].filter(([a]) => a).map(([a, b]) => `<div><dt>${escape(a)}</dt>${b ? `<dd>${escape(b)}</dd>` : ''}</div>`).join('');
-  const note = dialog.querySelector('.note');
+  const note = dialog.querySelector('#booking-note');
   const open = dialog.querySelector('#booking-open');
   note.textContent = t(state.Booking ? 'history.book_note' : 'history.confirm_note');
   note.className = 'muted note';
+  note.removeAttribute('role');
   open.hidden = false;
   open.lastElementChild.hidden = Boolean(state.Booking);
   open.firstChild.textContent = `${t(state.Booking ? 'history.book_confirm' : 'history.confirm_open')} `;
@@ -328,7 +330,7 @@ function bookingDialog(slot) {
     // The server answers with the provider's decision: confirmed, or the time is already taken.
     const { Status } = await api('book', { ID: slot.ID });
     const confirmed = Status === 'confirmed';
-    note.className = 'outcome';
+    note.className = 'note outcome';
     note.dataset.kind = confirmed ? 'confirmed' : 'taken';
     note.setAttribute('role', 'status');
     note.textContent = confirmed

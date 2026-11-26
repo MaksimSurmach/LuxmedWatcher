@@ -21,6 +21,9 @@ def day(offset, hh, mm):
     d = (datetime.now(timezone.utc) + timedelta(days=offset)).replace(hour=hh - 1, minute=mm, second=0, microsecond=0)
     return d.isoformat().replace('+00:00', 'Z')
 
+BOOKED = {}    # slot ID -> 'confirmed' | 'taken'
+AUTOBOOK = {2: True}  # watch ID -> enabled, booking scenario only
+
 def slots(scenario):
     if scenario == 'empty':
         return []
@@ -30,10 +33,14 @@ def slots(scenario):
     d1 = 'Anna Nowak' if not long else 'dr hab. n. med. Małgorzata Wierzchowska-Przybyszewska'
     svc = 'Echo serca (USG serca)' if not long else 'Konsultacja kardiologiczna z zaleceniami po badaniu echokardiograficznym'
     row = lambda i, t, doc, fac, adr, st='new': dict(ID=i, WatchID=1, DateTime=t, Service=svc, Doctor=doc, Facility=fac, Address=adr, Status=st)
-    return [row(1, day(5, 8, 15), d1, f1, a1), row(2, day(5, 8, 30), d1, f1, a1),
-            dict(row(3, day(5, 9, 40), 'Jan Mazur', f1, 'ul. Prosta 51'), Service='Konsultacja ortopedyczna'),
+    rows = [row(1, day(5, 8, 15), d1, f1, a1), row(2, day(5, 8, 30), d1, f1, a1),
+            dict(row(3, day(5, 9, 40), 'Jan Mazur', f1, a1), Service='Konsultacja ortopedyczna'),
+            row(6, day(5, 11, 0), 'Jan Mazur', f1, 'ul. Prosta 51'),
             row(4, day(6, 12, 5), 'Jan Mazur', f1, 'ul. Prosta 51'),
             row(5, day(-1, 10, 0), d1, f1, a1, 'expired')]
+    # Booking results persist for the server's lifetime: confirmed times leave the list, taken ones stay unavailable.
+    rows = [dict(r, Status='expired') if BOOKED.get(r['ID']) == 'taken' else r for r in rows if BOOKED.get(r['ID']) != 'confirmed']
+    return rows
 
 def watches(scenario):
     base = dict(ID=1, Name='Echo serca', ServiceName='Echo serca (USG serca)', CityName='Warszawa', Status='active',
@@ -46,8 +53,18 @@ def watches(scenario):
     if scenario == 'session':
         base.update(LastError='luxmed_authentication', LastSuccessAt=day(-1, 9, 42))
     if scenario == 'booking':
-        second['AutoBook'] = True
+        base['AutoBook'], second['AutoBook'] = AUTOBOOK.get(1, False), AUTOBOOK.get(2, False)
     return [base, second]
+
+def book(body):
+    sid = slot_id(body)
+    BOOKED[sid] = 'taken' if sid == 2 else 'confirmed'
+    return BOOKED[sid]
+
+def autobook(body):
+    data = json.loads(body or b'{}')
+    AUTOBOOK[data.get('ID')] = bool(data.get('Enabled'))
+    return {}
 
 def slot_id(body):
     try:
@@ -70,7 +87,7 @@ class H(BaseHTTPRequestHandler):
         if name == 'dashboard.html':
             # Scenario and language travel in initData, then in the session token, because the page
             # sends no Referer and the API calls carry no query string.
-            params = json.dumps('&'.join(f'{k}={q[k][0]}' for k in ('scenario', 'lang') if k in q))
+            params = json.dumps('&'.join(f'{k}={q[k][0]}' for k in ('scenario', 'lang') if k in q) or 'preview')
             body = body.replace(b'<script src="https://telegram.org/js/telegram-web-app.js?65"></script>', (STUB % params).encode())
         self.send(body, TYPES.get(f.suffix, 'application/octet-stream'))
     def do_POST(self):
@@ -80,13 +97,14 @@ class H(BaseHTTPRequestHandler):
         params = parse_qs(raw or '')
         scenario, lang = params.get('scenario', [''])[0], params.get('lang', ['ru'])[0]
         booking = scenario == 'booking'
-        data = {'auth': {'token': raw or ''},
-                'book': dict(Status='taken' if slot_id(body) == 2 else 'confirmed'),
-                'autobook': {},
-                'load': dict(Watches=watches(scenario), Locale=lang, Booking=booking, CityID=1, CityName='Warszawa', MinimumMinutes=2, DefaultMinutes=10),
-                'history': dict(Slots=slots(scenario), More=False),
-                'account': dict(state='needs_login' if scenario == 'session' else 'connected'),
-                'cities': [dict(ID=1, Name='Warszawa')]}.get(action, {})
+        handler = {'auth': lambda: {'token': raw or ''},
+                'book': lambda: dict(Status=book(body)),
+                'autobook': lambda: autobook(body),
+                'load': lambda: dict(Watches=watches(scenario), Locale=lang, Booking=booking, CityID=1, CityName='Warszawa', MinimumMinutes=2, DefaultMinutes=10),
+                'history': lambda: dict(Slots=slots(scenario), More=False),
+                'account': lambda: dict(state='needs_login' if scenario == 'session' else 'connected'),
+                'cities': lambda: [dict(ID=1, Name='Warszawa')]}.get(action)
+        data = handler() if handler else {}
         self.send(json.dumps(data).encode(), 'application/json')
 
 if __name__ == '__main__':
