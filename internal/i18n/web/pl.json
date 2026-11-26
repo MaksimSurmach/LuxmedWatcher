@@ -131,7 +131,7 @@
   "watches.check_partial": "Sprawdzono tylko część dni. Pozostałe dni sprawdź w Portalu Pacjenta LUX MED.",
   "watches.checked": "Ostatnie sprawdzenie",
   "watches.deleted": "Wyszukiwanie usunięte",
-  "watches.empty": "Brak wyszukiwań",
+  "watches.empty": "Brak zapisanych wyszukiwań",
   "watches.empty_hint": "Wybierz usługę i daty. Bot powiadomi Cię, gdy znajdzie termin.",
   "watches.new": "Nowe wyszukiwanie",
   "watches.pause": "Wstrzymaj",

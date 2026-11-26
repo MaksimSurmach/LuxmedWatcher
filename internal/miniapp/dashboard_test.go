@@ -245,6 +245,24 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	}
 	d.checkAccount = runner.CheckBrowserSession
 	unauthorized.Store(false)
+	if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+		t.Fatal(err)
+	}
+	episodeID, err := db.LuxMedReconnectEpisode(ctx, other.ID)
+	if err != nil || episodeID == "" {
+		t.Fatalf("expected an open episode: %q, %v", episodeID, err)
+	}
+	request("status", fmt.Sprintf(`{"ID":%d,"Status":"deleted"}`, otherWatch), origin, otherToken, http.StatusNoContent)
+	for _, endpoint := range []struct{ name, statusField string }{
+		{"load", "AccountStatus"},
+		{"account", "state"},
+	} {
+		result := request(endpoint.name, "{}", origin, otherToken, http.StatusOK)
+		if !strings.Contains(result.Body.String(), `"`+endpoint.statusField+`":"no_saved_searches"`) ||
+			!strings.Contains(result.Body.String(), `"ReconnectEpisodeID":"`+episodeID+`"`) {
+			t.Fatalf("%s lost the empty state or episode: %s", endpoint.name, result.Body)
+		}
+	}
 	request("load", "{}", origin, d.sessions.issue(owner.TelegramUserID, time.Now().Add(-2*time.Hour)), http.StatusUnauthorized)
 	request("load", "{}", origin, "", http.StatusUnauthorized)
 	request("settings", `{"Locale":"pl","CityID":1}`, origin, token, http.StatusNoContent)

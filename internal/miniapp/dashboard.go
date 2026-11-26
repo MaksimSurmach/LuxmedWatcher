@@ -439,7 +439,9 @@ func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.
 
 	switch {
 	case err == nil:
-		if check.VerificationPending {
+		if check.NoSavedSearches {
+			result.State = string(storage.LuxMedAccessNoSearches)
+		} else if check.VerificationPending {
 			result.State = "verification_pending"
 		}
 	case errors.Is(err, luxmed.ErrAuthentication):

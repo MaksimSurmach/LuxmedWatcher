@@ -436,8 +436,8 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	if err := db.MarkWatchChecked(ctx, watch.ID, false, ""); err != nil {
 		t.Fatal(err)
 	}
-	if _, required, err := db.LuxMedReconnectVerification(ctx, watch.UserID); err != nil || !required {
-		t.Fatalf("session rejection did not carry forward the protected access requirement: required=%v err=%v", required, err)
+	if verification, err := db.LuxMedReconnectVerification(ctx, watch.UserID); err != nil || !verification.RequiresTerms {
+		t.Fatalf("session rejection did not carry forward the protected access requirement: %+v, %v", verification, err)
 	}
 	if notifier.attempts != 1 || notifier.delivered != 0 {
 		t.Fatalf("rejected delivery had unexpected result: %+v", notifier)
@@ -2145,26 +2145,38 @@ func TestSessionRejectionRequiresSearchAccessToCloseEpisode(t *testing.T) {
 			must(err)
 			result, err := runner.CheckBrowserSession(ctx, user)
 			must(err)
-			if !result.VerificationPending || result.EpisodeID != episodeID || terms.Load() != 0 {
+			wantStatus := status
+			if status == domain.WatchStatusDeleted {
+				if !result.NoSavedSearches || result.VerificationPending || result.EpisodeID != episodeID {
+					t.Fatalf("manual check still waits after deleting the last search: %+v", result)
+				}
+				scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+				before := sessions.Load()
+				if ids := scheduler.maintainReconnectSessions(ctx); len(ids) != 0 || sessions.Load() != before {
+					t.Fatalf("account without searches is still being checked: ids=%v sessions=%d", ids, sessions.Load())
+				}
+				watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+				must(err)
+				if len(watches) != 0 || access.Status != storage.LuxMedAccessNoSearches ||
+					access.EpisodeID != episodeID || sends != 1 || terms.Load() != 0 {
+					t.Fatalf("deletion lost the empty state or episode: watches=%+v access=%+v sends=%d", watches, access, sends)
+				}
+
+				_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 12})
+				must(err)
+				wantStatus = domain.WatchStatusActive
+			} else if !result.VerificationPending || result.NoSavedSearches || result.EpisodeID != episodeID || terms.Load() != 0 {
 				t.Fatalf("session preflight bypassed pending search verification: %+v", result)
 			}
 
 			err = runner.renewBrowserSession(ctx, 42, browser)
-			if status == domain.WatchStatusDeleted {
-				must(err)
-				if terms.Load() != 0 {
-					t.Fatal("tried searching with no usable filter")
-				}
-			} else if !errors.Is(err, luxmed.ErrAuthentication) || terms.Load() != 1 {
+			if !errors.Is(err, luxmed.ErrAuthentication) || terms.Load() != 1 {
 				t.Fatalf("expected protected terms 401, got %v after %d calls", err, terms.Load())
 			}
 			_, access, err := db.WatchesWithReconnectState(ctx, watch.UserID)
 			must(err)
-			if access.EpisodeID != episodeID || access.Status == storage.LuxMedAccessConnected || sends != 1 || catalog.Load() != 0 {
+			if access.EpisodeID != episodeID || access.Status != storage.LuxMedAccessPaused || sends != 1 || catalog.Load() != 0 {
 				t.Fatalf("catalog or failed search resolved the episode: %+v sends=%d catalog=%d", access, sends, catalog.Load())
-			}
-			if status == domain.WatchStatusDeleted {
-				return
 			}
 
 			searchReady.Store(true)
@@ -2172,7 +2184,7 @@ func TestSessionRejectionRequiresSearchAccessToCloseEpisode(t *testing.T) {
 			watches, access, err := db.WatchesWithReconnectState(ctx, watch.UserID)
 			must(err)
 			if access.EpisodeID != "" || access.Status != storage.LuxMedAccessConnected || sends != 1 ||
-				len(watches) != 1 || watches[0].Status != status {
+				len(watches) != 1 || watches[0].Status != wantStatus {
 				t.Fatalf("successful protected check failed to close only this episode: %+v sends=%d watches=%+v", access, sends, watches)
 			}
 		})

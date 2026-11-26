@@ -481,6 +481,7 @@ func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
 type BrowserSessionCheck struct {
 	EpisodeID           string
 	VerificationPending bool
+	NoSavedSearches     bool
 }
 
 // CheckBrowserSession confirms a manual sign-in and restores saved active searches.
@@ -539,17 +540,20 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		r.mu.Unlock()
 	}
 	if err == nil {
-		episodeID, needsTerms, readErr := r.db.LuxMedReconnectVerification(ctx, user.ID)
+		verification, readErr := r.db.LuxMedReconnectVerification(ctx, user.ID)
 		if readErr != nil {
 			return BrowserSessionCheck{}, readErr
 		}
-		if needsTerms && !state.recoveryPending {
+		if verification.RequiresTerms && !state.recoveryPending {
+			if !verification.HasSavedWatches {
+				return BrowserSessionCheck{EpisodeID: verification.EpisodeID, NoSavedSearches: true}, nil
+			}
 			if !background {
 				// The existing reconciliation loop owns the protected search.
 				if err := r.db.SetLuxMedAccessStatus(ctx, user.ID, storage.LuxMedAccessPending, true); err != nil {
 					return BrowserSessionCheck{}, err
 				}
-				return BrowserSessionCheck{EpisodeID: episodeID, VerificationPending: true}, nil
+				return BrowserSessionCheck{EpisodeID: verification.EpisodeID, VerificationPending: true}, nil
 			}
 			return BrowserSessionCheck{}, r.checkReconnectSearch(ctx, user.ID, state, time.Now(), browser)
 		}

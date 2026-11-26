@@ -121,12 +121,14 @@ function show(title, html, focus = true) {
 
 // The portal connection is only checked when the user asks (never automatically).
 // Compact: a status line with the two actions, used on Home. Full: adds instructions, used in Settings.
+const accountStatusKey = (status) => status === 'no_saved_searches' ? 'watches.empty' : `account.${status}`;
+
 function accountSection(compact = false) {
   const account = state.AccountStatus;
   return `<section class="card stack account${compact ? ' compact' : ''}" data-state="${account}" aria-labelledby="account-heading">
     <div class="account-head">
       <h2 id="account-heading">${text('account.title')}</h2>
-      <p class="account-status" data-state="${account}" role="status">${text(`account.${account}`)}</p>
+      <p class="account-status" data-state="${account}" role="status">${text(accountStatusKey(account))}</p>
     </div>
     <div class="account-actions">
       <button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>
@@ -170,7 +172,7 @@ function bindAccount() {
     main.querySelector('.account').dataset.state = account;
     const status = main.querySelector('.account-status');
     status.dataset.state = account;
-    status.textContent = t(`account.${account}`);
+    status.textContent = t(accountStatusKey(account));
   }
 
   function scheduleRefresh() {
@@ -219,7 +221,7 @@ function home() {
   show(t('home.title'), `<p class="home-intro">${text('home.intro')}</p>
     <div class="stack home">
       <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
-      <p class="home-count">${searchHint}</p>
+      ${state.AccountStatus === 'no_saved_searches' ? '' : `<p class="home-count">${searchHint}</p>`}
       <div class="rows">
         <button type="button" class="row" id="recommendations"><span>${text('editor.recommendations')}</span></button>
         <a class="row" href="${referralsPortal}" target="_blank" rel="noopener"><span>${text('home.referrals')}</span>${icon('link')}</a>
@@ -318,7 +320,7 @@ function autoBookDialog(button, watch) {
 
 function watches() {
   const items = state.Watches ?? [];
-  const showAccount = state.AccountStatus !== 'unchecked';
+  const showAccount = !['unchecked', 'no_saved_searches'].includes(state.AccountStatus);
   show(titleFor('watches'), `<div class="stack">
     <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
     ${showAccount ? accountSection(true) : ''}

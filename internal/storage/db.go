@@ -319,7 +319,7 @@ func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool, br
 		SELECT u.telegram_user_id
 		FROM users u
 		WHERE u.status=$1 AND u.role <> ''
-			AND (($3 AND (
+			AND (($3 AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status IN ($2, $5)) AND (
 				EXISTS (SELECT 1 FROM luxmed_reconnect r WHERE r.user_id=u.id)
 				OR ((`+credentials+`)
 					AND (`+hasAccountTermsRequirement("u.id")+`

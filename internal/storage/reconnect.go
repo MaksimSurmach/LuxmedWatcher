@@ -31,11 +31,12 @@ func (db *DB) LuxMedReconnectEpisode(ctx context.Context, userID int64) (string,
 type LuxMedAccessStatus string
 
 const (
-	LuxMedAccessUnchecked LuxMedAccessStatus = "unchecked"
-	LuxMedAccessConnected LuxMedAccessStatus = "connected"
-	LuxMedAccessPending   LuxMedAccessStatus = "verification_pending"
-	LuxMedAccessRejected  LuxMedAccessStatus = "needs_login"
-	LuxMedAccessPaused    LuxMedAccessStatus = "search_paused"
+	LuxMedAccessUnchecked  LuxMedAccessStatus = "unchecked"
+	LuxMedAccessConnected  LuxMedAccessStatus = "connected"
+	LuxMedAccessPending    LuxMedAccessStatus = "verification_pending"
+	LuxMedAccessRejected   LuxMedAccessStatus = "needs_login"
+	LuxMedAccessPaused     LuxMedAccessStatus = "search_paused"
+	LuxMedAccessNoSearches LuxMedAccessStatus = "no_saved_searches"
 )
 
 type LuxMedAccessSnapshot struct {
@@ -79,18 +80,21 @@ func (db *DB) WatchesWithReconnectState(ctx context.Context, userID int64) ([]do
 	if err != nil {
 		return nil, access, err
 	}
-	var staleSignInError bool
+	var requiresTerms, staleSignInError bool
 	err = tx.QueryRowContext(ctx, `
-		SELECT `+reconnectEpisodeSQL+`, `+accessStatusSQL+`, `+hasWatchSignInError("$2", "$3"),
+		SELECT `+reconnectEpisodeSQL+`, `+accessStatusSQL+`,
+			`+hasAccountTermsRequirement("$1")+`, `+hasWatchSignInError("$2", "$3"),
 		userID, domain.WatchStatusActive, domain.WatchStatusPaused,
-	).Scan(&access.EpisodeID, &access.Status, &staleSignInError)
+	).Scan(&access.EpisodeID, &access.Status, &requiresTerms, &staleSignInError)
 	if err != nil {
 		return nil, access, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, access, err
 	}
-	if access.Status != LuxMedAccessPending {
+	if len(watches) == 0 && (access.EpisodeID != "" || requiresTerms || access.Status == LuxMedAccessPending) {
+		access.Status = LuxMedAccessNoSearches
+	} else if access.Status != LuxMedAccessPending {
 		switch {
 		case access.EpisodeID != "":
 			access.Status = LuxMedAccessPaused
@@ -142,14 +146,23 @@ func hasWatchSignInError(active, paused string) string {
 		AND ` + watchSignInError + `)`
 }
 
-func (db *DB) LuxMedReconnectVerification(ctx context.Context, userID int64) (string, bool, error) {
-	var episodeID string
-	var required bool
+type LuxMedVerification struct {
+	EpisodeID       string
+	RequiresTerms   bool
+	HasSavedWatches bool
+}
+
+func (db *DB) LuxMedReconnectVerification(ctx context.Context, userID int64) (LuxMedVerification, error) {
+	var verification LuxMedVerification
 	err := db.sql.QueryRowContext(ctx, `
 		SELECT `+reconnectEpisodeSQL+`,
-		    `+hasAccountTermsRequirement("$1")+` OR `+hasWatchSignInError("$2", "$3")+`
-	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&episodeID, &required)
-	return episodeID, episodeID != "" || required, err
+		    `+hasAccountTermsRequirement("$1")+` OR `+hasWatchSignInError("$2", "$3")+`,
+		    EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status IN ($2, $3))
+	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(
+		&verification.EpisodeID, &verification.RequiresTerms, &verification.HasSavedWatches,
+	)
+	verification.RequiresTerms = verification.RequiresTerms || verification.EpisodeID != ""
+	return verification, err
 }
 
 type ReconnectDeliveryClaim struct {

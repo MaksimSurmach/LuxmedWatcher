@@ -131,7 +131,7 @@
   "watches.check_partial": "Only some dates were checked. Check the remaining dates in the LUX MED portal.",
   "watches.checked": "Last check",
   "watches.deleted": "Search deleted",
-  "watches.empty": "No searches yet",
+  "watches.empty": "No saved searches",
   "watches.empty_hint": "Choose a service and dates. The bot will message you when it finds an appointment.",
   "watches.new": "New search",
   "watches.pause": "Pause",
