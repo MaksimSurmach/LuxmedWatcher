@@ -26,7 +26,8 @@ type Credentials struct {
 
 type SearchResult struct {
 	Appointments []domain.Appointment
-	// Checked indicates that LUX MED returned a valid response for at least one date window.
+	// Checked records a validated date window or verified slots in a partial response.
+	// A subsequent ErrAuthentication still invalidates the session.
 	Checked bool
 }
 

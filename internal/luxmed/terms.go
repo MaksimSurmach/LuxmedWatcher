@@ -105,11 +105,11 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 			return result, searchFailure(result.Checked, err)
 		}
 		preview, err := decodeTermsResponse(watch, data, c.rawPayloads)
+		result.Checked = result.Checked || err == nil || len(preview.apps) > 0
 		addMatches(preview.apps, from, end)
 		if err != nil {
-			return result, searchFailure(result.Checked || len(preview.apps) > 0, err)
+			return result, searchFailure(result.Checked, err)
 		}
-		result.Checked = true
 		slices.SortFunc(preview.days, func(a, b dayInfo) int { return cmp.Compare(a.Day, b.Day) })
 		for _, info := range preview.days {
 			if info.Counter.Count <= 0 || requested[info.Day] {

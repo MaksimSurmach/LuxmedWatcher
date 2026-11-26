@@ -186,7 +186,7 @@ func TestMalformedPreviewKeepsVerifiedSlots(t *testing.T) {
 		CityID: 1, ServiceID: 2, DateFrom: &occasion, DateTo: &occasion,
 	})
 	apps := result.Appointments
-	if !errors.Is(err, ErrPartialResults) || len(apps) != 1 || apps[0].BookingURL != ReservationPageURL {
-		t.Fatalf("verified slots = %d, error = %v", len(apps), err)
+	if !result.Checked || !errors.Is(err, ErrPartialResults) || len(apps) != 1 || apps[0].BookingURL != ReservationPageURL {
+		t.Fatalf("checked = %v, verified slots = %d, error = %v", result.Checked, len(apps), err)
 	}
 }
