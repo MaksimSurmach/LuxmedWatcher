@@ -148,6 +148,15 @@ func HashInviteCode(code string) string {
 }
 
 func (db *DB) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	return db.saveLuxMedAccount(ctx, account, true)
+}
+
+// SavePendingLuxMedAccount saves encrypted credentials and schedules access verification.
+func (db *DB) SavePendingLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	return db.saveLuxMedAccount(ctx, account, false)
+}
+
+func (db *DB) saveLuxMedAccount(ctx context.Context, account domain.LuxMedAccount, verified bool) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -169,13 +178,23 @@ func (db *DB) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.LuxM
 	if err != nil {
 		return err
 	}
-	if err := resolveLuxMedReconnect(ctx, tx, account.UserID); err != nil {
-		return err
+	if verified {
+		if err := resolveLuxMedReconnect(ctx, tx, account.UserID); err != nil {
+			return err
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE watches SET last_checked_at=NULL WHERE user_id=$1 AND status=$2
+		`, account.UserID, domain.WatchStatusActive); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	db.clearPendingReconnectRejections(account.UserID)
+	if verified {
+		db.clearPendingReconnectRejections(account.UserID)
+	}
 	return nil
 }
 

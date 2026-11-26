@@ -389,11 +389,10 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		if err := b.verifyPasswordAccess(ctx, user.ID, client); err != nil {
+		deferred, err := b.deferPasswordVerification(ctx, user.ID, client)
+		if err != nil {
 			key := "errors.generic"
 			switch {
-			case errors.Is(err, scheduler.ErrRateLimited):
-				key = "watch.check_rate_limited"
 			case errors.Is(err, luxmed.ErrAuthentication):
 				key = "errors.auth_failed"
 			case errors.Is(err, luxmed.ErrUnavailable), errors.Is(err, context.DeadlineExceeded):
@@ -409,8 +408,16 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 		}
 		now := time.Now().UTC()
 		save := b.db.SaveVerifiedLuxMedAccount
+		key := "flow.account.saved"
+		if deferred {
+			save = b.db.SavePendingLuxMedAccount
+			key = "flow.account.verification_pending"
+		}
 		if b.runner != nil {
 			save = b.runner.SaveVerifiedLuxMedAccount
+			if deferred {
+				save = b.runner.SavePendingLuxMedAccount
+			}
 		}
 		err = save(ctx, domain.LuxMedAccount{
 			UserID:            user.ID,
@@ -424,7 +431,7 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
-		b.send(user, b.catalog.T(user.Locale, "flow.account.saved"), mainKeyboard(b.catalog, user.Locale))
+		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
 	case flowWatchCity:
 		b.showCityPicker(ctx, user, state.CitySettings, 0)
 	case flowCitySearch:

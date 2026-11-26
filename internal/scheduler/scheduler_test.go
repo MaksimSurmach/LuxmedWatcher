@@ -1287,6 +1287,76 @@ func TestPasswordAuthenticationAloneDoesNotResolveReconnect(t *testing.T) {
 	}
 }
 
+func TestDeferredPasswordVerificationSurvivesRestartAndRespectsSearchCooldown(t *testing.T) {
+	for _, scenario := range []struct {
+		name      string
+		searchErr error
+	}{
+		{name: "protected search confirms the login"},
+		{name: "protected search still rejects the token", searchErr: luxmed.ErrAuthentication},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "watcher.sqlite")
+			sends := 0
+			notifier := reconnectNotifierFunc{send: func() error {
+				sends++
+				return nil
+			}}
+			oldRunner, db, watch := testRunnerAt(t, notifier, path)
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			watch.CityID, watch.ServiceID, watch.CheckIntervalSeconds = 1, 12, 3600
+			must(db.UpdateWatch(ctx, watch))
+			must(db.MarkWatchChecked(ctx, watch.ID, false, "luxmed_authentication"))
+			must(db.BeginLuxMedReconnect(ctx, watch.UserID))
+			must(db.MarkLuxMedReconnectNotified(ctx, watch.UserID))
+			const cooldown = 5 * time.Minute
+			started := time.Now().UTC()
+			reserved, err := db.ReserveLuxMedSearch(ctx, watch.UserID, started, cooldown)
+			if err != nil || !reserved {
+				t.Fatalf("reserve original search: %v, %v", reserved, err)
+			}
+			account, err := db.LuxMedAccount(ctx, watch.UserID)
+			must(err)
+			account.Login = "replacement credentials"
+			must(oldRunner.SavePendingLuxMedAccount(ctx, account))
+
+			reopened, err := storage.Open(ctx, path)
+			must(err)
+			t.Cleanup(func() { reopened.Close() })
+			runner := NewRunner(reopened, oldRunner.cryptor, notifier, cooldown, time.Hour, false)
+			client := &fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) {
+				return nil, scenario.searchErr
+			}}
+			runner.newClient = func(bool) luxmed.Client { return client }
+			due, err := reopened.DueWatches(ctx, 0)
+			must(err)
+			if len(due) != 1 || due[0].ID != watch.ID || due[0].CityID != watch.CityID ||
+				due[0].ServiceID != watch.ServiceID || due[0].CheckIntervalSeconds != watch.CheckIntervalSeconds {
+				t.Fatalf("unexpected queued search after restart: %+v", due)
+			}
+			if err := runner.CheckWatch(ctx, due[0]); !errors.Is(err, ErrRateLimited) || client.logins != 0 {
+				t.Fatalf("verification bypassed cooldown: logins=%d err=%v", client.logins, err)
+			}
+
+			must(reopened.ReleaseLuxMedSearch(ctx, watch.UserID, started))
+			runner.accounts[watch.UserID].next = time.Time{}
+			if err := runner.CheckWatch(ctx, due[0]); !errors.Is(err, scenario.searchErr) || client.logins != 1 {
+				t.Fatalf("protected verification: logins=%d err=%v", client.logins, err)
+			}
+			required, err := reopened.LuxMedReconnectRequired(ctx, watch.UserID)
+			if err != nil || required != (scenario.searchErr != nil) || sends != 0 {
+				t.Fatalf("episode after verification: open=%v duplicate warnings=%d err=%v", required, sends, err)
+			}
+		})
+	}
+}
+
 func TestBrowserReconnectWaitsForConfirmedAuthorizationFailure(t *testing.T) {
 	ctx := t.Context()
 	sends := 0

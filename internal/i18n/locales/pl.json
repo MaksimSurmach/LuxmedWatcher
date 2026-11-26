@@ -70,6 +70,7 @@
   "flow.account.password": "Wyślij hasło LUX MED.",
   "flow.account.removed": "Konto LUX MED odłączone. Wyszukiwania są wstrzymane.",
   "flow.account.saved": "Konto LUX MED zapisane.",
+  "flow.account.verification_pending": "Dane konta LUX MED są zapisane. Dostęp zostanie sprawdzony przy najbliższym dozwolonym wyszukiwaniu.",
   "flow.city_not_found": "Nie znaleziono miasta. Spróbuj innej pisowni.",
   "flow.city_results": "Wybierz miasto z wyników wyszukiwania.",
   "flow.city_search": "Wpisz nazwę miasta. Możesz użyć polskich znaków albo zwykłej łacinki.",

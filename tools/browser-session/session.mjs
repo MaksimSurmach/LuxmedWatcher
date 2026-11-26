@@ -59,15 +59,18 @@ function onPage(url, origin, path) {
 export async function checkPortal(page, origin = portalOrigin) {
   try {
     const response = await page.goto(`${origin}${reservation}`, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+    const navigation = response && new URL(response.url());
+    if (navigation?.origin === origin && response.status() === 401) {
+      return 'needs_login';
+    }
     if (!response?.ok()) {
       return 'unavailable';
     }
 
-    const route = new URL(page.url());
-    if (onPage(route, origin, login)) {
+    if (onPage(navigation, origin, login)) {
       return 'needs_login';
     }
-    if (!onPage(route, origin, reservation)) {
+    if (!onPage(navigation, origin, reservation)) {
       return 'unavailable';
     }
 
@@ -75,7 +78,7 @@ export async function checkPortal(page, origin = portalOrigin) {
     const current = new URL(page.url());
     return onPage(current, origin, reservation) ? 'ready' : 'unavailable';
   } catch {
-    return onPage(new URL(page.url()), origin, login) ? 'needs_login' : 'unavailable';
+    return 'unavailable';
   }
 }
 

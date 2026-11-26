@@ -123,12 +123,25 @@ func (r *Runner) releaseAccount(state *accountCheck) {
 
 // SaveVerifiedLuxMedAccount commits sign-in after any in-flight check or delivery.
 func (r *Runner) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	return r.saveLuxMedAccount(ctx, account.UserID, func() error {
+		return r.db.SaveVerifiedLuxMedAccount(ctx, account)
+	})
+}
+
+func (r *Runner) SavePendingLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	return r.saveLuxMedAccount(ctx, account.UserID, func() error {
+		return r.db.SavePendingLuxMedAccount(ctx, account)
+	})
+}
+
+func (r *Runner) saveLuxMedAccount(ctx context.Context, userID int64, save func() error) error {
 	for ctx.Err() == nil {
-		state, done := r.acquireAccount(account.UserID, false)
+		state, done := r.acquireAccount(userID, false)
 		if state != nil {
 			defer r.releaseAccount(state)
-			err := r.db.SaveVerifiedLuxMedAccount(ctx, account)
+			err := save()
 			if err == nil {
+				state.client = nil
 				state.recoveryPending = false
 			}
 			return err

@@ -68,10 +68,14 @@ export async function requestPortalResource(profileDir, id, path, {
       let status = responseStatus(response, origin);
       let after;
       if (status === 200) {
-        const next = await client.storageState();
-        after = expiry(next, origin);
-        if (after > Math.max(before, Date.now())) await saveCookies(next);
-        else status = 401;
+        if (response.headers()['content-type']?.toLowerCase().includes('text/html')) {
+          status = 502;
+        } else {
+          const next = await client.storageState();
+          after = expiry(next, origin);
+          if (after > Math.max(before, Date.now())) await saveCookies(next);
+          else status = 502;
+        }
       }
       report({
         event: 'luxmed_http_refresh', at: new Date().toISOString(), status,

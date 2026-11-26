@@ -45,37 +45,23 @@ func (b *Bot) resumeAfterTelegramUnblock(ctx context.Context, telegramID int64) 
 	return b.runner.ResumeLuxMedReconnectDelivery(ctx, user.ID)
 }
 
-func (b *Bot) verifyPasswordAccess(ctx context.Context, userID int64, client luxmed.Client) error {
+func (b *Bot) deferPasswordVerification(ctx context.Context, userID int64, client luxmed.Client) (bool, error) {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	watches, err := b.db.WatchesByUser(ctx, userID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	now := time.Now().UTC()
 	for _, watch := range watches {
-		if watch.Status != domain.WatchStatusActive || !luxmed.SearchWindowOpen(watch, now) {
-			continue
+		if watch.Status == domain.WatchStatusActive && luxmed.SearchWindowOpen(watch, now) {
+			// A history request does not prove access to the protected terms route.
+			return true, nil
 		}
-		ok, err := b.db.ReserveLuxMedSearch(ctx, userID, now, b.cfg.MinimumInterval)
-		if err != nil {
-			return err
-		}
-		if !ok {
-			return scheduler.ErrRateLimited
-		}
-		result, err := client.SearchAppointments(ctx, watch)
-		if result.Checked && !errors.Is(err, luxmed.ErrAuthentication) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		return luxmed.ErrResponse
 	}
 	// A new account has no saved filters yet. Its personal search history is protected too.
 	_, err = client.GetRecentProcedures(ctx)
-	return err
+	return false, err
 }
 
 func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error {
@@ -112,7 +98,7 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 	switch {
 	case code == http.StatusTooManyRequests:
 		return &scheduler.ReconnectDeliveryRejected{RetryAfter: delay}
-	case code == http.StatusUnauthorized:
+	case code == http.StatusUnauthorized || code == http.StatusBadRequest:
 		return &scheduler.ReconnectDeliveryRejected{RetryAfter: max(time.Hour, delay)}
 	case code == http.StatusForbidden:
 		// The user may unblock the bot while the reconnect episode is still open.

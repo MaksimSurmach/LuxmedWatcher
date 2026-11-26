@@ -7,6 +7,22 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { checkPortal, observeSession, openProfile, waitForLogin } from './session.mjs';
 
+test('only the current navigation can confirm an expired session', async () => {
+  const origin = 'https://portal.example.test';
+  const login = `${origin}/PatientPortal/NewPortal/Page/Account/Login`;
+  const page = {
+    url: () => login,
+    goto: async target => ({ url: () => target, status: () => 401, ok: () => false }),
+  };
+  assert.equal(await checkPortal(page, origin), 'needs_login');
+  page.goto = async () => { throw new Error('navigation timed out before receiving a response'); };
+  assert.equal(await checkPortal(page, origin), 'unavailable');
+  page.goto = async target => ({ url: () => target, status: () => 503, ok: () => false });
+  assert.equal(await checkPortal(page, origin), 'unavailable');
+  page.goto = async () => ({ url: () => login, status: () => 200, ok: () => true });
+  assert.equal(await checkPortal(page, origin), 'needs_login');
+});
+
 test('the same Chrome profile can retain a portal session and report expiration', { timeout: 40_000 }, async (t) => {
   const directory = await mkdtemp(join(tmpdir(), 'luxmed-profile-test-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
