@@ -365,16 +365,51 @@ func (db *DB) RecentHistory(ctx context.Context, userID int64, limit, offset int
 	return db.WatchHistory(ctx, userID, 0, limit, offset)
 }
 
-// UpcomingHistory pages through a user's history nearest-first: times from now on in ascending
-// order, then past or expired times newest first. Pages therefore never reveal an earlier
-// upcoming time after a later one.
-func (db *DB) UpcomingHistory(ctx context.Context, userID int64, now time.Time, limit, offset int) ([]domain.AppointmentHistory, error) {
+// HistoryPosition records the last slot's sort keys as they were when its page was read.
+type HistoryPosition struct {
+	DateTime time.Time
+	ID       int64
+	Expired  bool
+}
+
+// UpcomingHistory orders future available times nearest-first, followed by unavailable times
+// newest-first. Keep asOf fixed and pass the preceding page's last position to continue a view.
+func (db *DB) UpcomingHistory(ctx context.Context, userID int64, asOf time.Time, limit, offset int, after *HistoryPosition) ([]domain.AppointmentHistory, error) {
 	when := db.dateTimeSQL("date_time")
-	past := `CASE WHEN ` + when + ` >= ` + db.dateTimeSQL("$2") + ` AND status <> $3 THEN 0 ELSE 1 END`
-	rows, err := db.sql.QueryContext(ctx, historySelect()+`
+	cutoff := db.dateTimeSQL("$2")
+	query := `WITH ranked AS (
+		SELECT ` + historyColumns + `, ` + when + ` AS slot_time,
+			CASE WHEN ` + when + ` > ` + cutoff + ` AND status <> $3 THEN 0 ELSE 1 END AS unavailable
+		FROM appointment_history
 		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1) AND status <> $4
-		ORDER BY `+past+`, CASE WHEN `+past+` = 0 THEN `+when+` END ASC, `+when+` DESC, id ASC LIMIT $5 OFFSET $6
-	`, userID, now.UTC(), domain.HistoryStatusExpired, domain.HistoryStatusHidden, limit, offset)
+	)`
+	args := []any{userID, asOf.UTC(), domain.HistoryStatusExpired, domain.HistoryStatusHidden, limit, offset}
+	if after != nil {
+		cursorTime := db.dateTimeSQL("$7")
+		if db.postgres {
+			cursorTime = "CAST($7 AS timestamptz)"
+		}
+		query += `, boundary AS (
+			SELECT ` + cursorTime + ` AS slot_time,
+				CASE WHEN ` + cursorTime + ` > ` + cutoff + ` AND NOT $8 THEN 0 ELSE 1 END AS unavailable
+		)
+		SELECT ` + historyColumns + ` FROM ranked
+		WHERE EXISTS (
+			SELECT 1 FROM boundary
+			WHERE ranked.unavailable > boundary.unavailable
+				OR (ranked.unavailable = boundary.unavailable AND (
+					CASE WHEN ranked.unavailable = 0 THEN ranked.slot_time > boundary.slot_time
+						ELSE ranked.slot_time < boundary.slot_time END
+					OR (ranked.slot_time = boundary.slot_time AND ranked.id > $9)
+				))
+		)`
+		args = append(args, after.DateTime.UTC(), after.Expired, after.ID)
+	} else {
+		query += ` SELECT ` + historyColumns + ` FROM ranked`
+	}
+	query += ` ORDER BY unavailable, CASE WHEN unavailable = 0 THEN slot_time END ASC,
+		slot_time DESC, id ASC LIMIT $5 OFFSET $6`
+	rows, err := db.sql.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}

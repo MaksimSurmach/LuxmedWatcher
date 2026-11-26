@@ -2,7 +2,9 @@ package bot
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"strconv"
 	"strings"
 
@@ -24,6 +26,39 @@ func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
 	return err
 }
 
+func accountCheckMessage(err error) string {
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		return "errors.no_account"
+	case errors.Is(err, luxmed.ErrAuthentication):
+		return "errors.needs_login"
+	case errors.Is(err, luxmed.ErrBrowserBusy):
+		return "watch.browser_busy"
+	case errors.Is(err, luxmed.ErrUnavailable):
+		return "errors.luxmed_unavailable"
+	default:
+		return "errors.generic"
+	}
+}
+
+func (b *Bot) withAccountRecovery(
+	user domain.User,
+	key string,
+	markup tgbotapi.InlineKeyboardMarkup,
+) tgbotapi.InlineKeyboardMarkup {
+	var button tgbotapi.InlineKeyboardButton
+	switch key {
+	case "errors.needs_login":
+		button = tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.sign_in"), "connect:open")
+	case "errors.no_account":
+		button = tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.connect"), "account")
+	default:
+		return markup
+	}
+	markup.InlineKeyboard = append([][]tgbotapi.InlineKeyboardButton{{button}}, markup.InlineKeyboard...)
+	return markup
+}
+
 func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if b.cfg.Browsers == nil {
 		b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
@@ -34,7 +69,6 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if !user.IsActive() || browser == nil {
 		return
 	}
-	b.clearFlow(user.ID)
 	if b.cfg.MiniApp != nil {
 		b.showMiniApp(ctx, user)
 		return
@@ -53,7 +87,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 		}
 		return
 	}
-	button := tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), link)
+	button := tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.sign_in"), link)
 	b.send(user, b.catalog.T(user.Locale, "flow.browser.open"), tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(button)))
 }
 
@@ -64,7 +98,7 @@ func (b *Bot) showMiniApp(ctx context.Context, user domain.User) {
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
 		return
 	}
-	b.sendMiniApp(user, "flow.browser.miniapp", "button.open_luxmed", link+"&lang="+i18n.Normalize(user.Locale, "pl"))
+	b.sendMiniApp(user, "flow.browser.open", "button.sign_in", link+"&lang="+i18n.Normalize(user.Locale, "pl"))
 }
 
 // The pinned Bot API client predates the web_app field.

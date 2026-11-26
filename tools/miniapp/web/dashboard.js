@@ -15,6 +15,17 @@ const localDate = new Intl.DateTimeFormat('sv-SE', { timeZone: 'Europe/Warsaw' }
 const dateOnly = (date) => date ? localDate.format(new Date(date)) : '';
 const dateText = (date) => shortDate.format(new Date(date));
 const text = (key, values) => escape(t(key, values));
+
+class DashboardError extends Error {
+  constructor(key, fallback = '') {
+    super(t(key) || fallback);
+    this.key = key;
+  }
+}
+
+function errorText(error) {
+  return error instanceof DashboardError ? error.message : t('error.unavailable');
+}
 const tabs = ['home', 'watches', 'history', 'settings'];
 const titleFor = (tab) => t(`tabs.${tab}`);
 let shortDate;
@@ -64,15 +75,15 @@ async function api(action, data = {}) {
     if (response.status === 204) return;
     if (response.ok) return await response.json();
   } catch {
-    throw new Error(t('error.unavailable'));
+    throw new DashboardError('error.unavailable');
   }
-  if (response.status === 401) throw new Error(t('error.reopen'));
-  if (response.status === 403) throw new Error(t('error.access_denied'));
-  if (response.status === 429) throw new Error(t('error.browser_busy'));
-  if (response.status === 409) throw new Error(t('error.connect_first'));
-  if (response.status === 400) throw new Error(t('error.invalid_fields'));
-  if (response.status === 404) throw new Error(t('error.stale'));
-  throw new Error(t('error.unavailable'));
+  if (response.status === 401) throw new DashboardError('error.reopen');
+  if (response.status === 403) throw new DashboardError('error.access_denied');
+  if (response.status === 429) throw new DashboardError('error.browser_busy');
+  if (response.status === 409) throw new DashboardError('error.connect_first');
+  if (response.status === 400) throw new DashboardError('error.invalid_fields');
+  if (response.status === 404) throw new DashboardError('error.stale');
+  throw new DashboardError('error.unavailable');
 }
 
 async function run(button, action, errorTarget) {
@@ -81,8 +92,8 @@ async function run(button, action, errorTarget) {
   try {
     await action();
   } catch (error) {
-    if (errorTarget) errorTarget.textContent = error.message;
-    else flash(error.message);
+    if (errorTarget) errorTarget.textContent = errorText(error);
+    else flash(errorText(error));
   } finally {
     button.disabled = false;
   }
@@ -116,7 +127,7 @@ function accountSection(compact = false) {
 async function signIn() {
   const { url } = await api('connect');
   const target = new URL(url);
-  if (target.origin !== location.origin || target.pathname !== '/') throw new Error(t('error.link'));
+  if (target.origin !== location.origin || target.pathname !== '/') throw new DashboardError('error.link');
   target.searchParams.set('return', 'app');
   target.hash = location.hash;
   location.assign(target.href);
@@ -170,8 +181,12 @@ function hoursLabel(windows) {
   return windows.map(window => `${weekdays[window.weekday]} ${window.from}–${window.to}`).join(' · ');
 }
 
-const problemKey = { luxmed_account_missing: 'problem_auth', luxmed_authentication: 'problem_auth',
-  luxmed_unavailable: 'problem_unavailable', luxmed_partial: 'problem_partial' };
+const watchErrors = new Map([
+  ['luxmed_account_missing', 'error.no_account'],
+  ['luxmed_authentication', 'error.connect_first'],
+  ['luxmed_unavailable', 'error.luxmed_unavailable'],
+  ['luxmed_partial', 'watches.check_partial'],
+]);
 const timeOf = (date) => `${dateText(date)}, ${clock.format(new Date(date))}`;
 
 // Monitoring state and the last successful check are separate facts: a search can be
@@ -182,9 +197,8 @@ function watchCard(watch) {
     ? `${dateText(watch.DateFrom)} — ${dateText(watch.DateTo)}`
     : text('watches.period_days', { days: watch.NextDays });
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
-  const failing = Boolean(watch.LastError);
-  const problem = failing ? t(`watches.${problemKey[watch.LastError] ?? 'problem_generic'}`) : '';
-  const needsLogin = problemKey[watch.LastError] === 'problem_auth';
+  const checkError = watch.LastError ? watchErrors.get(watch.LastError) ?? 'watches.check_error' : '';
+  const needsLogin = checkError === 'error.connect_first' || checkError === 'error.no_account';
   const success = watch.LastSuccessAt ? timeOf(watch.LastSuccessAt) : t('watches.never_succeeded');
   return `<article class="card watch" data-status="${active ? 'active' : 'paused'}">
     <h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
@@ -195,9 +209,10 @@ function watchCard(watch) {
       ${state.Booking ? `<div><dt>${text('watches.autobook')}</dt><dd class="autobook" data-on="${Boolean(watch.AutoBook)}">${text(watch.AutoBook ? 'watches.autobook_on' : 'watches.autobook_off')}</dd></div>` : ''}
       <div><dt>${text('watches.last_success')}</dt><dd>${escape(success)}</dd></div>
     </dl>
-    ${failing ? `<p class="notice" role="status">${escape(problem)}</p>` : ''}
+    ${checkError ? `<p class="notice" role="status">${text(checkError)}</p>` : ''}
     <div class="actions">
       ${needsLogin ? `<button type="button" class="primary" data-sign-in>${text('account.sign_in')} ${icon('link')}</button>` : ''}
+      ${needsLogin ? `<button type="button" class="secondary" data-account-settings>${text('account.settings')}</button>` : ''}
       ${state.Booking ? `<button type="button" class="secondary" data-autobook="${watch.ID}" aria-pressed="${Boolean(watch.AutoBook)}" aria-describedby="watch-${watch.ID}">${text(watch.AutoBook ? 'watches.autobook_disable' : 'watches.autobook_enable')}</button>` : ''}
       <button type="button" class="secondary" data-edit="${watch.ID}" aria-describedby="watch-${watch.ID}">${text('watches.edit')}</button>
       <button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}" aria-describedby="watch-${watch.ID}">${text(active ? 'watches.pause' : 'watches.resume')}</button>
@@ -244,6 +259,9 @@ function watches() {
     </section>` : ''}
   </div>`);
   main.querySelector('#new-watch').onclick = () => void editor();
+  for (const button of main.querySelectorAll('[data-account-settings]')) {
+    button.onclick = () => void switchTab('settings');
+  }
   for (const button of main.querySelectorAll('[data-edit]')) {
     button.onclick = () => void editor(items.find((item) => item.ID === Number(button.dataset.edit)));
   }
@@ -267,22 +285,24 @@ function watches() {
 
 const dayKey = (date) => localDate.format(new Date(date));
 const longDay = () => new Intl.DateTimeFormat(language, { timeZone: 'Europe/Warsaw', weekday: 'short', day: 'numeric', month: 'long' });
-const isExpired = (slot) => slot.Status === 'expired' || new Date(slot.DateTime) < new Date();
+const isExpired = (slot, now) => slot.Status === 'expired' || new Date(slot.DateTime) <= now;
 
-function timeRow(slot, index, mixed) {
-  const when = clock.format(new Date(slot.DateTime));
+function timeRow(slot, index, mixed, now) {
+  const date = new Date(slot.DateTime);
+  const when = clock.format(date);
   const doctor = slot.Doctor || t('history.no_doctor');
   const service = mixed && slot.Service ? `<span class="service">${escape(slot.Service)}</span>` : '';
-  if (isExpired(slot)) {
-    return `<li><div class="slot-row expired" aria-label="${escape(t('history.unavailable_row', { time: when, doctor }))}">
-      <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}<small>${text('history.expired')}</small></span></div></li>`;
+  if (isExpired(slot, now)) {
+    const reason = date <= now ? 'history.expired' : 'history.unavailable';
+    return `<li><div class="slot-row expired" tabindex="-1" data-expired-slot="${index}">
+      <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}<small>${text(reason)}</small></span></div></li>`;
   }
   return `<li><button type="button" class="slot-row" data-slot="${index}" aria-label="${escape(t('history.row_label', { time: when, doctor: mixed && slot.Service ? `${doctor}, ${slot.Service}` : doctor, address: slot.Address || slot.Facility }))}">
     <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}</span><span class="arrow" aria-hidden="true">›</span></button></li>`;
 }
 
 // Date first, then one block per clinic address, then the times with their doctors.
-function slotGroups(slots) {
+function slotGroups(slots, now) {
   const format = longDay();
   const days = new Map();
   slots.forEach((slot, index) => {
@@ -307,7 +327,7 @@ function slotGroups(slots) {
       return `<div class="place">
         <h3>${escape(Address || Facility)}</h3>
         <p class="meta">${escape([Facility !== Address ? Facility : '', Service].filter(Boolean).join(' · '))}</p>
-        <ul class="times">${rows.map(([slot, index]) => timeRow(slot, index, mixed)).join('')}</ul></div>`;
+        <ul class="times">${rows.map(([slot, index]) => timeRow(slot, index, mixed, now)).join('')}</ul></div>`;
     }).join('')}</section>`).join('');
 }
 
@@ -345,8 +365,8 @@ function bookingDialog(slot) {
     try {
       ({ Status } = await api('book', { ID: slot.ID }));
     } catch (error) {
-      if (current(dialog, session)) note.textContent = error.message;
-      else flash(error.message);
+      if (current(dialog, session)) note.textContent = errorText(error);
+      else flash(errorText(error));
       return;
     }
     const confirmed = Status === 'confirmed';
@@ -385,26 +405,40 @@ function bookingDialog(slot) {
 }
 
 async function historyScreen(id) {
-  show(titleFor('history'), `<div class="stack" id="slots"><p class="muted">${text('history.loading')}</p></div>`);
+  show(titleFor('history'), `<div class="stack" id="slots" tabindex="-1"><p class="muted">${text('history.loading')}</p></div>`);
   const results = main.querySelector('#slots');
   const loaded = [];
-  async function append(offset) {
-    const { Slots, More } = await api('history', { Offset: offset });
+  const byID = new Map();
+  async function append(offset, cursor) {
+    const { Slots, More, Next } = await api('history', cursor ? { After: cursor } : { Offset: offset });
     if (id !== renderID) return;
     const first = loaded.length;
-    loaded.push(...Slots);
+    for (const slot of Slots) {
+      const previous = byID.get(slot.ID);
+      if (previous) {
+        Object.assign(previous, slot);
+      } else {
+        byID.set(slot.ID, slot);
+        loaded.push(slot);
+      }
+    }
     if (!loaded.length) {
       results.innerHTML = `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`;
       return;
     }
-    results.innerHTML = `<p class="muted">${text('history.found_note')}</p>${slotGroups(loaded)}${More ? `<button class="secondary" type="button" data-more>${text('common.more')}</button>` : ''}`;
+    const now = new Date();
+    const note = loaded.some((slot) => !isExpired(slot, now))
+      ? `<p class="muted" data-found-note>${text('history.found_note')}</p>` : '';
+    results.innerHTML = `${note}${slotGroups(loaded, now)}${More ? `<button class="secondary" type="button" data-more>${text('common.more')}</button>` : ''}`;
     for (const button of results.querySelectorAll('[data-slot]')) button.onclick = () => bookingDialog(loaded[Number(button.dataset.slot)]);
     const next = results.querySelector('[data-more]');
-    if (next) next.onclick = () => void run(next, () => append(offset + Slots.length));
-    // Re-rendering replaces the focused "more" button; move focus to the first time this page added.
+    if (next) next.onclick = () => void run(next, () => append(offset + Slots.length, Next));
+    // Re-rendering removes the focused button. Keep focus at the newly loaded results.
     if (offset) {
-      const added = [...results.querySelectorAll('[data-slot]')].filter((button) => Number(button.dataset.slot) >= first);
-      (added.sort((a, b) => a.dataset.slot - b.dataset.slot)[0] ?? results.querySelector('[data-more]'))?.focus();
+      const available = [...results.querySelectorAll('[data-slot]')].find((row) => Number(row.dataset.slot) >= first);
+      const unavailable = [...results.querySelectorAll('[data-expired-slot]')].find((row) => Number(row.dataset.expiredSlot) >= first);
+      const target = available ?? next ?? unavailable ?? results;
+      target.focus();
     }
   }
   await append(0);
@@ -650,7 +684,7 @@ async function editor(watch, focusPicks = false) {
       markSelection();
     } catch (error) {
       if (id !== renderID || request !== picksRequest) return;
-      picksStatus.textContent = error.message;
+      picksStatus.textContent = errorText(error);
       retryPicks.hidden = false;
     }
   }
@@ -684,7 +718,7 @@ async function editor(watch, focusPicks = false) {
   const search = form.querySelector('#search-services');
   async function findServices(append = false) {
     const cityID = Number(fields.city.value);
-    if (!cityID) throw new Error(t('error.city_first'));
+    if (!cityID) throw new DashboardError('error.city_first');
     if (!append) {
       serviceSearchOffset = 0;
       results.innerHTML = `<p class="muted">${text('editor.searching')}</p>`;
@@ -765,7 +799,7 @@ async function editor(watch, focusPicks = false) {
   form.onsubmit = (event) => {
     event.preventDefault();
     void run(form.querySelector('[type="submit"]'), async () => {
-      if (!service) throw new Error(t('editor.choose_service'));
+      if (!service) throw new DashboardError('editor.choose_service');
       const windows = selectedHours();
       const range = fields.dateMode.value === 'range';
       await api('watch', { ID: watch?.ID ?? 0, CityID: Number(fields.city.value), ServiceID: service.ID, DoctorID: doctor,
@@ -788,7 +822,7 @@ async function editor(watch, focusPicks = false) {
 }
 
 function screenError(title, error, retry) {
-  show(title, `<div class="card stack"><p class="error">${escape(error.message)}</p>${retry ? `<button type="button" class="secondary">${text('common.retry') || 'Spróbuj ponownie'}</button>` : ''}</div>`);
+  show(title, `<div class="card stack"><p class="error">${escape(errorText(error))}</p>${retry ? `<button type="button" class="secondary">${text('common.retry') || 'Spróbuj ponownie'}</button>` : ''}</div>`);
   if (retry) main.querySelector('button').onclick = retry;
 }
 
@@ -823,12 +857,12 @@ async function start() {
   try {
     await loadLanguage(initialLanguage(telegram));
   } catch {
-    screenError('Luxmed Watcher', new Error('Nie udało się wczytać aplikacji.'), start);
+    screenError('Luxmed Watcher', new DashboardError('error.unavailable', 'Nie udało się wczytać aplikacji. Spróbuj ponownie.'), start);
     return;
   }
   renderLanguage();
   if (!telegram?.initData) {
-    screenError('Luxmed Watcher', new Error(t('error.open_from_bot')));
+    screenError('Luxmed Watcher', new DashboardError('error.open_from_bot'));
     return;
   }
   show(titleFor('home'), `<p>${text('dashboard.loading')}</p>`, false);
@@ -837,7 +871,7 @@ async function start() {
     ({ token: apiToken } = await api('auth'));
     await update(tabs.includes(initial) ? initial : 'home');
   } catch (error) {
-    screenError('Luxmed Watcher', error, error.message === t('error.access_denied') ? undefined : start);
+    screenError('Luxmed Watcher', error, error?.key === 'error.access_denied' ? undefined : start);
   }
 }
 

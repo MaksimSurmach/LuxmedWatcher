@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -142,6 +143,104 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	watch, err = db.Watch(ctx, id)
 	if err != nil || watch.ServiceName != "Konsultacja dermatologiczna" {
 		t.Fatalf("stored Polish label changed: %q, %v", watch.ServiceName, err)
+	}
+}
+
+func TestDashboardHistoryKeepsNextSlotWhenFirstSlotExpires(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		missing bool
+	}{
+		{name: "the first time passes"},
+		{name: "the provider removes the first time", missing: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				testDashboardHistoryExpiration(t, tt.missing)
+			})
+		})
+	}
+}
+
+func testDashboardHistoryExpiration(t *testing.T, missing bool) {
+	t.Helper()
+	ctx := t.Context()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "database.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	user, err := db.UpsertTelegramUser(ctx, domain.User{
+		TelegramUserID: 24, Status: domain.UserStatusActive, Locale: "pl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addWatch := func() int64 {
+		t.Helper()
+		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	firstWatch, otherWatch := addWatch(), addWatch()
+	now := time.Now()
+	var slotIDs []int64
+	for i := range 26 {
+		watchID := otherWatch
+		slotTime := now.Add(time.Duration(i+1) * time.Hour)
+		if i == 0 {
+			watchID = firstWatch
+			slotTime = now.Add(time.Second)
+		}
+		item, _, err := db.UpsertAppointmentHistory(ctx, watchID, domain.Appointment{
+			Fingerprint: fmt.Sprintf("slot-%d", i),
+			DateTime:    slotTime,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		slotIDs = append(slotIDs, item.ID)
+	}
+
+	const origin = "https://app.example"
+	d := &dashboard{db: db, sessions: newSessions(), cfg: DashboardConfig{Origin: origin},
+		browsers: map[int64]*luxmed.Browser{user.TelegramUserID: {}}}
+	handler := d.handler()
+	token := d.sessions.issue(user.TelegramUserID, now)
+	type page struct {
+		Slots []dashboardHistory
+		More  bool
+		Next  json.RawMessage
+	}
+	request := func(body string) page {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, dashboardPrefix+"history", strings.NewReader(body))
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Authorization", "Bearer "+token)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		var result page
+		if err := json.Unmarshal(res.Body.Bytes(), &result); err != nil || res.Code != http.StatusOK {
+			t.Fatalf("history status = %d, body = %s, err = %v", res.Code, res.Body, err)
+		}
+		return result
+	}
+	first := request("{}")
+	if len(first.Slots) != 24 || !first.More || len(first.Next) == 0 || first.Slots[0].ID != slotIDs[0] {
+		t.Fatalf("unexpected first page: %+v", first)
+	}
+	if missing {
+		if err := db.MarkMissingAppointments(ctx, firstWatch, now.Add(time.Minute), now); err != nil {
+			t.Fatal(err)
+		}
+	} else {
+		time.Sleep(2 * time.Second)
+	}
+	second := request(fmt.Sprintf(`{"After":%s}`, first.Next))
+	if len(second.Slots) < 2 || second.Slots[0].ID != slotIDs[24] || second.Slots[1].ID != slotIDs[25] {
+		t.Fatalf("next page skipped an unseen time: %+v", second.Slots)
 	}
 }
 

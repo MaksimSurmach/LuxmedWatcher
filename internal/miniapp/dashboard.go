@@ -116,6 +116,11 @@ type dashboardHistory struct {
 	Status   domain.HistoryStatus
 }
 
+type dashboardHistoryCursor struct {
+	AsOf     time.Time
+	Position storage.HistoryPosition
+}
+
 func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.User) {
 	watches, err := d.db.WatchesByUser(r.Context(), user.ID)
 	if err != nil {
@@ -138,7 +143,10 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 }
 
 func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.User) {
-	var input struct{ Offset int }
+	var input struct {
+		Offset int
+		After  *dashboardHistoryCursor
+	}
 	if !decodeDashboard(w, r, &input) {
 		return
 	}
@@ -146,21 +154,44 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
+	asOf := time.Now().UTC()
+	var after *storage.HistoryPosition
+	if input.After != nil {
+		if input.Offset != 0 || input.After.AsOf.IsZero() ||
+			input.After.Position.DateTime.IsZero() || input.After.Position.ID <= 0 {
+			reply(w, http.StatusBadRequest, nil)
+			return
+		}
+		asOf = input.After.AsOf
+		after = &input.After.Position
+	}
 	const pageSize = 24
-	items, err := d.db.UpcomingHistory(r.Context(), user.ID, time.Now(), pageSize+1, input.Offset)
+	items, err := d.db.UpcomingHistory(r.Context(), user.ID, asOf, pageSize+1, input.Offset, after)
 	if err != nil {
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
-	slots := make([]dashboardHistory, 0, min(pageSize, len(items)))
-	for _, item := range items[:min(pageSize, len(items))] {
+	more := len(items) > pageSize
+	var next *dashboardHistoryCursor
+	if more {
+		items = items[:pageSize]
+		last := items[len(items)-1]
+		next = &dashboardHistoryCursor{
+			AsOf: asOf,
+			Position: storage.HistoryPosition{DateTime: last.DateTime, ID: last.ID,
+				Expired: last.Status == domain.HistoryStatusExpired},
+		}
+	}
+	slots := make([]dashboardHistory, 0, len(items))
+	for _, item := range items {
 		slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, procedures.Name(user.Locale, item.ServiceName),
 			item.DoctorName, item.FacilityName, item.Address, item.Status})
 	}
 	reply(w, http.StatusOK, struct {
 		Slots []dashboardHistory
 		More  bool
-	}{slots, len(items) > pageSize})
+		Next  *dashboardHistoryCursor `json:",omitempty"`
+	}{slots, more, next})
 }
 
 func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, user domain.User) {

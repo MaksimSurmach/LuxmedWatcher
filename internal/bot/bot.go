@@ -642,7 +642,9 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 
 func (b *Bot) startWatchFlow(ctx context.Context, user domain.User) {
 	if err := b.checkAccount(ctx, user); err != nil {
-		b.send(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
+		key := accountCheckMessage(err)
+		markup := b.withAccountRecovery(user, key, mainKeyboard(b.catalog, user.Locale))
+		b.send(user, b.catalog.T(user.Locale, key), markup)
 		return
 	}
 	state := &flow{Kind: flowWatchCity, Watch: domain.Watch{UserID: user.ID, NextDays: 14, DoctorMode: domain.DoctorModeAny, FacilityMode: domain.FacilityModeAll}}
@@ -1571,7 +1573,9 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 		state = domain.WatchStatusPaused
 	case "resume":
 		if err := b.checkAccount(ctx, user); err != nil {
-			b.send(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
+			key := accountCheckMessage(err)
+			markup := b.withAccountRecovery(user, key, watchKeyboard(b.catalog, user.Locale, watch))
+			b.send(user, b.catalog.T(user.Locale, key), markup)
 			return
 		}
 		state = domain.WatchStatusActive
@@ -1610,7 +1614,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 }
 
 func (b *Bot) checkWatchNow(ctx context.Context, user domain.User, watch domain.Watch) {
-	key, count := "errors.generic", 0
+	key, count := "watch.check_failed", 0
 	if b.runner != nil {
 		var err error
 		count, err = b.runner.ManualCheck(ctx, watch)
@@ -1624,7 +1628,7 @@ func (b *Bot) checkWatchNow(ctx context.Context, user domain.User, watch domain.
 		case errors.Is(err, scheduler.ErrNoAccount):
 			key = "errors.no_account"
 		case errors.Is(err, luxmed.ErrAuthentication):
-			key = "errors.auth_failed"
+			key = "errors.needs_login"
 		case errors.Is(err, luxmed.ErrPartialResults):
 			key = "watch.check_partial"
 		case errors.Is(err, luxmed.ErrBrowserBusy):
@@ -1637,7 +1641,8 @@ func (b *Bot) checkWatchNow(ctx context.Context, user domain.User, watch domain.
 		b.send(user, b.catalog.T(user.Locale, key, count), watchKeyboard(b.catalog, user.Locale, watch))
 		return
 	}
-	b.send(user, b.catalog.T(user.Locale, key), watchKeyboard(b.catalog, user.Locale, watch))
+	markup := b.withAccountRecovery(user, key, watchKeyboard(b.catalog, user.Locale, watch))
+	b.send(user, b.catalog.T(user.Locale, key), markup)
 }
 
 func (b *Bot) showMenu(user domain.User) {
@@ -1675,21 +1680,23 @@ func (b *Bot) showWatch(ctx context.Context, user domain.User, watch domain.Watc
 	}
 	text := b.watchSummary(user, watch) + "\n" + b.catalog.T(user.Locale, "watch.status.checked",
 		b.catalog.T(user.Locale, "watch.status."+string(watch.Status)), last, count)
+	markup := watchKeyboard(b.catalog, user.Locale, watch)
 	if watch.LastError != "" {
-		key := "errors.generic"
+		key := "watch.check_failed"
 		switch watch.LastError {
 		case "luxmed_account_missing":
 			key = "errors.no_account"
 		case "luxmed_authentication":
-			key = "errors.auth_failed"
+			key = "errors.needs_login"
 		case "luxmed_unavailable":
 			key = "errors.luxmed_unavailable"
 		case "luxmed_partial":
 			key = "errors.luxmed_partial"
 		}
 		text += "\n" + b.catalog.T(user.Locale, key)
+		markup = b.withAccountRecovery(user, key, markup)
 	}
-	b.send(user, text, watchKeyboard(b.catalog, user.Locale, watch))
+	b.send(user, text, markup)
 }
 
 func (b *Bot) showHistory(ctx context.Context, user domain.User) {
