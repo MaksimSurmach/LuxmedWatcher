@@ -1471,3 +1471,80 @@ func TestExplicitChromeSwitchOrdersAgainstPasswordReplacement(t *testing.T) {
 		})
 	}
 }
+
+func TestChromeChoiceCanCaptureReplacementWaitingForDatabase(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "waiting.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	user, err := db.UpsertTelegramUser(ctx, domain.User{
+		TelegramUserID: 42, Status: domain.UserStatusActive, Role: domain.UserRoleUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := security.NewCryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds := security.Credentials{Login: "fixture", Password: "old"}
+	if _, err := db.SaveCredentials(ctx, key, user, creds); err != nil {
+		t.Fatal(err)
+	}
+	user, err = db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds.Password = "replacement"
+	attempt, _, err := beginCredentialAttempt(db, ctx, key, user, creds, "replacement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attempt.Finish()
+	conn, err := db.sql.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	waitCount := db.sql.Stats().WaitCount
+	saved := make(chan error, 1)
+	go func() {
+		// Let the write win this ordering even after the click signals cancellation.
+		_, err := db.SaveCredentialAttempt(ctx, attempt)
+		attempt.Finish()
+		saved <- err
+	}()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for db.sql.Stats().WaitCount == waitCount {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal("replacement did not wait for the database")
+		}
+	}
+	choice := db.SelectBrowserLogin(user.TelegramUserID, "", user.CredentialRevisions(), true)
+	if !errors.Is(attempt.Context().Err(), context.Canceled) {
+		t.Fatal("Chrome did not cancel the attempt waiting for the database")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-saved; err != nil {
+		t.Fatal(err)
+	}
+	current, err := db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ChooseBrowserLogin(ctx, current, choice); err != nil {
+		t.Fatalf("Chrome did not replace the captured save: %v", err)
+	}
+	if _, err := db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("captured replacement survived the Chrome choice: %v", err)
+	}
+}

@@ -1163,6 +1163,13 @@ func TestResumeWatchUsesSavedLoginWithChromeConfigured(t *testing.T) {
 	if err != nil || watch.Status != domain.WatchStatusActive {
 		t.Fatalf("saved-login search did not resume locally: status=%s err=%v", watch.Status, err)
 	}
+	watch.CityID, watch.ServiceID, watch.NextDays = 1, 2, 7
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowWatchConfirm, Watch: watch, Confirmation: "confirm"})
+	b.finishWatch(ctx, user, "confirm")
+	updated, err := b.db.Watch(ctx, id)
+	if err != nil || updated.NextDays != 7 {
+		t.Fatalf("saved-login search confirmation required an upstream probe: days=%d err=%v", updated.NextDays, err)
+	}
 }
 
 type cancelableLoginClient struct {
@@ -1176,19 +1183,25 @@ func (c cancelableLoginClient) Authenticate(ctx context.Context, _ luxmed.Creden
 	return ctx.Err()
 }
 
-func TestTelegramCancelStopsExactLoginWithoutDatabaseAccess(t *testing.T) {
+func TestTelegramCancelButtonStopsLoginBeforeAcknowledgmentAndDatabase(t *testing.T) {
 	var notified atomic.Value
+	started := make(chan context.Context, 1)
+	var attempt context.Context
 	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
-		notified.Store(r.FormValue("text"))
+		if strings.HasSuffix(r.URL.Path, "/answerCallbackQuery") {
+			if !errors.Is(attempt.Err(), context.Canceled) {
+				t.Error("cancel must reach the attempt before the callback acknowledgment")
+			}
+		} else {
+			notified.Store(r.FormValue("text"))
+		}
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
 	})
 	ctx, stop := context.WithCancel(t.Context())
 	defer stop()
 	user := createUser(t, b, 42, domain.UserStatusActive)
-	started := make(chan context.Context, 1)
 	b.newClient = func(bool) luxmed.Client { return cancelableLoginClient{started: started} }
 	b.submitLogin(ctx, user, luxmed.Credentials{Login: "fixture", Password: "synthetic"})
-	var attempt context.Context
 	select {
 	case attempt = <-started:
 	case <-time.After(5 * time.Second):
@@ -1197,7 +1210,10 @@ func TestTelegramCancelStopsExactLoginWithoutDatabaseAccess(t *testing.T) {
 	if err := b.db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	loginMessage(b, ctx, user, "/cancel", 1)
+	b.handleCallback(ctx, &tgbotapi.CallbackQuery{
+		ID: "cancel", Data: "cancel", From: &tgbotapi.User{ID: user.TelegramUserID},
+		Message: &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"}},
+	})
 	b.workers.Wait()
 	if !errors.Is(attempt.Err(), context.Canceled) {
 		t.Fatalf("verification did not receive cancellation: %v", attempt.Err())
@@ -1278,7 +1294,23 @@ func TestTelegramLoginKeepsScrubbingUntilResultDelivery(t *testing.T) {
 			}
 			unblock()
 			b.workers.Wait()
-			if b.getFlow(user.TelegramUserID) != wantFlow {
+			if outcome == "Telegram failure" {
+				retry := b.getFlow(user.TelegramUserID)
+				if retry == nil || retry.Kind != flowAccountPass || retry.sensitiveUntil.IsZero() {
+					t.Fatal("failed delivery did not leave a bounded password retry")
+				}
+				loginMessage(b, ctx, user, "second fixture", 3)
+				b.workers.Wait()
+				if deleted.Load() != 2 {
+					t.Fatal("password was not removed after failed delivery")
+				}
+				// Expire the original grace period without sleeping.
+				retry.sensitiveUntil = time.Now().Add(-time.Second)
+				b.setFlow(user.TelegramUserID, retry)
+				if b.getFlow(user.TelegramUserID) != nil {
+					t.Fatal("expired protection kept intercepting messages")
+				}
+			} else if b.getFlow(user.TelegramUserID) != wantFlow {
 				t.Fatal("completion left its old flow or replaced a newer flow")
 			}
 			if outcome == "cancel after commit" {

@@ -139,7 +139,7 @@ func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
 	return browser.Check(ctx)
 }
 
-func (b *Bot) checkResumeAccount(ctx context.Context, user domain.User) error {
+func (b *Bot) checkWatchAccount(ctx context.Context, user domain.User) error {
 	if b.runner != nil {
 		return b.runner.CheckWatchAccount(ctx, user)
 	}

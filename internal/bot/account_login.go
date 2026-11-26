@@ -91,6 +91,8 @@ func (b *Bot) selectChrome(telegramID int64, action string) *storage.ChromeChoic
 	return b.db.SelectBrowserLogin(telegramID, "", *revisions, mode == "switch")
 }
 
+const loginDeliveryGrace = 2 * time.Minute
+
 type loginVerification struct {
 	user            domain.User
 	done            chan struct{}
@@ -139,8 +141,9 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 			case errors.Is(err, luxmed.ErrBrowserBusy):
 				key = "watch.browser_busy"
 			}
-			if b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale)) {
-				retry = &flow{Kind: flowAccountPass, Login: creds.Login}
+			retry = &flow{Kind: flowAccountPass, Login: creds.Login}
+			if !b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale)) {
+				retry.sensitiveUntil = time.Now().Add(loginDeliveryGrace)
 			}
 			return
 		}
@@ -148,8 +151,9 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 		if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err == nil && required {
 			key = "flow.account.verification_pending"
 		}
-		if b.ownsLogin(user.TelegramUserID, pending, false) {
-			b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+		if b.ownsLogin(user.TelegramUserID, pending, false) &&
+			!b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale)) {
+			retry = &flow{Kind: flowAccountCheck, sensitiveUntil: time.Now().Add(loginDeliveryGrace)}
 		}
 	})
 }

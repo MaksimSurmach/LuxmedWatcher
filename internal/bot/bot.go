@@ -80,6 +80,7 @@ type flow struct {
 	Kind                 flowKind
 	cancel               context.CancelFunc
 	verification         *loginVerification
+	sensitiveUntil       time.Time
 	Login                string
 	CitySettings         bool
 	ProcedureSearchQuery string
@@ -453,8 +454,12 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		return
 	}
 	data := cb.Data
+	cancelingLogin := data == "cancel" && b.cancelLogin(ctx, cb.From.ID, b.getFlow(cb.From.ID))
 	attempt := b.selectChrome(cb.From.ID, data)
 	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+	if cancelingLogin {
+		return
+	}
 	if strings.HasPrefix(data, "options:") && strings.Count(data, ":") == 2 {
 		// Only the opening button is on the notification itself. Page buttons carry its message ID.
 		data += ":" + strconv.Itoa(cb.Message.MessageID)
@@ -1632,7 +1637,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "pause":
 		state = domain.WatchStatusPaused
 	case "resume":
-		if err := b.checkResumeAccount(ctx, user); err != nil {
+		if err := b.checkWatchAccount(ctx, user); err != nil {
 			key := accountCheckMessage(err)
 			markup := b.withAccountRecovery(user, key, watchKeyboard(b.catalog, user.Locale, watch))
 			b.send(user, b.catalog.T(user.Locale, key), markup)
@@ -1833,7 +1838,12 @@ func (b *Bot) setFlow(telegramID int64, state *flow) {
 func (b *Bot) getFlow(telegramID int64) *flow {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	return b.flowState[telegramID]
+	state := b.flowState[telegramID]
+	if state != nil && !state.sensitiveUntil.IsZero() && !time.Now().Before(state.sensitiveUntil) {
+		delete(b.flowState, telegramID)
+		return nil
+	}
+	return state
 }
 
 func (b *Bot) clearFlow(telegramID int64) {

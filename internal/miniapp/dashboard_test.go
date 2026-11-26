@@ -488,15 +488,10 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err != nil || watch.Status != domain.WatchStatusPaused || watch.NextDays != 7 {
 		t.Fatalf("editing a paused watch: %+v, %v", watch, err)
 	}
-	if err := db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
-		UserID: owner.ID, UseSavedLogin: true, EncryptedPassword: "unreadable portal fixture",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	request("status", fmt.Sprintf(`{"ID":%d,"Status":"active"}`, id), origin, token, http.StatusNoContent)
 	watch, err = db.Watch(ctx, id)
 	if err != nil || watch.Status != domain.WatchStatusActive {
-		t.Fatalf("Mini App did not resume the saved-login watch locally: %+v, %v", watch, err)
+		t.Fatalf("Mini App did not resume the Chrome watch locally: %+v, %v", watch, err)
 	}
 	item := domain.Appointment{Fingerprint: "slot", DateTime: time.Now().AddDate(0, 0, 1), ServiceName: "Konsultacja okulistyczna  - bez badania dna oka", RawPayload: "private record"}
 	if _, _, err := db.UpsertAppointmentHistory(ctx, id, item); err != nil {

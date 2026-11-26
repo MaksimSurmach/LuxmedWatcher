@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -30,13 +31,13 @@ type credentialOwner struct {
 // CredentialAttempt identifies a single candidate without retaining its plaintext.
 // The receipt remains available briefly after commit for a matching Chrome click.
 type CredentialAttempt struct {
-	state        *credentialOwner
-	origin       domain.CredentialRevisions
-	generation   uint64
-	ctx          context.Context
-	cancel       context.CancelFunc
-	candidate    *credentialCandidate // Protected by state.mu.
-	writeStarted bool                 // Protected by state.mu.
+	state      *credentialOwner
+	origin     domain.CredentialRevisions
+	generation uint64
+	ctx        context.Context
+	cancel     context.CancelFunc
+	candidate  *credentialCandidate // Protected by state.mu.
+	committing atomic.Bool
 }
 
 type credentialCandidate struct {
@@ -130,9 +131,10 @@ func (db *DB) SaveCredentialAttempt(ctx context.Context, attempt *CredentialAtte
 		attempt.state.mu.Unlock()
 		return "", ErrCredentialsChanged
 	}
-	attempt.writeStarted = true
 	attempt.state.mu.Unlock()
-	return db.saveSealedCredentials(ctx, candidate.owner, candidate.sealed)
+	return db.saveSealedCredentials(ctx, candidate.owner, candidate.sealed, func() {
+		attempt.committing.Store(true)
+	})
 }
 
 func (attempt *CredentialAttempt) Finish() {
@@ -207,15 +209,16 @@ func (db *DB) selectBrowserLoginWithoutID(telegramID int64, revisions domain.Cre
 		pending.cancel()
 		choice.attempt = pending
 	}
-	// A revision alone can bind a click to a live verification only before
-	// the write starts. A client that owns the attempt can name it by ID.
+	// A revision can bind a click while the save is still before commit,
+	// including a write waiting for a connection or row lock. Once commit
+	// starts, only the client that can name the attempt may undo it.
 	attempt := state.active
 	if attempt != nil && attempt.origin == revisions && attempt.generation == state.generation {
-		if !attempt.writeStarted {
+		if !attempt.committing.Load() {
 			attempt.cancel()
 			choice.attempt = attempt
 		}
-	} else if choice.attempt == nil && attempt != nil && !attempt.writeStarted {
+	} else if choice.attempt == nil && attempt != nil && !attempt.committing.Load() {
 		choice.stale = true
 	}
 	return choice

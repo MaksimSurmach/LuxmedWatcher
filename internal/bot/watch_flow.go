@@ -269,7 +269,7 @@ func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
-	if err := b.checkAccount(ctx, user); err != nil {
+	if err := b.checkWatchAccount(ctx, user); err != nil {
 		key := accountCheckMessage(err)
 		markup := b.withAccountRecovery(user, key, mainKeyboard(b.catalog, user.Locale))
 		b.sendWatchStep(user, b.catalog.T(user.Locale, key), markup)

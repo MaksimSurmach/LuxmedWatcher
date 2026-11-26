@@ -93,15 +93,10 @@ func TestControlScopesReadsAndChangesToAssignedUser(t *testing.T) {
 		t.Fatalf("paused watch: %v, %v", watch.Status, err)
 	}
 	status(otherID, "active", http.StatusNotFound)
-	if err := db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
-		UserID: owner.ID, UseSavedLogin: true, EncryptedPassword: "unreadable portal fixture",
-	}); err != nil {
-		t.Fatal(err)
-	}
 	status(ownID, "active", http.StatusNoContent)
 	watch, err = db.Watch(ctx, ownID)
 	if err != nil || watch.Status != domain.WatchStatusActive {
-		t.Fatalf("saved-login status API did not resume the watch: %v, %v", watch.Status, err)
+		t.Fatalf("status API did not resume the Chrome watch locally: %v, %v", watch.Status, err)
 	}
 	user, err := db.UserByTelegramID(ctx, owner.TelegramUserID)
 	if err != nil || user.Locale != "uk" || user.PreferredCityID == nil || *user.PreferredCityID != 1 {

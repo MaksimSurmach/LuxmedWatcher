@@ -17,10 +17,10 @@ func (db *DB) SaveCredentials(ctx context.Context, key *security.Cryptor, owner 
 	if err != nil {
 		return "", err
 	}
-	return db.saveSealedCredentials(ctx, owner, sealed)
+	return db.saveSealedCredentials(ctx, owner, sealed, nil)
 }
 
-func (db *DB) saveSealedCredentials(ctx context.Context, owner domain.User, sealed string) (string, error) {
+func (db *DB) saveSealedCredentials(ctx context.Context, owner domain.User, sealed string, beforeCommit func()) (string, error) {
 	// Verification calls LUX MED outside the transaction. A later opt-out or
 	// logout takes precedence even when no credentials existed before that call.
 	tx, err := db.sql.BeginTx(ctx, nil)
@@ -50,6 +50,9 @@ func (db *DB) saveSealedCredentials(ctx context.Context, owner domain.User, seal
 	}
 	if err := db.setModeAccessStatus(ctx, tx, owner.ID, LuxMedAccessConnected); err != nil {
 		return "", err
+	}
+	if beforeCommit != nil {
+		beforeCommit()
 	}
 	if err := tx.Commit(); err != nil {
 		return "", err

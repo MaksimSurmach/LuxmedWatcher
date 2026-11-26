@@ -486,22 +486,7 @@ func (d *dashboard) setStatus(w http.ResponseWriter, r *http.Request, user domai
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
-	ctx := r.Context()
-	if input.Status == domain.WatchStatusActive {
-		watch, err := d.db.Watch(ctx, input.ID)
-		if err == nil && (watch.UserID != user.ID || watch.Status == domain.WatchStatusDeleted) {
-			err = sql.ErrNoRows
-		}
-		if err == nil {
-			err = d.runner.CheckWatchAccount(ctx, user)
-		}
-		if err == nil {
-			err = d.db.ResumeWatchForMode(ctx, user, input.ID)
-		}
-		dashboardResult(w, nil, err)
-		return
-	}
-	dashboardResult(w, nil, d.db.SetUserWatchStatus(ctx, user.ID, input.ID, input.Status))
+	dashboardResult(w, nil, d.db.SetUserWatchStatus(r.Context(), user.ID, input.ID, input.Status))
 }
 
 func (d *dashboard) providersForUser(ctx context.Context, user domain.User, cityID, serviceID int) (domain.DoctorsAndFacilities, error) {
