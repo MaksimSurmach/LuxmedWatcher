@@ -53,8 +53,6 @@ let state;
 let apiToken;
 let cities;
 let tab = 'home';
-let account = 'unchecked';
-let pendingEpisodeID = '';
 let flashTimer;
 let renderID = 0;
 
@@ -124,6 +122,7 @@ function show(title, html, focus = true) {
 // The portal connection is only checked when the user asks (never automatically).
 // Compact: a status line with the two actions, used on Home. Full: adds instructions, used in Settings.
 function accountSection(compact = false) {
+  const account = state.AccountStatus;
   return `<section class="card stack account${compact ? ' compact' : ''}" data-state="${account}" aria-labelledby="account-heading">
     <div class="account-head">
       <h2 id="account-heading">${text('account.title')}</h2>
@@ -158,17 +157,16 @@ function bindAccount() {
   connect.onclick = () => void run(connect, signIn, failure);
   const check = main.querySelector('#account-check');
   check.onclick = () => void run(check, async () => {
-    const result = await api('account');
+    await api('account');
     if (!check.isConnected) return;
     const latest = await api('load');
     if (!check.isConnected) return;
-    const recovered = (hasPendingAccess(state) || result.ReconnectRequired) && !hasPendingAccess(latest);
-    pendingEpisodeID = result.ReconnectEpisodeID ?? '';
-    applySnapshot(latest, recovered && result.state === 'needs_login' ? 'unchecked' : result.state);
+    applySnapshot(latest);
     if (tab === 'home' || tab === 'watches') {
       await switchTab(tab, { reload: false });
       return;
     }
+    const account = state.AccountStatus;
     connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
     const section = main.querySelector('.account');
     const status = main.querySelector('.account-status');
@@ -212,8 +210,6 @@ function hoursLabel(windows) {
 }
 
 const watchErrors = new Map([
-  ['luxmed_account_missing', 'error.no_account'],
-  ['luxmed_authentication', 'error.connect_first'],
   ['luxmed_unavailable', 'error.luxmed_unavailable'],
   ['luxmed_partial', 'watches.check_partial'],
 ]);
@@ -227,8 +223,15 @@ function watchCard(watch) {
     ? `${escape(dateText(watch.DateFrom))} — ${escape(dateText(watch.DateTo))}`
     : text('watches.period_days', { days: watch.NextDays });
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
-  const checkError = watch.LastError ? watchErrors.get(watch.LastError) ?? 'watches.check_error' : '';
-  const needsLogin = checkError === 'error.connect_first' || checkError === 'error.no_account';
+  const account = state.AccountStatus;
+  const accessError = ['luxmed_authentication', 'luxmed_account_missing'].includes(watch.LastError);
+  const needsLogin = accessError && ['needs_login', 'search_paused'].includes(account);
+  let checkError = '';
+  if (accessError) {
+    if (needsLogin || account === 'verification_pending') checkError = `account.${account}`;
+  } else if (watch.LastError) {
+    checkError = watchErrors.get(watch.LastError) ?? 'watches.check_error';
+  }
   const success = watch.LastSuccessAt ? timeOf(watch.LastSuccessAt) : t('watches.never_succeeded');
   return `<article class="card watch" data-status="${active ? 'active' : 'paused'}">
     <h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
@@ -280,7 +283,7 @@ function autoBookDialog(button, watch) {
 
 function watches() {
   const items = state.Watches ?? [];
-  const showAccount = ['search_paused', 'verification_pending'].includes(account);
+  const showAccount = state.AccountStatus !== 'unchecked';
   show(titleFor('watches'), `<div class="stack">
     <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
     ${showAccount ? accountSection(true) : ''}
@@ -911,22 +914,8 @@ async function switchTab(next, { reload = next !== 'history' } = {}) {
   }
 }
 
-function hasPendingAccess(snapshot) {
-  return snapshot.ReconnectRequired || snapshot.Watches?.some(watch =>
-    ['luxmed_authentication', 'luxmed_account_missing'].includes(watch.LastError));
-}
-
-function applySnapshot(latest, checkedAccount = ['connected', 'verification_pending'].includes(account) ? account : 'unchecked') {
+function applySnapshot(latest) {
   state = latest;
-  const waitingForThisEpisode = checkedAccount === 'verification_pending' &&
-    pendingEpisodeID === (latest.ReconnectEpisodeID ?? '');
-  if (latest.ReconnectRequired) {
-    account = waitingForThisEpisode ? 'verification_pending' : 'search_paused';
-  } else if (checkedAccount === 'verification_pending') {
-    account = hasPendingAccess(latest) ? checkedAccount : 'connected';
-  } else {
-    account = checkedAccount;
-  }
   setLanguage(state.Locale);
   renderLanguage();
 }

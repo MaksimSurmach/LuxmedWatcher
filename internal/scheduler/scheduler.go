@@ -540,6 +540,9 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		if needsTerms && !state.recoveryPending {
 			if !background {
 				// The existing reconciliation loop owns the protected search.
+				if err := r.db.SetLuxMedAccessStatus(ctx, user.ID, storage.LuxMedAccessPending); err != nil {
+					return BrowserSessionCheck{}, err
+				}
 				return BrowserSessionCheck{EpisodeID: episodeID, VerificationPending: true}, nil
 			}
 			return BrowserSessionCheck{}, r.checkReconnectSearch(ctx, user.ID, state, time.Now(), browser, true)
@@ -557,6 +560,9 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		episodeID, readErr := r.db.LuxMedReconnectEpisode(ctx, user.ID)
 		if readErr != nil {
 			return BrowserSessionCheck{}, fmt.Errorf("read LuxMed reconnect status: %w", readErr)
+		}
+		if writeErr := r.db.SetLuxMedAccessStatus(ctx, user.ID, storage.LuxMedAccessRejected); writeErr != nil {
+			return BrowserSessionCheck{}, writeErr
 		}
 		return BrowserSessionCheck{EpisodeID: episodeID}, err
 	}
@@ -653,6 +659,9 @@ func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *
 			defer stop()
 			return errors.Join(err, r.db.ReleaseLuxMedSearch(releaseCtx, userID, started))
 		}
+		if errors.Is(err, luxmed.ErrAuthentication) {
+			return r.recordAccessRejection(ctx, userID, err)
+		}
 		if !retryWithAnotherFilter(err) {
 			return err
 		}
@@ -663,9 +672,18 @@ func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *
 		return rejectedFilter
 	}
 	if _, err := client.GetRecentProcedures(ctx); err != nil {
+		if errors.Is(err, luxmed.ErrAuthentication) {
+			return r.recordAccessRejection(ctx, userID, err)
+		}
 		return err
 	}
 	return r.resolveAfterAccessProbe(ctx, userID)
+}
+
+func (r *Runner) recordAccessRejection(ctx context.Context, userID int64, rejection error) error {
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	return errors.Join(rejection, r.db.SetLuxMedAccessStatus(recordCtx, userID, storage.LuxMedAccessRejected))
 }
 
 func retryWithAnotherFilter(err error) bool {

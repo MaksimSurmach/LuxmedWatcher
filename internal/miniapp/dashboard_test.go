@@ -132,7 +132,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), `"ReconnectRequired":true`) {
 		t.Fatalf("owner's reconnect state missing: %s", res.Body)
 	}
-	if res := request("load", "{}", origin, token, http.StatusOK); !strings.Contains(res.Body.String(), `"ReconnectRequired":false`) {
+	if res := request("load", "{}", origin, token, http.StatusOK); !strings.Contains(res.Body.String(), `"AccountStatus":"unchecked"`) {
 		t.Fatalf("reconnect state leaked across users: %s", res.Body)
 	}
 	var lastEpisodeID string
@@ -173,32 +173,37 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 				t.Fatal("new reconnect episode reused the previous ID")
 			}
 			lastEpisodeID = check.ReconnectEpisodeID
-			if err := db.BeginLuxMedReconnectAfterSearch(ctx, other.ID); err != nil {
-				t.Fatal(err)
-			}
 		}
 		result = request("load", "{}", origin, otherToken, http.StatusOK)
 		var pending struct {
 			Watches            []domain.Watch
 			ReconnectRequired  bool
 			ReconnectEpisodeID string
+			AccountStatus      string
 		}
 		if err := json.Unmarshal(result.Body.Bytes(), &pending); err != nil || len(pending.Watches) != 1 ||
 			pending.Watches[0].LastError != "luxmed_authentication" || pending.ReconnectRequired != scenario.episode ||
-			pending.ReconnectEpisodeID != check.ReconnectEpisodeID {
+			pending.ReconnectEpisodeID != check.ReconnectEpisodeID || pending.AccountStatus != "verification_pending" {
 			t.Fatalf("load lost the pending sign-in evidence: %s (%v)", result.Body, err)
 		}
-		// Simulate the protected request succeeding in the background.
+		if scenario.episode && status == domain.WatchStatusActive {
+			if err := db.BeginLuxMedReconnectAfterSearch(ctx, other.ID); err != nil {
+				t.Fatal(err)
+			}
+			result = request("load", "{}", origin, otherToken, http.StatusOK)
+			if !strings.Contains(result.Body.String(), `"AccountStatus":"search_paused"`) ||
+				!strings.Contains(result.Body.String(), `"ReconnectEpisodeID":"`+check.ReconnectEpisodeID+`"`) {
+				t.Fatalf("fresh rejection did not update the same episode: %s", result.Body)
+			}
+		}
+		// The load endpoint observes protected success without another account check.
 		if err := db.ResolveLuxMedReconnect(ctx, other.ID); err != nil {
 			t.Fatal(err)
 		}
-		result = request("account", "{}", origin, otherToken, http.StatusOK)
-		if !strings.Contains(result.Body.String(), `"state":"connected","ReconnectRequired":false`) {
-			t.Fatalf("protected success did not resolve the episode: %s", result.Body)
-		}
 		result = request("load", "{}", origin, otherToken, http.StatusOK)
-		if !strings.Contains(result.Body.String(), `"ReconnectRequired":false`) {
-			t.Fatalf("reload with a %s watch still requires sign-in: %s", status, result.Body)
+		if !strings.Contains(result.Body.String(), `"ReconnectRequired":false`) ||
+			!strings.Contains(result.Body.String(), `"AccountStatus":"connected"`) {
+			t.Fatalf("reload with a %s watch did not report recovery: %s", status, result.Body)
 		}
 		saved, err := db.Watch(ctx, otherWatch)
 		if err != nil || saved.Status != status || saved.LastError != "" || saved.CityID != 1 || saved.ServiceID != 2 ||

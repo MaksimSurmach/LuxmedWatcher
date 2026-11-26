@@ -40,6 +40,11 @@ CREATE TABLE IF NOT EXISTS luxmed_accounts (
 	status TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS luxmed_access (
+	user_id %[5]s PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+	status TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS luxmed_reconnect (
 	user_id %[5]s PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
 	episode_id TEXT NOT NULL,

@@ -135,7 +135,7 @@ type dashboardHistoryCursor struct {
 }
 
 func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.User) {
-	watches, episodeID, err := d.db.WatchesWithReconnectState(r.Context(), user.ID)
+	watches, access, err := d.db.WatchesWithReconnectState(r.Context(), user.ID)
 	if err != nil {
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
@@ -149,9 +149,10 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		DefaultMinutes     int
 		ReconnectRequired  bool
 		ReconnectEpisodeID string `json:",omitempty"`
+		AccountStatus      storage.LuxMedAccessStatus
 	}{watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
-		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), episodeID != "", episodeID})
+		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.Status})
 }
 
 func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.User) {

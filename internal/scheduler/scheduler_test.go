@@ -410,6 +410,14 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 			t.Fatalf("reconnect required = %v, want %v, error = %v", got, want, err)
 		}
 	}
+	assertAccess := func(want storage.LuxMedAccessStatus) string {
+		t.Helper()
+		_, access, err := db.WatchesWithReconnectState(ctx, watch.UserID)
+		if err != nil || access.Status != want {
+			t.Fatalf("access snapshot = %+v, want %s, error = %v", access, want, err)
+		}
+		return access.EpisodeID
+	}
 	if err := runner.renewBrowserSession(ctx, 42, browser); !errors.Is(err, luxmed.ErrUnavailable) {
 		t.Fatalf("renewal during throttling: %v", err)
 	}
@@ -423,6 +431,7 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 		t.Fatal("renewal did not report rejected Telegram delivery")
 	}
 	assertReconnect(true)
+	episodeID := assertAccess(storage.LuxMedAccessPaused)
 	// Even if the legacy card changes, the episode opened by /session must retain the terms requirement.
 	if err := db.MarkWatchChecked(ctx, watch.ID, false, ""); err != nil {
 		t.Fatal(err)
@@ -487,8 +496,22 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	if required, err := runner.CheckBrowserSession(ctx, user); !required.VerificationPending || err != nil || requests.Load()-requestsBefore != 1 {
 		t.Fatalf("manual probe did more than check the form: required=%v err=%v requests=%d", required, err, requests.Load()-requestsBefore)
 	}
+	runner = restart()
+	if got := assertAccess(storage.LuxMedAccessPending); got != episodeID {
+		t.Fatalf("manual verification changed episode: %q, want %q", got, episodeID)
+	}
+	status.Store(http.StatusServiceUnavailable)
+	if err := runner.renewBrowserSession(ctx, 42, browser); !errors.Is(err, luxmed.ErrUnavailable) {
+		t.Fatalf("transient terms failure: %v", err)
+	}
+	assertAccess(storage.LuxMedAccessPending)
+	runner = restart()
+	status.Store(http.StatusUnauthorized)
 	if err := runner.renewBrowserSession(ctx, 42, browser); !errors.Is(err, luxmed.ErrAuthentication) {
 		t.Fatalf("background check accepted the failed terms request: %v", err)
+	}
+	if got := assertAccess(storage.LuxMedAccessPaused); got != episodeID {
+		t.Fatalf("background 401 changed episode: %q, want %q", got, episodeID)
 	}
 	assertReconnect(true)
 	if notifier.attempts != 2 || notifier.delivered != 1 {
@@ -499,6 +522,7 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 		t.Fatalf("protected search did not confirm reconnect: %v", err)
 	}
 	assertReconnect(false)
+	assertAccess(storage.LuxMedAccessConnected)
 	due, err := db.DueWatches(ctx, 0)
 	if err != nil || len(due) != 1 || due[0].ID != watch.ID || due[0].ServiceID != watch.ServiceID ||
 		due[0].CityID != watch.CityID || due[0].CheckIntervalSeconds != watch.CheckIntervalSeconds {
@@ -514,6 +538,9 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 		t.Fatalf("second expiry: %v", err)
 	}
 	assertReconnect(true)
+	if got := assertAccess(storage.LuxMedAccessPaused); got == episodeID {
+		t.Fatalf("new session loss reused episode %q", got)
+	}
 	if notifier.attempts != 3 || notifier.delivered != 2 {
 		t.Fatalf("expected a warning for the new episode: %+v", notifier)
 	}

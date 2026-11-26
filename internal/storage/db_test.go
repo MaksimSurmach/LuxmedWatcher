@@ -1120,12 +1120,12 @@ func TestWatchesAndReconnectStateStayConsistentDuringRecovery(t *testing.T) {
 			changes <- nil
 		}()
 		for range cycles * 2 {
-			watches, episodeID, err := db.WatchesWithReconnectState(ctx, user.ID)
+			watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
 			if err != nil || len(watches) != 1 || watches[0].ID != watchID {
 				t.Errorf("load snapshot: watches=%+v err=%v", watches, err)
 				break
 			}
-			if episodeID == "" && watches[0].LastError == "luxmed_authentication" {
+			if access.EpisodeID == "" && watches[0].LastError == "luxmed_authentication" {
 				t.Error("snapshot mixed a recovered session with a stale sign-in error")
 				break
 			}
