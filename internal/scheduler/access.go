@@ -53,7 +53,19 @@ func (r *Runner) SaveCredentials(ctx context.Context, user domain.User, creds lu
 }
 
 func (r *Runner) SaveCredentialsForAttempt(ctx context.Context, user domain.User, creds luxmed.Credentials, id string) error {
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	attempt, err := r.db.StartCredentialAttempt(ctx, user.TelegramUserID, id)
+	if errors.Is(err, storage.ErrCredentialAttemptBusy) {
+		return luxmed.ErrBrowserBusy
+	}
+	if err != nil {
+		return err
+	}
+	return r.VerifyCredentialAttempt(user, creds, attempt)
+}
+
+func (r *Runner) VerifyCredentialAttempt(user domain.User, creds luxmed.Credentials, attempt *storage.CredentialAttempt) error {
+	defer attempt.Finish()
+	ctx, cancel := context.WithTimeout(attempt.Context(), 15*time.Second)
 	defer cancel()
 	state, _ := r.acquireAccount(user.ID, false)
 	if state == nil {
@@ -73,13 +85,8 @@ func (r *Runner) SaveCredentialsForAttempt(ctx context.Context, user domain.User
 	if modeChanged || saveCanceled || !current.IsActive() {
 		return storage.ErrCredentialsChanged
 	}
-	var attempt *storage.CredentialAttempt
-	if id != "" {
-		attempt, ctx, err = r.db.BeginCredentialAttempt(ctx, r.cryptor, user, creds, id)
-		if err != nil {
-			return err
-		}
-		defer attempt.Finish()
+	if err := r.db.PrepareCredentialAttempt(ctx, r.cryptor, user, creds, attempt); err != nil {
+		return err
 	}
 	client := r.newClient(r.rawPayloads)
 	// Leave time to commit and return a response after verification.
@@ -94,12 +101,7 @@ func (r *Runner) SaveCredentialsForAttempt(ctx context.Context, user domain.User
 		r.noteAccessFailure(state, err)
 		return err
 	}
-	var sealed string
-	if attempt == nil {
-		sealed, err = r.db.SaveCredentials(ctx, r.cryptor, user, creds)
-	} else {
-		sealed, err = r.db.SaveCredentialAttempt(ctx, attempt)
-	}
+	sealed, err := r.db.SaveCredentialAttempt(ctx, attempt)
 	if err != nil {
 		return fmt.Errorf("save verified LuxMed credentials: %w", err)
 	}

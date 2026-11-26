@@ -174,12 +174,15 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 			return luxmed.ErrAuthentication
 		}
 		if id != "" {
-			attempt, ctx, err := db.BeginCredentialAttempt(ctx, cryptor, user, creds, id)
+			attempt, err := db.StartCredentialAttempt(ctx, user.TelegramUserID, id)
 			if err != nil {
 				return err
 			}
 			defer attempt.Finish()
-			_, err = db.SaveCredentialAttempt(ctx, attempt)
+			if err := db.PrepareCredentialAttempt(attempt.Context(), cryptor, user, creds, attempt); err != nil {
+				return err
+			}
+			_, err = db.SaveCredentialAttempt(attempt.Context(), attempt)
 			return err
 		}
 		_, err := db.SaveCredentials(ctx, cryptor, user, creds)
@@ -194,6 +197,28 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	request("connect", "{}", origin, token, http.StatusOK, "commit-first")
 	request("connect", "{}", origin, token, http.StatusOK, "click-first")
 	request("credentials", validLogin, origin, token, http.StatusPreconditionFailed, "click-first")
+	current, err := db.UserByID(ctx, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatAttempt, err := db.StartCredentialAttempt(ctx, owner.TelegramUserID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chatAttempt.Finish()
+	if err := db.PrepareCredentialAttempt(
+		chatAttempt.Context(), cryptor, current, luxmed.Credentials{Login: "chat", Password: "fixture"}, chatAttempt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	request("connect", "{}", origin, token, http.StatusOK)
+	if !errors.Is(chatAttempt.Context().Err(), context.Canceled) {
+		t.Fatal("Mini App did not cancel the active chat request")
+	}
+	if _, err := db.SaveCredentialAttempt(ctx, chatAttempt); !errors.Is(err, storage.ErrCredentialsChanged) {
+		t.Fatalf("late chat login crossed the Mini App Chrome choice: %v", err)
+	}
+	chatAttempt.Finish()
 	request("credentials", validLogin, origin, token, http.StatusNoContent)
 	request("connect", "{}", origin, token, http.StatusPreconditionFailed)
 	request("credentials", `{"Login":"patient","Password":"wrong"}`, origin, token, http.StatusConflict)

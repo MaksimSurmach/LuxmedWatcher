@@ -579,13 +579,13 @@ func (d *dashboard) browserLogin(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusForbidden, nil)
 		return
 	}
-	attempt := d.db.CancelCredentialAttempt(id, token)
+	attempt := d.db.SelectBrowserLogin(id, token)
 	d.withUser(func(w http.ResponseWriter, r *http.Request, user domain.User) {
 		d.openBrowser(w, r, user, attempt)
 	}, func(*http.Request) (int64, bool) { return id, true })(w, r)
 }
 
-func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User, attempt *storage.CredentialAttempt) {
+func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User, attempt *storage.ChromeChoice) {
 	if err := d.db.ChooseBrowserLogin(r.Context(), user, attempt); err != nil {
 		dashboardResult(w, nil, err)
 		return

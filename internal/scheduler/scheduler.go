@@ -805,9 +805,6 @@ func (r *Runner) passwordClient(ctx context.Context, account domain.LuxMedAccoun
 		}
 		client := r.newClient(r.rawPayloads)
 		if err := client.Authenticate(ctx, creds); err != nil {
-			if errors.Is(err, luxmed.ErrAuthentication) && !errors.Is(err, luxmed.ErrUnavailable) {
-				err = errors.Join(luxmed.ErrCredentialsRejected, err)
-			}
 			return nil, r.recordPasswordAccessFailure(ctx, state, account, err)
 		}
 

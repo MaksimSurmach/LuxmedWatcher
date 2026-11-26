@@ -125,8 +125,8 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 	if !*result.Succeeded {
 		return ErrCredentialsRejected
 	}
-	if result.Token == "" {
-		return fmt.Errorf("luxmed login did not grant a session: %w", ErrCredentialsRejected)
+	if strings.TrimSpace(result.Token) == "" {
+		return fmt.Errorf("luxmed login missing token: %w", ErrResponse)
 	}
 
 	c.accessToken = result.Token

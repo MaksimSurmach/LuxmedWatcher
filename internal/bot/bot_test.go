@@ -797,3 +797,51 @@ func TestTelegramLogoutCancelsPasswordVerificationAndPausesSearches(t *testing.T
 		t.Fatalf("logout did not pause the watch: status=%s, err=%v", watch.Status, err)
 	}
 }
+
+func TestTelegramChromeRollsBackMiniAppSaveDuringAcknowledgment(t *testing.T) {
+	ctx := t.Context()
+	var commit func() error
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/answerCallbackQuery") {
+			if err := commit(); err != nil {
+				t.Error(err)
+			}
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"ticket":%q}`, strings.Repeat("a", 64))
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+	attempt, err := b.db.StartCredentialAttempt(ctx, user.TelegramUserID, "mini-app-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attempt.Finish()
+	creds := luxmed.Credentials{Login: "fixture", Password: "synthetic"}
+	if err := b.db.PrepareCredentialAttempt(attempt.Context(), b.cryptor, user, creds, attempt); err != nil {
+		t.Fatal(err)
+	}
+	commit = func() error {
+		if !errors.Is(attempt.Context().Err(), context.Canceled) {
+			t.Error("Telegram acknowledged the click before canceling Mini App")
+		}
+		// Model a transaction that passed its cancellation check before the click.
+		_, err := b.db.SaveCredentialAttempt(ctx, attempt)
+		attempt.Finish()
+		return err
+	}
+	b.handleCallback(ctx, &tgbotapi.CallbackQuery{
+		ID: "chrome", Data: "connect:chrome", From: &tgbotapi.User{ID: user.TelegramUserID},
+		Message: &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: user.TelegramUserID, Type: "private"}},
+	})
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("Mini App password survived the Chrome choice: %v", err)
+	}
+}

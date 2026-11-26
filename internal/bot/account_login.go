@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"crypto/rand"
 	"errors"
 	"time"
 
@@ -27,43 +26,32 @@ func (state *flow) receivesCredential(message *tgbotapi.Message) bool {
 	}
 }
 
-type passwordAttempt struct {
-	id     string
-	cancel context.CancelFunc
-}
-
-func (b *Bot) cancelPendingLogin(telegramID int64) *passwordAttempt {
-	value, ok := b.pendingLogins.Load(telegramID)
-	if !ok {
-		return nil
-	}
-	attempt := value.(*passwordAttempt)
-	attempt.cancel()
-	return attempt
-}
-
 // Cancel before reading the database or acknowledging the callback. Both can
 // block behind the password write or a Telegram network request.
-func (b *Bot) cancelPendingChromeLogin(telegramID int64, action string) *storage.CredentialAttempt {
+func (b *Bot) selectChrome(telegramID int64, action string) *storage.ChromeChoice {
 	if (action != "connect:chrome" && action != "connect:open") || b.cfg.Browsers[telegramID] == nil {
 		return nil
 	}
-	if attempt := b.cancelPendingLogin(telegramID); attempt != nil {
-		return b.db.CancelCredentialAttempt(telegramID, attempt.id)
-	}
-	return nil
+	return b.db.SelectBrowserLogin(telegramID, "")
 }
 
 func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed.Credentials) {
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
-	attempt := &passwordAttempt{id: rand.Text(), cancel: cancel}
+	attempt, err := b.db.StartCredentialAttempt(ctx, user.TelegramUserID, "")
+	if err != nil {
+		cancel()
+		key := "errors.generic"
+		if errors.Is(err, storage.ErrCredentialAttemptBusy) {
+			key = "watch.browser_busy"
+		}
+		b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
+		return
+	}
 	pending := &flow{Kind: flowAccountCheck, cancel: cancel}
 	b.setFlow(user.ID, pending)
-	b.pendingLogins.Store(user.TelegramUserID, attempt)
 	b.workers.Go(func() {
-		defer b.pendingLogins.CompareAndDelete(user.TelegramUserID, attempt)
 		defer cancel()
-		err := b.saveLogin(ctx, user, creds, attempt.id)
+		err := b.saveLogin(user, creds, attempt)
 		canceled := parent.Err() != nil || errors.Is(ctx.Err(), context.Canceled) ||
 			errors.Is(err, storage.ErrCredentialsChanged)
 		var retry *flow
@@ -109,19 +97,19 @@ func (b *Bot) completeLogin(userID int64, pending, retry *flow) bool {
 	return true
 }
 
-func (b *Bot) saveLogin(ctx context.Context, user domain.User, creds luxmed.Credentials, id string) error {
+func (b *Bot) saveLogin(user domain.User, creds luxmed.Credentials, attempt *storage.CredentialAttempt) error {
 	if b.runner != nil {
-		return b.runner.SaveCredentialsForAttempt(ctx, user, creds, id)
+		return b.runner.VerifyCredentialAttempt(user, creds, attempt)
 	}
 	// A bot without a runner is used by the standalone bot tests.
-	attempt, ctx, err := b.db.BeginCredentialAttempt(ctx, b.cryptor, user, creds, id)
-	if err != nil {
+	defer attempt.Finish()
+	ctx := attempt.Context()
+	if err := b.db.PrepareCredentialAttempt(ctx, b.cryptor, user, creds, attempt); err != nil {
 		return err
 	}
-	defer attempt.Finish()
 	if err := b.newClient(false).Authenticate(ctx, creds); err != nil {
 		return err
 	}
-	_, err = b.db.SaveCredentialAttempt(ctx, attempt)
+	_, err := b.db.SaveCredentialAttempt(ctx, attempt)
 	return err
 }

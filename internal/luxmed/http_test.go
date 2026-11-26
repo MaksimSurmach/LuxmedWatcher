@@ -348,3 +348,32 @@ func TestLoginUsesRetryAfterBeforeRejectingCredentials(t *testing.T) {
 		})
 	}
 }
+
+func TestIncompleteSuccessfulLoginDoesNotRejectCredentials(t *testing.T) {
+	var complete atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case LoginURL:
+			if complete.Load() {
+				fmt.Fprint(w, `{"succeded":true,"token":"fixture"}`)
+			} else {
+				fmt.Fprint(w, `{"succeded":true}`)
+			}
+		case XsrfTokenURL:
+			fmt.Fprint(w, `{"token":"fixture"}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := newHTTPClient(server.URL, false)
+	creds := Credentials{Login: "fixture", Password: "synthetic"}
+	err := client.Authenticate(t.Context(), creds)
+	if !errors.Is(err, ErrResponse) || errors.Is(err, ErrAuthentication) {
+		t.Fatalf("incomplete response was treated as a password rejection: %v", err)
+	}
+	complete.Store(true)
+	if err := client.Authenticate(t.Context(), creds); err != nil {
+		t.Fatalf("authentication did not recover with the same credentials: %v", err)
+	}
+}

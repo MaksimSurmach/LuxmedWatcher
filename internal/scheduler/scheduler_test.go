@@ -143,7 +143,7 @@ func TestRunnerSerializesChecksAndRejectsStaleWatch(t *testing.T) {
 func TestRejectedCredentialsAreNotRetried(t *testing.T) {
 	ctx := context.Background()
 	runner, db, watch := testRunner(t, nil)
-	client := &fakeLuxMed{authErr: luxmed.ErrAuthentication}
+	client := &fakeLuxMed{authErr: luxmed.ErrCredentialsRejected}
 	runner.newClient = func(bool) luxmed.Client { return client }
 
 	owner, err := db.UserByID(ctx, watch.UserID)
@@ -863,7 +863,7 @@ func TestPasswordReconnectSerializesWithQueuedWarning(t *testing.T) {
 		return &ReconnectDeliveryRejected{}
 	}}
 	runner, db, watch := testRunner(t, notifier)
-	runner.newClient = func(bool) luxmed.Client { return &fakeLuxMed{authErr: luxmed.ErrAuthentication} }
+	runner.newClient = func(bool) luxmed.Client { return &fakeLuxMed{authErr: luxmed.ErrCredentialsRejected} }
 	account, err := db.LuxMedAccount(ctx, watch.UserID)
 	if err != nil {
 		t.Fatal(err)
@@ -1852,7 +1852,7 @@ func TestPasswordReconnectUsesFallbackIndependentlyOfWarningDelivery(t *testing.
 		authErr   error
 	}{
 		{name: "warning already delivered", delivered: true},
-		{name: "rejected credentials still send a due warning", authErr: luxmed.ErrAuthentication},
+		{name: "rejected credentials still send a due warning", authErr: luxmed.ErrCredentialsRejected},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := t.Context()

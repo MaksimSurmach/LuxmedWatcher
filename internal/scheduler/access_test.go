@@ -355,3 +355,24 @@ func TestOpeningChromeKeepsInFlightChromeSearch(t *testing.T) {
 		t.Fatalf("Chrome search cooldown was lost: %v", err)
 	}
 }
+
+func TestIncompleteLoginCanRecoverDuringScheduledSearch(t *testing.T) {
+	ctx := t.Context()
+	runner, db, watch := testRunner(t, nil)
+	client := &fakeLuxMed{
+		authErr: luxmed.ErrResponse,
+		search:  func(context.Context) ([]domain.Appointment, error) { return nil, nil },
+	}
+	runner.newClient = func(bool) luxmed.Client { return client }
+	if err := runner.CheckWatch(ctx, watch); !errors.Is(err, luxmed.ErrResponse) {
+		t.Fatalf("incomplete login returned %v", err)
+	}
+	account, err := db.LuxMedAccount(ctx, watch.UserID)
+	if err != nil || account.Status == domain.AccountStatusAuthFailed {
+		t.Fatalf("incomplete login disabled saved credentials: status=%v err=%v", account.Status, err)
+	}
+	client.authErr = nil
+	if err := runner.CheckWatch(ctx, watch); err != nil || client.logins != 2 {
+		t.Fatalf("search did not recover with the saved password: attempts=%d err=%v", client.logins, err)
+	}
+}

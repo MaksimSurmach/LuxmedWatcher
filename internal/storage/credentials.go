@@ -112,19 +112,36 @@ func (db *DB) ConfirmBrowserLogin(ctx context.Context, owner domain.User) error 
 
 // ChooseBrowserLogin opens Chrome or cancels a specified, overlapping save.
 // An already committed save may be undone only if its exact ciphertext matches.
-func (db *DB) ChooseBrowserLogin(ctx context.Context, user domain.User, attempt *CredentialAttempt) error {
-	if attempt == nil || attempt.owner.ID != user.ID || attempt.previous.UseSavedLogin {
+func (db *DB) ChooseBrowserLogin(ctx context.Context, user domain.User, choice *ChromeChoice) error {
+	if choice == nil {
 		return db.ConfirmBrowserLogin(ctx, user)
 	}
-	err := db.chooseChromeDuringSave(ctx, attempt)
+	if choice.telegramID != user.TelegramUserID || choice.stale {
+		return ErrCredentialsChanged
+	}
+	// Order the transaction against newer local password submissions. The
+	// database still guards the saved row by revision and exact ciphertext.
+	choice.state.mu.Lock()
+	defer choice.state.mu.Unlock()
+	if choice.generation != choice.state.generation {
+		return ErrCredentialsChanged
+	}
+	if choice.attempt == nil || choice.attempt.candidate == nil {
+		return db.ConfirmBrowserLogin(ctx, user)
+	}
+	candidate := choice.attempt.candidate
+	if candidate.owner.ID != user.ID || candidate.previous.UseSavedLogin {
+		return db.ConfirmBrowserLogin(ctx, user)
+	}
+	err := db.chooseChromeDuringSave(ctx, candidate)
 	if errors.Is(err, ErrCredentialsChanged) {
 		return db.ConfirmBrowserLogin(ctx, user)
 	}
 	return err
 }
 
-func (db *DB) chooseChromeDuringSave(ctx context.Context, attempt *CredentialAttempt) error {
-	owner, previous := attempt.owner, attempt.previous
+func (db *DB) chooseChromeDuringSave(ctx context.Context, candidate *credentialCandidate) error {
+	owner, previous := candidate.owner, candidate.previous
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -160,7 +177,7 @@ func (db *DB) chooseChromeDuringSave(ctx context.Context, attempt *CredentialAtt
 	if revision == owner.CredentialRevision {
 		return tx.Commit()
 	}
-	if sealed != attempt.sealed {
+	if sealed != candidate.sealed {
 		return ErrCredentialsChanged
 	}
 	if previous.UserID == owner.ID {
