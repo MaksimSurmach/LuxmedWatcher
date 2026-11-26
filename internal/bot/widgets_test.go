@@ -166,6 +166,10 @@ func TestBookCommandOpensOfficialReservationPage(t *testing.T) {
 			!strings.Contains(r.Form.Get("reply_markup"), luxmed.ReservationPageURL) {
 			t.Errorf("booking entry must open the official portal from the widget and inline keyboard")
 		}
+		want := "Choose an appointment time and book in the LUX MED portal."
+		if !strings.Contains(r.Form.Get("html"), want) || !strings.Contains(r.Form.Get("caption"), want) {
+			t.Errorf("booking entry lacks instructions to choose a time")
+		}
 		sent <- struct{}{}
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":51}}`)
 	})

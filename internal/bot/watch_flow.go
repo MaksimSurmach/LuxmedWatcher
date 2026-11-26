@@ -273,7 +273,9 @@ func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {
 		return
 	}
 	if err := b.checkAccount(ctx, user); err != nil {
-		b.sendWatchStep(user, b.catalog.T(user.Locale, "errors.no_account"), mainKeyboard(b.catalog, user.Locale))
+		key := accountCheckMessage(err)
+		markup := b.withAccountRecovery(user, key, mainKeyboard(b.catalog, user.Locale))
+		b.sendWatchStep(user, b.catalog.T(user.Locale, key), markup)
 		return
 	}
 	key := "flow.watch.created"
