@@ -2,6 +2,7 @@
   "account.connect_luxmed": "Підключити LUX MED",
   "account.search_paused": "Пошук призупинено. Увійдіть до LUX MED, щоб ми знову перевіряли вільні записи.",
   "account.connected": "LUX MED підключено",
+  "account.verification_pending": "Очікуємо наступної перевірки доступу до LUX MED.",
   "account.instructions": "Увійдіть через вікно віддаленого браузера. Якщо LUX MED попросить код, введіть його там, а потім поверніться й перевірте підключення.",
   "account.needs_login": "Потрібен повторний вхід.",
   "account.settings": "Перейти в налаштування",

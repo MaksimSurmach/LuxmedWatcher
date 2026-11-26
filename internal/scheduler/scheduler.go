@@ -484,7 +484,7 @@ func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
 }
 
 // CheckBrowserSession confirms a manual sign-in and restores saved active searches.
-// The boolean reports whether an episode remains open after the probe.
+// The boolean reports whether reconnect or protected access verification is still required.
 func (r *Runner) CheckBrowserSession(ctx context.Context, user domain.User) (bool, error) {
 	browser := r.browsers[user.TelegramUserID]
 	if browser == nil {
@@ -529,7 +529,7 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	err := browser.Check(probeCtx)
 	cancel()
 	if err == nil {
-		needsTerms, readErr := r.db.LuxMedReconnectRequiresTerms(ctx, user.ID, background)
+		needsTerms, readErr := r.db.LuxMedReconnectRequiresTerms(ctx, user.ID)
 		if readErr != nil {
 			return false, readErr
 		}
@@ -538,12 +538,7 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 				// The existing reconciliation loop owns the protected search.
 				return true, nil
 			}
-			checkErr := r.checkReconnectSearch(ctx, user.ID, state, time.Now(), browser, true)
-			required, readErr := r.db.LuxMedReconnectRequired(ctx, user.ID)
-			if readErr == nil && !required {
-				return false, nil
-			}
-			return required, errors.Join(checkErr, readErr)
+			return true, r.checkReconnectSearch(ctx, user.ID, state, time.Now(), browser, true)
 		}
 		return false, r.confirmReconnectRecovery(ctx, user.ID, state)
 	}

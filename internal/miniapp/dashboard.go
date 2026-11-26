@@ -432,6 +432,9 @@ func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.
 
 	switch {
 	case err == nil:
+		if required {
+			result.State = "verification_pending"
+		}
 	case errors.Is(err, luxmed.ErrAuthentication):
 		result.State = "needs_login"
 	case errors.Is(err, luxmed.ErrBrowserBusy):

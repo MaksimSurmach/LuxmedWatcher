@@ -161,8 +161,8 @@ function bindAccount() {
     if (!check.isConnected) return;
     const latest = await api('load');
     if (!check.isConnected) return;
-    const episodeClosed = (state.ReconnectRequired || result.ReconnectRequired) && !latest.ReconnectRequired;
-    applySnapshot(latest, episodeClosed && result.state === 'needs_login' ? 'unchecked' : result.state);
+    const recovered = (hasPendingAccess(state) || result.ReconnectRequired) && !hasPendingAccess(latest);
+    applySnapshot(latest, recovered && result.state === 'needs_login' ? 'unchecked' : result.state);
     if (tab === 'home' || tab === 'watches') {
       await switchTab(tab, { reload: false });
       return;
@@ -278,16 +278,17 @@ function autoBookDialog(button, watch) {
 
 function watches() {
   const items = state.Watches ?? [];
+  const showAccount = ['search_paused', 'verification_pending'].includes(account);
   show(titleFor('watches'), `<div class="stack">
     <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
-    ${account === 'search_paused' ? accountSection(true) : ''}
+    ${showAccount ? accountSection(true) : ''}
     ${items.length ? items.map(watchCard).join('') : `<div class="card empty"><h2>${text('watches.empty')}</h2><p>${text('watches.empty_hint')}</p></div>`}
     ${items.length ? `<section class="stack">
       <p class="muted" id="check-hint">${text('watches.check_chat_hint')}</p>
       <button type="button" class="secondary" id="check-in-chat" aria-describedby="check-hint">${text('watches.check_chat')}</button>
     </section>` : ''}
   </div>`);
-  if (account === 'search_paused') bindAccount();
+  if (showAccount) bindAccount();
   main.querySelector('#new-watch').onclick = () => void editor();
   for (const button of main.querySelectorAll('[data-account-settings]')) {
     button.onclick = () => void switchTab('settings');
@@ -908,9 +909,18 @@ async function switchTab(next, { reload = next !== 'history' } = {}) {
   }
 }
 
-function applySnapshot(latest, checkedAccount = account === 'connected' ? account : 'unchecked') {
+function hasPendingAccess(snapshot) {
+  return snapshot.ReconnectRequired || snapshot.Watches?.some(watch =>
+    ['luxmed_authentication', 'luxmed_account_missing'].includes(watch.LastError));
+}
+
+function applySnapshot(latest, checkedAccount = ['connected', 'verification_pending'].includes(account) ? account : 'unchecked') {
   state = latest;
-  account = state.ReconnectRequired ? 'search_paused' : checkedAccount;
+  if (checkedAccount === 'verification_pending') {
+    account = hasPendingAccess(latest) ? checkedAccount : 'connected';
+  } else {
+    account = state.ReconnectRequired ? 'search_paused' : checkedAccount;
+  }
   setLanguage(state.Locale);
   renderLanguage();
 }

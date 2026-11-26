@@ -53,10 +53,11 @@ func (db *DB) beginLuxMedReconnect(ctx context.Context, userID int64, requiresTe
 	first, end := luxmed.SearchDateBounds(time.Now())
 	_, err := db.sql.ExecContext(ctx, `
 		INSERT INTO luxmed_reconnect (user_id, requires_terms)
-		SELECT $1, $3 WHERE `+db.hasCurrentReconnectSearch("$2", "$4", "$5")+`
+		SELECT $1, $3 OR `+hasWatchSignInError("$2", "$6")+`
+		WHERE `+db.hasCurrentReconnectSearch("$2", "$4", "$5")+`
 		ON CONFLICT (user_id) DO UPDATE SET requires_terms=TRUE
 		WHERE excluded.requires_terms AND NOT luxmed_reconnect.requires_terms
-	`, userID, domain.WatchStatusActive, requiresTerms, first.UTC(), end.UTC())
+	`, userID, domain.WatchStatusActive, requiresTerms, first.UTC(), end.UTC(), domain.WatchStatusPaused)
 	return err
 }
 
@@ -72,13 +73,17 @@ func (db *DB) currentSearchWindow(first, end string) string {
 		AND (date_from IS NULL OR date_to IS NULL OR ` + from + ` <= ` + to + `)`
 }
 
-func (db *DB) LuxMedReconnectRequiresTerms(ctx context.Context, userID int64, checkLegacy bool) (bool, error) {
+func hasWatchSignInError(active, paused string) string {
+	return `EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status IN (` + active + `, ` + paused + `)
+		AND ` + watchSignInError + `)`
+}
+
+func (db *DB) LuxMedReconnectRequiresTerms(ctx context.Context, userID int64) (bool, error) {
 	var required bool
 	err := db.sql.QueryRowContext(ctx, `
 		SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1 AND requires_terms)
-		    OR ($2 AND NOT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1)
-		        AND EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status IN ($3, $4) AND `+watchSignInError+`))
-	`, userID, checkLegacy, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&required)
+		    OR `+hasWatchSignInError("$2", "$3")+`
+	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&required)
 	return required, err
 }
 

@@ -157,8 +157,25 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 			t.Fatal(err)
 		}
 		result := request("account", "{}", origin, otherToken, http.StatusOK)
+		if !strings.Contains(result.Body.String(), `"state":"verification_pending","ReconnectRequired":true`) {
+			t.Fatalf("account probe bypassed protected verification for %s watch: %s", status, result.Body)
+		}
+		result = request("load", "{}", origin, otherToken, http.StatusOK)
+		var pending struct {
+			Watches           []domain.Watch
+			ReconnectRequired bool
+		}
+		if err := json.Unmarshal(result.Body.Bytes(), &pending); err != nil || len(pending.Watches) != 1 ||
+			pending.Watches[0].LastError != "luxmed_authentication" || pending.ReconnectRequired != scenario.episode {
+			t.Fatalf("load lost the pending sign-in evidence: %s (%v)", result.Body, err)
+		}
+		// Simulate the protected request succeeding in the background.
+		if err := db.ResolveLuxMedReconnect(ctx, other.ID); err != nil {
+			t.Fatal(err)
+		}
+		result = request("account", "{}", origin, otherToken, http.StatusOK)
 		if !strings.Contains(result.Body.String(), `"state":"connected","ReconnectRequired":false`) {
-			t.Fatalf("account check with a %s watch did not resolve the episode: %s", status, result.Body)
+			t.Fatalf("protected success did not resolve the episode: %s", result.Body)
 		}
 		result = request("load", "{}", origin, otherToken, http.StatusOK)
 		if !strings.Contains(result.Body.String(), `"ReconnectRequired":false`) {

@@ -415,11 +415,21 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	}
 	assertReconnect(false)
 
+	if err := db.MarkWatchChecked(ctx, watch.ID, false, "luxmed_authentication"); err != nil {
+		t.Fatal(err)
+	}
 	status.Store(http.StatusUnauthorized)
 	if err := runner.renewBrowserSession(ctx, 42, browser); err == nil {
 		t.Fatal("renewal did not report rejected Telegram delivery")
 	}
 	assertReconnect(true)
+	// Even if the legacy card changes, the episode opened by /session must retain the terms requirement.
+	if err := db.MarkWatchChecked(ctx, watch.ID, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if required, err := db.LuxMedReconnectRequiresTerms(ctx, watch.UserID); err != nil || !required {
+		t.Fatalf("session rejection did not carry forward the protected access requirement: required=%v err=%v", required, err)
+	}
 	if notifier.attempts != 1 || notifier.delivered != 0 {
 		t.Fatalf("rejected delivery had unexpected result: %+v", notifier)
 	}
@@ -1515,6 +1525,11 @@ func TestAssignedBrowserVerifiesPausedLegacyErrorWithoutPasswordOrEpisode(t *tes
 	must(err)
 	runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
 	scheduler := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	user, err := db.UserByID(ctx, watch.UserID)
+	must(err)
+	if pending, err := runner.CheckBrowserSession(ctx, user); err != nil || !pending || termsCalls.Load() != 0 {
+		t.Fatalf("manual probe bypassed legacy verification: pending=%v calls=%d err=%v", pending, termsCalls.Load(), err)
+	}
 	if ids := scheduler.maintainReconnectSessions(ctx); !slices.Equal(ids, []int64{42}) || termsCalls.Load() != 1 {
 		t.Fatalf("wrong browser recovery candidates: ids=%v calls=%d", ids, termsCalls.Load())
 	}
