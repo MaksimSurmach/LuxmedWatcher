@@ -844,6 +844,94 @@ func (c *fixedSearchResultClient) SearchAppointments(context.Context, domain.Wat
 	return c.result, c.err
 }
 
+func TestAuthenticationFailureDoesNotRecordOnChangedWatch(t *testing.T) {
+	for _, scenario := range []struct {
+		name                string
+		transitions         []domain.WatchStatus
+		anotherActive       bool
+		pauseDuringDelivery bool
+		wantWarning         bool
+	}{
+		{name: "still active", wantWarning: true},
+		{name: "paused", transitions: []domain.WatchStatus{domain.WatchStatusPaused}},
+		{name: "deleted", transitions: []domain.WatchStatus{domain.WatchStatusDeleted}},
+		{name: "reactivated", transitions: []domain.WatchStatus{domain.WatchStatusPaused, domain.WatchStatusActive}, wantWarning: true},
+		{name: "another active", transitions: []domain.WatchStatus{domain.WatchStatusPaused}, anotherActive: true, wantWarning: true},
+		{name: "paused after 401 before result write", pauseDuringDelivery: true, wantWarning: true},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			defer cancel()
+			sends := 0
+			runner, db, watch := testRunner(t, nil)
+			var pauseErr error
+			runner.notifier = reconnectNotifierFunc{send: func() error {
+				sends++
+				if scenario.pauseDuringDelivery {
+					pauseErr = db.SetUserWatchStatus(ctx, watch.UserID, watch.ID, domain.WatchStatusPaused)
+				}
+				return nil
+			}}
+			if scenario.anotherActive {
+				if _, err := db.CreateWatch(ctx, domain.Watch{UserID: watch.UserID}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			searching, respond := make(chan struct{}), make(chan struct{})
+			release := sync.OnceFunc(func() { close(respond) })
+			defer release()
+			runner.newClient = func(bool) luxmed.Client {
+				return &fakeLuxMed{search: func(ctx context.Context) ([]domain.Appointment, error) {
+					close(searching)
+					select {
+					case <-respond:
+						return nil, luxmed.ErrAuthentication
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					}
+				}}
+			}
+			done := make(chan error, 1)
+			go func() { done <- runner.CheckWatch(ctx, watch) }()
+			select {
+			case <-searching:
+			case <-ctx.Done():
+				t.Fatal(ctx.Err())
+			}
+			wantStatus := domain.WatchStatusActive
+			for _, status := range scenario.transitions {
+				if err := db.SetUserWatchStatus(ctx, watch.UserID, watch.ID, status); err != nil {
+					t.Fatal(err)
+				}
+				wantStatus = status
+			}
+			release()
+			if err := <-done; !errors.Is(err, luxmed.ErrAuthentication) {
+				t.Fatalf("check error = %v", err)
+			}
+			if pauseErr != nil {
+				t.Fatal(pauseErr)
+			}
+			if scenario.pauseDuringDelivery {
+				wantStatus = domain.WatchStatusPaused
+			}
+			saved, err := db.Watch(ctx, watch.ID)
+			wantError := ""
+			if len(scenario.transitions) == 0 && !scenario.pauseDuringDelivery {
+				wantError = "luxmed_authentication"
+			}
+			if err != nil || saved.Status != wantStatus || saved.LastError != wantError ||
+				(saved.LastCheckedAt != nil) != (wantError != "") {
+				t.Fatalf("recorded stale result: %+v, %v", saved, err)
+			}
+			required, err := db.LuxMedReconnectRequired(ctx, watch.UserID)
+			if err != nil || required != scenario.wantWarning || (sends == 1) != scenario.wantWarning || sends > 1 {
+				t.Fatalf("reconnect required = %v, sends = %d, err = %v", required, sends, err)
+			}
+		})
+	}
+}
+
 func TestConfirmedPartialSearchResolvesReconnect(t *testing.T) {
 	for _, test := range []struct {
 		name      string

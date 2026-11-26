@@ -481,12 +481,15 @@ func TestLegacySQLiteMigrationAndDueWatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := legacy.Exec(`UPDATE watches SET last_checked_at=$1 WHERE id=$2`, old, watchID); err != nil {
+	if _, err := legacy.Exec(`UPDATE watches SET last_checked_at=$1, updated_at=$1 WHERE id=$2`, old, watchID); err != nil {
 		t.Fatal(err)
 	}
 	due, err := db.DueWatches(ctx, 5)
 	if err != nil || len(due) != 1 || due[0].ID != watchID {
 		t.Fatalf("legacy watch did not become due: %+v, %v", due, err)
+	}
+	if err := db.MarkWatchCheckedIfUnchanged(ctx, due[0], true, ""); err != nil {
+		t.Fatalf("record result on legacy watch: %v", err)
 	}
 }
 
@@ -822,7 +825,12 @@ func TestWatchesAndReconnectStateStayConsistentDuringRecovery(t *testing.T) {
 					changes <- err
 					return
 				}
-				if err := db.MarkWatchChecked(ctx, watchID, false, "luxmed_authentication"); err != nil {
+				watch, err := db.Watch(ctx, watchID)
+				if err != nil {
+					changes <- err
+					return
+				}
+				if err := db.MarkWatchCheckedIfUnchanged(ctx, watch, false, "luxmed_authentication"); err != nil {
 					changes <- err
 					return
 				}

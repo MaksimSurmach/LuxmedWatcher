@@ -129,12 +129,23 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if res := request("load", "{}", origin, token, http.StatusOK); !strings.Contains(res.Body.String(), `"ReconnectRequired":false`) {
 		t.Fatalf("reconnect state leaked across users: %s", res.Body)
 	}
-	for _, status := range []domain.WatchStatus{domain.WatchStatusActive, domain.WatchStatusPaused} {
+	for _, scenario := range []struct {
+		status  domain.WatchStatus
+		episode bool
+	}{
+		{domain.WatchStatusActive, true},
+		{domain.WatchStatusPaused, true},
+		{domain.WatchStatusActive, false},
+		{domain.WatchStatusPaused, false},
+	} {
+		status := scenario.status
 		if err := db.MarkWatchChecked(ctx, otherWatch, false, "luxmed_authentication"); err != nil {
 			t.Fatal(err)
 		}
-		if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
-			t.Fatal(err)
+		if scenario.episode {
+			if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
+				t.Fatal(err)
+			}
 		}
 		if err := db.SetWatchStatus(ctx, otherWatch, status); err != nil {
 			t.Fatal(err)

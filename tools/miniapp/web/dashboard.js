@@ -159,13 +159,10 @@ function bindAccount() {
   check.onclick = () => void run(check, async () => {
     const result = await api('account');
     if (!check.isConnected) return;
-    const connected = result.state === 'connected';
-    const latest = connected ? await api('load') : result;
+    const latest = await api('load');
     if (!check.isConnected) return;
-    if (connected) state.Watches = latest.Watches;
-    state.ReconnectRequired = latest.ReconnectRequired;
-    account = state.ReconnectRequired ? 'search_paused' : result.state;
-    if (connected && (tab === 'home' || tab === 'watches')) {
+    applySnapshot(latest, result.state);
+    if (tab === 'home' || tab === 'watches') {
       await switchTab(tab, { reload: false });
       return;
     }
@@ -885,7 +882,7 @@ function screenError(title, error, retry) {
   if (retry) main.querySelector('button').onclick = retry;
 }
 
-async function switchTab(next, { reload = next === 'home' || next === 'watches' } = {}) {
+async function switchTab(next, { reload = next !== 'history' } = {}) {
   clearTimeout(flashTimer);
   announcement.textContent = '';
   tab = next;
@@ -910,10 +907,9 @@ async function switchTab(next, { reload = next === 'home' || next === 'watches' 
   }
 }
 
-function applySnapshot(latest) {
+function applySnapshot(latest, checkedAccount = account === 'connected' ? account : 'unchecked') {
   state = latest;
-  if (state.ReconnectRequired) account = 'search_paused';
-  else if (account === 'search_paused') account = 'unchecked';
+  account = state.ReconnectRequired ? 'search_paused' : checkedAccount;
   setLanguage(state.Locale);
   renderLanguage();
 }

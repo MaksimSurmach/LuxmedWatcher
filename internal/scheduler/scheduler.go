@@ -242,7 +242,9 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 	}
 	recordCtx, stop := context.WithTimeout(parent, 5*time.Second)
 	defer stop()
-	if writeErr := r.db.MarkWatchChecked(recordCtx, watch.ID, err == nil, status); writeErr != nil {
+	if writeErr := r.db.MarkWatchCheckedIfUnchanged(recordCtx, watch, err == nil, status); errors.Is(writeErr, sql.ErrNoRows) {
+		err = errors.Join(err, ErrInactive)
+	} else if writeErr != nil {
 		err = errors.Join(err, fmt.Errorf("record watch result: %w", writeErr))
 	}
 	return count, err
@@ -390,11 +392,7 @@ func (r *Runner) resolveReconnect(ctx context.Context, userID int64) error {
 	// Persist a confirmed session even if the search expires after a successful response.
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
 	defer cancel()
-	required, err := r.db.LuxMedReconnectRequired(recordCtx, userID)
-	if err == nil && required {
-		err = r.db.ResolveLuxMedReconnect(recordCtx, userID)
-	}
-	if err != nil {
+	if err := r.db.ResolveLuxMedReconnect(recordCtx, userID); err != nil {
 		return fmt.Errorf("resolve LuxMed reconnect status: %w", err)
 	}
 	return nil

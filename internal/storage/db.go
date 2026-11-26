@@ -348,13 +348,26 @@ func (db *DB) SetUserWatchStatus(ctx context.Context, userID, id int64, status d
 }
 
 func (db *DB) MarkWatchChecked(ctx context.Context, id int64, success bool, errText string) error {
-	now := time.Now().UTC()
-	if success {
-		_, err := db.sql.ExecContext(ctx, `UPDATE watches SET last_checked_at=$1, last_success_at=$2, last_error='', updated_at=$3 WHERE id=$4`, now, now, now, id)
-		return err
-	}
-	_, err := db.sql.ExecContext(ctx, `UPDATE watches SET last_checked_at=$1, last_error=$2, updated_at=$3 WHERE id=$4`, now, errText, now, id)
+	_, err := db.sql.ExecContext(ctx, markWatchCheckedQuery, time.Now().UTC(), success, errText, id)
 	return err
+}
+
+const markWatchCheckedQuery = `
+	UPDATE watches
+	SET last_checked_at=$1, last_success_at=CASE WHEN $2 THEN $1 ELSE last_success_at END,
+	    last_error=CASE WHEN $2 THEN '' ELSE $3 END, updated_at=$1
+	WHERE id=$4
+`
+
+func (db *DB) MarkWatchCheckedIfUnchanged(ctx context.Context, watch domain.Watch, success bool, errText string) error {
+	query := markWatchCheckedQuery + ` AND status=$5 AND updated_at=$6`
+	args := []any{time.Now().UTC(), success, errText, watch.ID, domain.WatchStatusActive, watch.UpdatedAt}
+	if !db.postgres {
+		// Older SQLite rows stored UTC timestamps in Go's default format.
+		query = markWatchCheckedQuery + ` AND status=$5 AND updated_at IN ($6, $7)`
+		args = append(args, watch.UpdatedAt.UTC().String())
+	}
+	return requireOneRow(db.sql.ExecContext(ctx, query, args...))
 }
 
 func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {

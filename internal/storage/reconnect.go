@@ -11,6 +11,7 @@ import (
 )
 
 const reconnectRequiredQuery = `SELECT EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1)`
+const watchSignInError = `last_error IN ('luxmed_authentication', 'luxmed_account_missing')`
 
 func (db *DB) LuxMedReconnectRequired(ctx context.Context, userID int64) (bool, error) {
 	var required bool
@@ -118,6 +119,13 @@ func (db *DB) MarkLuxMedReconnectNotified(ctx context.Context, userID int64) err
 }
 
 func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
+	var pending bool
+	err := db.sql.QueryRowContext(ctx, reconnectRequiredQuery+`
+		OR EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status IN ($2, $3) AND `+watchSignInError+`)`,
+		userID, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&pending)
+	if err != nil || !pending {
+		return err
+	}
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -139,17 +147,11 @@ func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64) error
 	if err != nil {
 		return err
 	}
-	if removed > 0 {
-		// Requeue active searches and clear obsolete sign-in errors on paused searches.
-		_, err := tx.ExecContext(ctx, `
-			UPDATE watches
-			SET last_checked_at=CASE WHEN status=$2 THEN NULL ELSE last_checked_at END, last_error=''
-			WHERE user_id=$1 AND (status=$2 OR
-			    (status=$3 AND last_error IN ('luxmed_authentication', 'luxmed_account_missing')))
-		`, userID, domain.WatchStatusActive, domain.WatchStatusPaused)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+	// Sign-in errors can outlive a search that was paused before an episode opened.
+	_, err = tx.ExecContext(ctx, `
+		UPDATE watches
+		SET last_checked_at=CASE WHEN status=$2 THEN NULL ELSE last_checked_at END, last_error=''
+		WHERE user_id=$1 AND status IN ($2, $3) AND (($4 AND status=$2) OR `+watchSignInError+`)
+	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused, removed > 0)
+	return err
 }
