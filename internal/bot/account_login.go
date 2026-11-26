@@ -20,7 +20,10 @@ func (state *flow) receivesCredential(message *tgbotapi.Message) bool {
 	switch state.Kind {
 	case flowAccountLogin:
 		return !message.IsCommand()
-	case flowAccountPass, flowAccountCheck:
+	case flowAccountPass:
+		command := message.Command()
+		return command != "cancel" && command != "logout_luxmed" && command != "connect"
+	case flowAccountCheck:
 		command := message.Command()
 		if command == "logout_luxmed" || command == "invite" {
 			return false

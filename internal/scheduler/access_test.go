@@ -429,3 +429,37 @@ func TestRejectedPasswordSubmissionKeepsAcceptedChromeChoice(t *testing.T) {
 		})
 	}
 }
+
+func TestChatOnlySaveNeedsAuthenticationWithoutCityCatalog(t *testing.T) {
+	ctx := t.Context()
+	runner, db, watch := testRunner(t, nil)
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cityCalls := 0
+	client := &catalogClient{
+		cities: func(context.Context) error {
+			cityCalls++
+			return luxmed.ErrUnavailable
+		},
+	}
+	runner.newClient = func(bool) luxmed.Client { return client }
+	want := luxmed.Credentials{Login: "fixture", Password: "replacement"}
+	if err := runner.SaveCredentials(ctx, user, want); err != nil {
+		t.Fatal(err)
+	}
+	account, err := db.LoginAccount(ctx, user.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds, err := runner.cryptor.OpenCredentials(user.ID, account.EncryptedPassword)
+	if err != nil || creds != want || client.logins != 1 || cityCalls != 0 {
+		t.Fatalf("chat-only save did not rely on authentication: logins=%d cityCalls=%d err=%v", client.logins, cityCalls, err)
+	}
+	watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+	if err != nil || access.Status != storage.LuxMedAccessPending || len(watches) != 1 ||
+		watches[0].ID != watch.ID || watches[0].Status != domain.WatchStatusActive {
+		t.Fatalf("saved search was not queued for verification: access=%+v err=%v", access, err)
+	}
+}

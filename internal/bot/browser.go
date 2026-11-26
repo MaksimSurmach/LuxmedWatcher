@@ -191,6 +191,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if err != nil {
 		b.logger.Warn("open browser viewer failed", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
+		b.showConnect(ctx, user)
 		return
 	}
 	if strings.HasPrefix(link, "http://localhost:") {
@@ -210,6 +211,7 @@ func (b *Bot) showMiniApp(ctx context.Context, user domain.User) {
 	if err != nil {
 		b.logger.Warn("Mini App unavailable", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
+		b.showConnect(ctx, user)
 		return
 	}
 	b.sendMiniApp(user, "flow.browser.open", "button.sign_in", link+"&lang="+i18n.Normalize(user.Locale, "pl"))

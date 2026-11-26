@@ -92,7 +92,7 @@ func (r *Runner) VerifyCredentialAttempt(user domain.User, creds luxmed.Credenti
 	// Leave time to commit and return a response after verification.
 	probeCtx, stop := context.WithTimeout(ctx, 12*time.Second)
 	err = client.Authenticate(probeCtx, creds)
-	if err == nil {
+	if err == nil && r.browsers != nil {
 		_, err = client.GetCities(probeCtx)
 	}
 	err = errors.Join(probeCtx.Err(), err)

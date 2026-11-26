@@ -83,9 +83,14 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	d := &dashboard{db: db, key: pub, sessions: newSessions(),
 		browsers: browsers, runner: runner, checkAccount: runner.CheckBrowserSession,
 		cfg: DashboardConfig{Origin: origin, BotID: 12, MinimumInterval: 2 * time.Minute}}
+	failConnect := true
 	d.connect = func(_ context.Context, id int64) (string, error) {
 		if id != owner.TelegramUserID {
 			t.Errorf("unexpected viewer owner: %d", id)
+		}
+		if failConnect {
+			failConnect = false
+			return "", luxmed.ErrUnavailable
 		}
 		return "https://app.example/viewer?ticket=fixture", nil
 	}
@@ -177,7 +182,12 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err := db.EncryptLegacyLogins(ctx, cryptor); err != nil {
 		t.Fatal(err)
 	}
-	if res := request("connect", legacyRevision, origin, token, http.StatusOK); !strings.Contains(res.Body.String(), "viewer?ticket=fixture") {
+	request("connect", legacyRevision, origin, token, http.StatusServiceUnavailable)
+	refreshed := revisions(token)
+	if refreshed == legacyRevision {
+		t.Fatal("failed viewer link did not publish the committed save revision")
+	}
+	if res := request("connect", refreshed, origin, token, http.StatusOK); !strings.Contains(res.Body.String(), "viewer?ticket=fixture") {
 		t.Fatalf("Chrome viewer link is missing: %s", res.Body)
 	}
 	legacy, err := db.LuxMedAccount(ctx, owner.ID)

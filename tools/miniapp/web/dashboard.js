@@ -169,10 +169,14 @@ async function signIn(revisions, attemptID) {
 function bindAccount() {
   const { SavedLogin, CredentialRevision, CredentialSaveRevision } = state;
   const revisions = { CredentialRevision, CredentialSaveRevision };
-  async function refreshStaleAction(error) {
-    if (error.key !== 'error.stale') throw error;
+  async function refreshAccount(error) {
     await switchTab(tab, { reload: true });
     flash(errorText(error));
+  }
+
+  async function refreshStaleAction(error) {
+    if (error.key !== 'error.stale') throw error;
+    await refreshAccount(error);
   }
 
   function displayedAttempt() {
@@ -187,7 +191,8 @@ function bindAccount() {
     try {
       await action(attempt?.id);
     } catch (error) {
-      await refreshStaleAction(error);
+      if (!['error.stale', 'error.unavailable', 'error.link'].includes(error.key)) throw error;
+      await refreshAccount(error);
     } finally {
       if (attempt) {
         attempt.choosingChrome = false;
