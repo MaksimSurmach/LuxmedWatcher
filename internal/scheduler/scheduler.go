@@ -239,7 +239,8 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 			return 0, err
 		}
 	}
-	appointments, searchErr := client.SearchAppointments(ctx, watch)
+	result, searchErr := client.SearchAppointments(ctx, watch)
+	appointments := result.Appointments
 	if errors.Is(searchErr, luxmed.ErrAuthentication) {
 		state.client = nil
 		return 0, searchErr
@@ -251,9 +252,9 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		return 0, errors.Join(searchErr, err)
 	}
 
-	if searchErr == nil {
+	if searchErr == nil && result.Checked {
 		if err := r.resolveReconnect(ctx, user.ID); err != nil {
-			return 0, errors.Join(searchErr, err)
+			return 0, err
 		}
 	}
 

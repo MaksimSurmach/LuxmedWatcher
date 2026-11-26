@@ -47,12 +47,12 @@ func loadLocation() *time.Location {
 // Location is the time zone used by the LuxMed Polish patient portal.
 func Location() *time.Location { return warsaw }
 
-func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch) ([]domain.Appointment, error) {
+func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch) (SearchResult, error) {
 	if watch.CityID <= 0 || watch.ServiceID <= 0 {
-		return nil, errors.New("luxmed search requires a city and service")
+		return SearchResult{}, errors.New("luxmed search requires a city and service")
 	}
 	if watch.DoctorMode == domain.DoctorModeExact && (watch.DoctorID == nil || *watch.DoctorID <= 0) {
-		return nil, errors.New("luxmed search requires a selected doctor")
+		return SearchResult{}, errors.New("luxmed search requires a selected doctor")
 	}
 	facilities := make([]int, 0, len(watch.FacilityIDs))
 	for _, id := range watch.FacilityIDs {
@@ -61,11 +61,11 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 		}
 	}
 	if watch.FacilityMode == domain.FacilityModeSelected && len(facilities) == 0 {
-		return nil, errors.New("luxmed search requires a selected facility")
+		return SearchResult{}, errors.New("luxmed search requires a selected facility")
 	}
 
 	from, to := searchRange(watch, time.Now())
-	var results []domain.Appointment
+	var result SearchResult
 	seen := make(map[string]bool)
 	addMatches := func(apps []domain.Appointment, from, to time.Time) {
 		for _, app := range apps {
@@ -79,7 +79,7 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 			if len(facilities) > 0 && !slices.Contains(facilities, app.FacilityID) {
 				continue
 			}
-			results = append(results, app)
+			result.Appointments = append(result.Appointments, app)
 			seen[app.Fingerprint] = true
 		}
 	}
@@ -91,7 +91,6 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 	var details []detailRequest
 	requested := make(map[string]bool)
 	var uncovered int
-	scanned := false
 	for !from.After(to) {
 		end := from.AddDate(0, 0, 13)
 		if end.After(to) {
@@ -99,18 +98,18 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 		}
 		query, err := termsQuery(watch, facilities, from, end)
 		if err != nil {
-			return results, searchFailure(scanned, err)
+			return result, searchFailure(result.Checked, err)
 		}
 		data, err := c.get(ctx, TermsURL+"?"+query.Encode())
 		if err != nil {
-			return results, searchFailure(scanned, err)
+			return result, searchFailure(result.Checked, err)
 		}
 		preview, err := decodeTermsResponse(watch, data, c.rawPayloads)
 		addMatches(preview.apps, from, end)
 		if err != nil {
-			return results, searchFailure(scanned || len(preview.apps) > 0, err)
+			return result, searchFailure(result.Checked || len(preview.apps) > 0, err)
 		}
-		scanned = true
+		result.Checked = true
 		slices.SortFunc(preview.days, func(a, b dayInfo) int { return cmp.Compare(a.Day, b.Day) })
 		for _, info := range preview.days {
 			if info.Counter.Count <= 0 || requested[info.Day] {
@@ -153,18 +152,18 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 	for _, detail := range details {
 		data, err := c.get(ctx, oneDayTermsURL+"?"+detail.query.Encode())
 		if err != nil {
-			return results, searchFailure(true, err)
+			return result, searchFailure(true, err)
 		}
 		apps, err := decodeOneDayTerms(watch, detail.day, data, c.rawPayloads)
 		addMatches(apps, detail.day, detail.day)
 		if err != nil {
-			return results, searchFailure(true, err)
+			return result, searchFailure(true, err)
 		}
 	}
 	if uncovered > 0 {
-		return results, fmt.Errorf("%w: %d candidate days could not be verified", ErrPartialResults, uncovered)
+		return result, fmt.Errorf("%w: %d candidate days could not be verified", ErrPartialResults, uncovered)
 	}
-	return results, nil
+	return result, nil
 }
 
 func matchesWeekday(day time.Time, windows []domain.TimeWindow) bool {

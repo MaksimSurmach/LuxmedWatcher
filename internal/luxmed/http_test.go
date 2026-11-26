@@ -93,10 +93,11 @@ func TestAuthenticateThenSearchAppointments(t *testing.T) {
 	if err := client.Authenticate(context.Background(), creds); err != nil {
 		t.Fatal(err)
 	}
-	apps, err := client.SearchAppointments(context.Background(), domain.Watch{
+	result, err := client.SearchAppointments(context.Background(), domain.Watch{
 		CityID: 1, ServiceID: 2, DoctorID: &doctorID, FacilityIDs: []int{5, 6},
 		DateFrom: &firstDay, DateTo: &lastDay,
 	})
+	apps := result.Appointments
 	if err != nil {
 		t.Fatal(err)
 	}

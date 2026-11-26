@@ -24,9 +24,15 @@ type Credentials struct {
 	Password string
 }
 
+type SearchResult struct {
+	Appointments []domain.Appointment
+	// Checked indicates that LUX MED returned a valid response for at least one date window.
+	Checked bool
+}
+
 type Client interface {
 	Authenticate(ctx context.Context, creds Credentials) error
-	SearchAppointments(ctx context.Context, watch domain.Watch) ([]domain.Appointment, error)
+	SearchAppointments(ctx context.Context, watch domain.Watch) (SearchResult, error)
 	GetCities(ctx context.Context) ([]domain.City, error)
 	GetServices(ctx context.Context) ([]domain.Service, error)
 	GetRecentProcedures(ctx context.Context) ([]domain.Procedure, error)

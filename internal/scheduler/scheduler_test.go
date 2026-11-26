@@ -35,8 +35,9 @@ func (f *fakeLuxMed) Authenticate(context.Context, luxmed.Credentials) error {
 	return f.authErr
 }
 
-func (f *fakeLuxMed) SearchAppointments(ctx context.Context, _ domain.Watch) ([]domain.Appointment, error) {
-	return f.search(ctx)
+func (f *fakeLuxMed) SearchAppointments(ctx context.Context, _ domain.Watch) (luxmed.SearchResult, error) {
+	apps, err := f.search(ctx)
+	return luxmed.SearchResult{Appointments: apps, Checked: err == nil}, err
 }
 
 type notifyFunc func(context.Context, domain.User, domain.Watch, []domain.AppointmentHistory, int) (int, error)
@@ -371,9 +372,10 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 	}
 	other.ID = otherID
 
-	var status atomic.Int32
+	var status, requests atomic.Int32
 	status.Store(http.StatusTooManyRequests)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
 		code := int(status.Load())
 		if code != http.StatusOK {
 			w.WriteHeader(code)
@@ -437,6 +439,22 @@ func TestBrowserReconnectRetriesDeliveryAndResumesSavedSearches(t *testing.T) {
 		t.Fatalf("delivery after Telegram's retry time: %v", err)
 	}
 	runner = restart()
+
+	expired := other
+	past := time.Now().AddDate(0, 0, -2)
+	expired.DateTo = &past
+	if err := db.UpdateWatch(ctx, expired); err != nil {
+		t.Fatal(err)
+	}
+	requestsBefore := requests.Load()
+	if count, err := runner.ManualCheck(ctx, expired); count != 0 || err != nil || requests.Load() != requestsBefore {
+		t.Fatalf("past date range should make no requests: count=%d, error=%v", count, err)
+	}
+	assertReconnect(true)
+	if err := db.UpdateWatch(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+
 	if _, err := runner.ManualCheck(ctx, other); !errors.Is(err, luxmed.ErrAuthentication) {
 		t.Fatalf("second search with expired session: %v", err)
 	}

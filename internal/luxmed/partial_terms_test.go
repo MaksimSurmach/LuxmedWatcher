@@ -69,9 +69,10 @@ func TestSearchLoadsOnlyBoundedMissingDays(t *testing.T) {
 	from, to := today, today.AddDate(0, 0, 6)
 	client := newHTTPClient(server.URL, false)
 	client.accessToken = "fixture"
-	apps, err := client.SearchAppointments(context.Background(), domain.Watch{
+	result, err := client.SearchAppointments(context.Background(), domain.Watch{
 		CityID: 1, CityName: "Example City", ServiceID: 2, DateFrom: &from, DateTo: &to,
 	})
+	apps := result.Appointments
 	if !errors.Is(err, ErrPartialResults) || len(apps) != 5 || calls.Load() != 4 {
 		t.Fatalf("appointments = %d, requests = %d, err = %v", len(apps), calls.Load(), err)
 	}
@@ -107,10 +108,11 @@ func TestSearchSkipsDetailDaysExcludedByWeekday(t *testing.T) {
 
 	client := newHTTPClient(server.URL, false)
 	client.accessToken = "fixture"
-	apps, err := client.SearchAppointments(context.Background(), domain.Watch{
+	result, err := client.SearchAppointments(context.Background(), domain.Watch{
 		CityID: 1, ServiceID: 2, DateFrom: &sunday, DateTo: &monday,
 		TimeWindows: []domain.TimeWindow{{Weekday: 7, From: "10:00", To: "12:00"}},
 	})
+	apps := result.Appointments
 	if err != nil || len(apps) != 1 || calls.Load() != 1 {
 		t.Fatalf("appointments = %d, calls = %d, err = %v", len(apps), calls.Load(), err)
 	}
@@ -141,7 +143,8 @@ func TestSearchPreservesPreviewWhenDetailRequestsAreRateLimited(t *testing.T) {
 
 	client := newHTTPClient(server.URL, false)
 	client.accessToken = "fixture"
-	apps, err := client.SearchAppointments(context.Background(), domain.Watch{CityID: 1, ServiceID: 2, DateFrom: &today, NextDays: 3})
+	result, err := client.SearchAppointments(context.Background(), domain.Watch{CityID: 1, ServiceID: 2, DateFrom: &today, NextDays: 3})
+	apps := result.Appointments
 	var status *HTTPError
 	if !errors.Is(err, ErrPartialResults) || !errors.As(err, &status) || status.RetryAfter != time.Minute ||
 		len(apps) != 1 || detailCalls.Load() != 1 {
@@ -178,9 +181,10 @@ func TestMalformedPreviewKeepsVerifiedSlots(t *testing.T) {
 
 	client := newHTTPClient(server.URL, false)
 	client.accessToken = "fixture"
-	apps, err := client.SearchAppointments(context.Background(), domain.Watch{
+	result, err := client.SearchAppointments(context.Background(), domain.Watch{
 		CityID: 1, ServiceID: 2, DateFrom: &occasion, DateTo: &occasion,
 	})
+	apps := result.Appointments
 	if !errors.Is(err, ErrPartialResults) || len(apps) != 1 || apps[0].BookingURL != ReservationPageURL {
 		t.Fatalf("verified slots = %d, error = %v", len(apps), err)
 	}
