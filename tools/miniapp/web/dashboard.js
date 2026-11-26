@@ -175,17 +175,17 @@ function bindAccount() {
 
   function scheduleRefresh() {
     clearTimeout(refreshTimer);
-    if (!check.isConnected || state.AccountStatus !== 'verification_pending') return;
-    refreshTimer = setTimeout(refreshPendingAccount, 5000);
+    if (!check.isConnected || !['verification_pending', 'search_paused'].includes(state.AccountStatus)) return;
+    refreshTimer = setTimeout(refreshAccountStatus, 5000);
   }
 
-  async function refreshPendingAccount() {
+  async function refreshAccountStatus() {
     if (!check.isConnected) return;
     if (!document.hidden && !check.disabled) {
       const revision = manualCheck;
       try {
         const latest = await api('load');
-        if (check.isConnected && revision === manualCheck && latest.AccountStatus !== 'verification_pending') {
+        if (check.isConnected && revision === manualCheck && latest.AccountStatus !== state.AccountStatus) {
           await showAccountSnapshot(latest);
         }
       } catch (error) {

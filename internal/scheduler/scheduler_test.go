@@ -1754,7 +1754,11 @@ func TestRejectedActiveFilterFallsBackToPausedSearchAfterCooldown(t *testing.T) 
 			rejected.Add(1)
 			w.WriteHeader(http.StatusBadRequest)
 		case req.URL.Path == luxmed.TermsURL && req.URL.Query().Get("serviceVariantId") == "12":
-			accepted.Add(1)
+			if accepted.Add(1) == 1 {
+				w.Header().Set("Retry-After", "120")
+				w.WriteHeader(http.StatusTooManyRequests)
+				return
+			}
 			fmt.Fprint(w, `{"termsForService":{"termsForDays":[]}}`)
 		default:
 			t.Errorf("unexpected recovery request: %s", req.URL.RequestURI())
@@ -1788,14 +1792,34 @@ func TestRejectedActiveFilterFallsBackToPausedSearchAfterCooldown(t *testing.T) 
 	sqlDB, err := sql.Open("sqlite", path)
 	must(err)
 	t.Cleanup(func() { sqlDB.Close() })
-	_, err = sqlDB.ExecContext(ctx, `UPDATE luxmed_search_cooldown SET started_at=$1 WHERE user_id=$2`,
-		time.Now().UTC().Add(-2*time.Minute), user.ID)
-	must(err)
+	expireReservation := func() {
+		t.Helper()
+		_, err := sqlDB.ExecContext(ctx, `UPDATE luxmed_search_cooldown SET started_at=$1 WHERE user_id=$2`,
+			time.Now().UTC().Add(-2*time.Minute), user.ID)
+		must(err)
+	}
+	expireReservation()
 
+	beforeRateLimit := time.Now()
+	scheduler.maintainReconnectSessions(ctx)
+	runner.mu.Lock()
+	retryAt := runner.accounts[user.ID].next
+	runner.mu.Unlock()
+	if accepted.Load() != 1 || retryAt.Before(beforeRateLimit.Add(2*time.Minute)) {
+		t.Fatalf("fallback ignored Retry-After: alternate=%d retry=%v", accepted.Load(), retryAt)
+	}
+	expireReservation()
+	scheduler.maintainReconnectSessions(ctx)
+	if accepted.Load() != 1 || rejected.Load() != 1 {
+		t.Fatalf("fallback retried before Retry-After: rejected=%d alternate=%d", rejected.Load(), accepted.Load())
+	}
+	runner.mu.Lock()
+	runner.accounts[user.ID].next = time.Time{}
+	runner.mu.Unlock()
 	scheduler.maintainReconnectSessions(ctx)
 	_, access, err := db.WatchesWithReconnectState(ctx, user.ID)
 	must(err)
-	if rejected.Load() != 1 || accepted.Load() != 1 || access.Status != storage.LuxMedAccessConnected ||
+	if rejected.Load() != 1 || accepted.Load() != 2 || access.Status != storage.LuxMedAccessConnected ||
 		access.EpisodeID != "" || notifier.attempts != 0 {
 		t.Fatalf("fallback did not confirm access: rejected=%d alternate=%d access=%+v warnings=%d",
 			rejected.Load(), accepted.Load(), access, notifier.attempts)
@@ -1805,6 +1829,102 @@ func TestRejectedActiveFilterFallsBackToPausedSearchAfterCooldown(t *testing.T) 
 	if saved.Status != domain.WatchStatusPaused || saved.ServiceID != paused.ServiceID || saved.LastError != "" ||
 		saved.LastCheckedAt == nil || !saved.LastCheckedAt.Equal(*paused.LastCheckedAt) {
 		t.Fatalf("fallback changed the paused search schedule or filters: %+v", saved)
+	}
+}
+
+func TestPasswordReconnectUsesFallbackIndependentlyOfWarningDelivery(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		delivered bool
+		authErr   error
+	}{
+		{name: "warning already delivered", delivered: true},
+		{name: "rejected credentials still send a due warning", authErr: luxmed.ErrAuthentication},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			sends := 0
+			runner, db, active := testRunner(t, reconnectNotifierFunc{send: func() error {
+				sends++
+				return nil
+			}})
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			active.CityID, active.ServiceID = 1, 99
+			must(db.UpdateWatch(ctx, active))
+			id, err := db.CreateWatch(ctx, domain.Watch{UserID: active.UserID, CityID: 1, ServiceID: 12})
+			must(err)
+			must(db.SetWatchStatus(ctx, id, domain.WatchStatusPaused))
+			must(db.BeginLuxMedReconnectAfterSearch(ctx, active.UserID))
+			if test.delivered {
+				must(db.MarkLuxMedReconnectNotified(ctx, active.UserID))
+			}
+			badFilter := &luxmed.HTTPError{StatusCode: http.StatusBadRequest}
+			var filters []int
+			client := &termsProbeClient{
+				fakeLuxMed: fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) {
+					return nil, badFilter
+				}},
+				probe: func(_ context.Context, watch domain.Watch) error {
+					filters = append(filters, watch.ServiceID)
+					return nil
+				},
+			}
+			runner.newClient = func(bool) luxmed.Client { return client }
+			if err := runner.renewBrowserSession(ctx, 42, nil); !errors.Is(err, badFilter) {
+				t.Fatalf("expected the initial active filter to be rejected, got %v", err)
+			}
+			if test.authErr != nil {
+				client.authErr = test.authErr
+				runner.accounts[active.UserID].authenticatedAt = time.Time{}
+			}
+			err = runner.renewBrowserSession(ctx, 42, nil)
+			_, access, readErr := db.WatchesWithReconnectState(ctx, active.UserID)
+			must(readErr)
+			if test.authErr != nil {
+				if !errors.Is(err, test.authErr) || len(filters) != 0 || sends != 1 || access.EpisodeID == "" {
+					t.Fatalf("password rejection lost the due warning: err=%v filters=%v sends=%d access=%+v", err, filters, sends, access)
+				}
+				return
+			}
+			if err != nil || !slices.Equal(filters, []int{12}) || sends != 0 || access.Status != storage.LuxMedAccessConnected {
+				t.Fatalf("delivered warning blocked fallback: err=%v filters=%v sends=%d access=%+v", err, filters, sends, access)
+			}
+		})
+	}
+}
+
+func TestTickSkipsRejectedWatchAndChecksAnotherWatchForSameAccount(t *testing.T) {
+	ctx := t.Context()
+	runner, db, rejected := testRunner(t, nil)
+	other, err := db.CreateWatch(ctx, domain.Watch{UserID: rejected.UserID, CityID: 1, ServiceID: 12})
+	if err != nil {
+		t.Fatal(err)
+	}
+	state, _ := runner.acquireAccount(rejected.UserID, false)
+	state.rejectedReconnectWatchID = rejected.ID
+	runner.releaseAccount(state)
+	runner.newClient = func(bool) luxmed.Client {
+		return &fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) { return nil, nil }}
+	}
+	s := New(db, runner, time.Second, 0, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	var checks sync.WaitGroup
+	s.tick(ctx, &checks, make(chan struct{}, 1))
+	checks.Wait()
+	first, err := db.Watch(ctx, rejected.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := db.Watch(ctx, other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.LastCheckedAt != nil || next.LastSuccessAt == nil {
+		t.Fatalf("scheduler failed to select the alternative: rejected=%+v other=%+v", first, next)
 	}
 }
 
@@ -1864,6 +1984,13 @@ func TestPausedLegacySignInErrorRecoversWithAlternativeProtectedFilter(t *testin
 		t.Fatalf("temporary failure changed sign-in state or tried a new filter: filters=%v error=%q err=%v", filters, watched.LastError, err)
 	}
 	temporary.Store(false)
+	scheduler.maintainReconnectSessions(ctx)
+	if !slices.Equal(filters, []int{99}) {
+		t.Fatalf("probe retried during a temporary failure backoff: %v", filters)
+	}
+	runner.mu.Lock()
+	runner.accounts[good.UserID].next = time.Time{}
+	runner.mu.Unlock()
 	scheduler.maintainReconnectSessions(ctx)
 	if !slices.Equal(filters, []int{99, 99, 12}) {
 		t.Fatalf("filter rejection blocked alternate verification: %v", filters)

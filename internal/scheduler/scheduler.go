@@ -265,13 +265,7 @@ func (r *Runner) checkWithAccount(ctx context.Context, requested domain.Watch, m
 	if err != nil {
 		status = checkStatus(err)
 		if errors.Is(err, luxmed.ErrUnavailable) {
-			state.failures = min(state.failures+1, 5)
-			backoff := (15 * time.Second) << (state.failures - 1)
-			var upstream *luxmed.HTTPError
-			if errors.As(err, &upstream) {
-				backoff = max(backoff, min(upstream.RetryAfter, 24*time.Hour))
-			}
-			state.next = maxTime(state.next, time.Now().Add(backoff+jitter(backoff/5)))
+			state.backOffUnavailable(err)
 		}
 	} else {
 		state.failures = 0
@@ -530,7 +524,7 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		if r.browsers != nil {
 			return BrowserSessionCheck{}, nil
 		}
-		return BrowserSessionCheck{}, r.recheckPasswordBeforeWarning(ctx, user, state)
+		return BrowserSessionCheck{}, r.recheckPasswordSession(ctx, user, state)
 	}
 	timeout := 25 * time.Second
 	if !background {
@@ -552,7 +546,7 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 				}
 				return BrowserSessionCheck{EpisodeID: episodeID, VerificationPending: true}, nil
 			}
-			return BrowserSessionCheck{}, r.checkReconnectSearch(ctx, user.ID, state, time.Now(), browser, true)
+			return BrowserSessionCheck{}, r.checkReconnectSearch(ctx, user.ID, state, time.Now(), browser)
 		}
 		return BrowserSessionCheck{}, r.confirmReconnectRecovery(ctx, user.ID, state)
 	}
@@ -587,17 +581,12 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	return BrowserSessionCheck{}, err
 }
 
-func (r *Runner) recheckPasswordBeforeWarning(ctx context.Context, user domain.User, state *accountCheck) error {
-	now := time.Now()
+func (r *Runner) recheckPasswordSession(ctx context.Context, user domain.User, state *accountCheck) error {
 	replayErr := r.replayReconnect(ctx, user.ID)
-	due, err := r.db.LuxMedReconnectDeliveryDue(ctx, user.ID, now)
-	if err != nil {
-		return errors.Join(replayErr, err)
-	}
-	return errors.Join(replayErr, r.checkReconnectSearch(ctx, user.ID, state, now, nil, due))
+	return errors.Join(replayErr, r.checkReconnectSearch(ctx, user.ID, state, time.Now(), nil))
 }
 
-func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *accountCheck, now time.Time, browser *luxmed.Browser, checkActive bool) error {
+func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *accountCheck, now time.Time, browser *luxmed.Browser) error {
 	r.mu.Lock()
 	ready := !now.Before(state.next)
 	r.mu.Unlock()
@@ -621,9 +610,6 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 	hasSearch := false
 	for _, watch := range watches {
 		if watch.Status == domain.WatchStatusActive && luxmed.SearchWindowOpen(watch, now) {
-			if !checkActive {
-				return nil
-			}
 			hasSearch = true
 			// Use the same authenticated search and persisted cooldown as a normal check.
 			_, err := r.checkWithAccount(ctx, watch, true, state)
@@ -650,17 +636,28 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 func (r *Runner) probeReconnectFilters(ctx context.Context, userID int64, state *accountCheck, browser *luxmed.Browser, watches []domain.Watch) error {
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
+	var client luxmed.Client
+	var err error
 	if browser != nil {
-		return r.probeReconnectAccess(ctx, userID, state, browser.Client(), watches)
+		client = browser.Client()
+	} else {
+		client, err = r.passwordClient(ctx, userID, state)
+		switch {
+		case errors.Is(err, ErrNoAccount):
+			return nil
+		case errors.Is(err, luxmed.ErrAuthentication) && !errors.Is(err, luxmed.ErrUnavailable):
+			return r.recordAccessRejection(ctx, userID, state, err)
+		}
 	}
-	client, err := r.passwordClient(ctx, userID, state)
-	if errors.Is(err, ErrNoAccount) {
-		return nil
+	if err == nil {
+		err = r.probeReconnectAccess(ctx, userID, state, client, watches)
 	}
-	if err != nil {
-		return err
+	if errors.Is(err, luxmed.ErrUnavailable) {
+		r.mu.Lock()
+		state.backOffUnavailable(err)
+		r.mu.Unlock()
 	}
-	return r.probeReconnectAccess(ctx, userID, state, client, watches)
+	return err
 }
 
 func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *accountCheck, client luxmed.Client, watches []domain.Watch) error {
@@ -820,6 +817,17 @@ func checkStatus(err error) string {
 	}
 }
 
+// backOffUnavailable is called with the runner mutex held.
+func (state *accountCheck) backOffUnavailable(err error) {
+	state.failures = min(state.failures+1, 5)
+	backoff := (15 * time.Second) << (state.failures - 1)
+	now := time.Now()
+	state.next = maxTime(state.next, now.Add(backoff+jitter(backoff/5)))
+	if upstream, ok := errors.AsType[*luxmed.HTTPError](err); ok {
+		state.next = maxTime(state.next, now.Add(upstream.RetryAfter))
+	}
+}
+
 func jitter(maximum time.Duration) time.Duration {
 	return time.Duration(rand.Int64N(int64(maximum) + 1))
 }
@@ -947,7 +955,6 @@ func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched
 		if accounts[watch.UserID] {
 			continue
 		}
-		accounts[watch.UserID] = true
 		s.runner.mu.Lock()
 		account := s.runner.accounts[watch.UserID]
 		blocked := account != nil && (account.inFlight != nil || now.Before(account.next) || account.rejectedReconnectWatchID == watch.ID)
@@ -955,6 +962,7 @@ func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched
 		if blocked {
 			continue
 		}
+		accounts[watch.UserID] = true
 		select {
 		case dispatched <- struct{}{}:
 		default:
