@@ -293,10 +293,12 @@ function slotGroups(slots) {
     if (!places.has(place)) places.set(place, []);
     places.get(place).push([slot, index]);
   });
-  return [...days.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([, day]) => `<section class="day">
+  // Days keep the server's order: upcoming nearest first, then past times.
+  return [...days.values()].map((day) => `<section class="day">
     <h2 class="day-title">${escape(day.label)}</h2>
-    ${[...day.places.values()].map((rows) => {
-      rows.sort(([a], [b]) => new Date(a.DateTime) - new Date(b.DateTime));
+    ${[...day.places.values()].map((rows) => rows.sort(([a], [b]) => new Date(a.DateTime) - new Date(b.DateTime)))
+      // Within a day, the clinic with the earliest time comes first.
+      .sort((a, b) => new Date(a[0][0].DateTime) - new Date(b[0][0].DateTime)).map((rows) => {
       const { Facility, Address } = rows[0][0];
       // One address per block; the service moves to each time when the block mixes services.
       const services = new Set(rows.map(([slot]) => slot.Service));
@@ -389,6 +391,7 @@ async function historyScreen(id) {
   async function append(offset) {
     const { Slots, More } = await api('history', { Offset: offset });
     if (id !== renderID) return;
+    const first = loaded.length;
     loaded.push(...Slots);
     if (!loaded.length) {
       results.innerHTML = `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`;
@@ -398,6 +401,11 @@ async function historyScreen(id) {
     for (const button of results.querySelectorAll('[data-slot]')) button.onclick = () => bookingDialog(loaded[Number(button.dataset.slot)]);
     const next = results.querySelector('[data-more]');
     if (next) next.onclick = () => void run(next, () => append(offset + Slots.length));
+    // Re-rendering replaces the focused "more" button; move focus to the first time this page added.
+    if (offset) {
+      const added = [...results.querySelectorAll('[data-slot]')].filter((button) => Number(button.dataset.slot) >= first);
+      (added.sort((a, b) => a.dataset.slot - b.dataset.slot)[0] ?? results.querySelector('[data-more]'))?.focus();
+    }
   }
   await append(0);
 }

@@ -147,7 +147,7 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 		return
 	}
 	const pageSize = 24
-	items, err := d.db.RecentHistory(r.Context(), user.ID, pageSize+1, input.Offset)
+	items, err := d.db.UpcomingHistory(r.Context(), user.ID, time.Now(), pageSize+1, input.Offset)
 	if err != nil {
 		reply(w, http.StatusServiceUnavailable, nil)
 		return

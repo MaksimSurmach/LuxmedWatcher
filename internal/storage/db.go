@@ -365,6 +365,31 @@ func (db *DB) RecentHistory(ctx context.Context, userID int64, limit, offset int
 	return db.WatchHistory(ctx, userID, 0, limit, offset)
 }
 
+// UpcomingHistory pages through a user's history nearest-first: times from now on in ascending
+// order, then past or expired times newest first. Pages therefore never reveal an earlier
+// upcoming time after a later one.
+func (db *DB) UpcomingHistory(ctx context.Context, userID int64, now time.Time, limit, offset int) ([]domain.AppointmentHistory, error) {
+	when := db.dateTimeSQL("date_time")
+	past := `CASE WHEN ` + when + ` >= ` + db.dateTimeSQL("$2") + ` AND status <> $3 THEN 0 ELSE 1 END`
+	rows, err := db.sql.QueryContext(ctx, historySelect()+`
+		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1) AND status <> $4
+		ORDER BY `+past+`, CASE WHEN `+past+` = 0 THEN `+when+` END ASC, `+when+` DESC, id ASC LIMIT $5 OFFSET $6
+	`, userID, now.UTC(), domain.HistoryStatusExpired, domain.HistoryStatusHidden, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []domain.AppointmentHistory
+	for rows.Next() {
+		item, err := scanHistory(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	return items, rows.Err()
+}
+
 func (db *DB) WatchHistory(ctx context.Context, userID, watchID int64, limit, offset int) ([]domain.AppointmentHistory, error) {
 	rows, err := db.sql.QueryContext(ctx, historySelect()+`
 		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1 AND (id=$2 OR $2=0)) AND status <> $3
