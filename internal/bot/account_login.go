@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"time"
 
@@ -20,33 +21,54 @@ func (state *flow) receivesCredential(message *tgbotapi.Message) bool {
 		return !message.IsCommand()
 	case flowAccountPass, flowAccountCheck:
 		command := message.Command()
-		return command != "cancel"
+		return command != "cancel" && command != "logout_luxmed"
 	default:
 		return false
 	}
 }
 
-// Telegram acknowledgments can block on the network. Cancel locally as soon
-// as an authorized Chrome choice arrives, then confirm it in storage.
-func (b *Bot) cancelPendingChromeLogin(ctx context.Context, telegramID int64, action string) {
+type passwordAttempt struct {
+	owner    domain.User
+	previous domain.LuxMedAccount
+	cancel   context.CancelFunc
+}
+
+func (b *Bot) cancelPendingLogin(telegramID int64) *passwordAttempt {
+	value, ok := b.pendingLogins.Load(telegramID)
+	if !ok {
+		return nil
+	}
+	attempt := value.(*passwordAttempt)
+	attempt.cancel()
+	return attempt
+}
+
+// Cancel before reading the database or acknowledging the callback. Both can
+// block behind the password write or a Telegram network request.
+func (b *Bot) cancelPendingChromeLogin(telegramID int64, action string) *passwordAttempt {
 	if (action != "connect:chrome" && action != "connect:open") || b.cfg.Browsers[telegramID] == nil {
-		return
+		return nil
 	}
-	user, err := b.db.UserByTelegramID(ctx, telegramID)
-	if err != nil || !user.IsActive() {
-		return
-	}
-	pending := b.getFlow(user.ID)
-	if pending != nil && pending.Kind == flowAccountCheck {
-		pending.cancel()
-	}
+	return b.cancelPendingLogin(telegramID)
 }
 
 func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed.Credentials) {
+	attempt := &passwordAttempt{owner: user}
+	if b.cfg.Browsers[user.TelegramUserID] != nil {
+		account, err := b.db.LuxMedAccount(parent, user.ID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			b.send(user, b.catalog.T(user.Locale, "errors.generic"), cancelKeyboard(b.catalog, user.Locale))
+			return
+		}
+		attempt.previous = account
+	}
 	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	attempt.cancel = cancel
 	pending := &flow{Kind: flowAccountCheck, cancel: cancel}
 	b.setFlow(user.ID, pending)
+	b.pendingLogins.Store(user.TelegramUserID, attempt)
 	b.workers.Go(func() {
+		defer b.pendingLogins.CompareAndDelete(user.TelegramUserID, attempt)
 		defer cancel()
 		err := b.saveLogin(ctx, user, creds)
 		canceled := parent.Err() != nil || errors.Is(ctx.Err(), context.Canceled) ||

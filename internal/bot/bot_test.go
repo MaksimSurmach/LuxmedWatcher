@@ -542,7 +542,7 @@ func TestStandaloneConnectLinkUsesSavedLanguage(t *testing.T) {
 				t.Fatal(err)
 			}
 			b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
-			b.handleAction(t.Context(), user.TelegramUserID, "connect:open")
+			b.handleAction(t.Context(), user.TelegramUserID, "connect:open", nil)
 			select {
 			case got := <-sent:
 				want := tc.origin + "/connect?lang=be#" + ticket
@@ -592,12 +592,12 @@ func TestTelegramChromeOpeningKeepsMigratedCredentialsUntilExplicitRemoval(t *te
 	}); err != nil {
 		t.Fatal(err)
 	}
-	b.handleAction(ctx, user.TelegramUserID, "connect:chrome")
+	b.handleAction(ctx, user.TelegramUserID, "connect:chrome", nil)
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil || account.EncryptedPassword != sealed || opened.Load() != 1 {
 		t.Fatalf("Chrome did not open with the legacy record intact: opened=%d error=%v", opened.Load(), err)
 	}
-	b.handleAction(ctx, user.TelegramUserID, "connect:forget")
+	b.handleAction(ctx, user.TelegramUserID, "connect:forget", nil)
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("explicit removal did not delete the record: %v", err)
 	}
@@ -608,12 +608,12 @@ func TestTelegramChromeOpeningKeepsMigratedCredentialsUntilExplicitRemoval(t *te
 	if _, err := b.db.SaveCredentials(ctx, b.cryptor, current, luxmed.Credentials{Login: "opt-in", Password: "fixture"}); err != nil {
 		t.Fatal(err)
 	}
-	b.handleAction(ctx, user.TelegramUserID, "connect:open")
+	b.handleAction(ctx, user.TelegramUserID, "connect:open", nil)
 	if _, err := b.db.LoginAccount(ctx, user.ID, true); err != nil || opened.Load() != 1 {
 		t.Fatalf("old Chrome action switched away from saved login: opened=%d error=%v", opened.Load(), err)
 	}
-	b.handleAction(ctx, user.TelegramUserID, "connect:forget")
-	b.handleAction(ctx, user.TelegramUserID, "connect:chrome")
+	b.handleAction(ctx, user.TelegramUserID, "connect:forget", nil)
+	b.handleAction(ctx, user.TelegramUserID, "connect:chrome", nil)
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) || opened.Load() != 2 {
 		t.Fatalf("Chrome did not open after explicit opt-out: opened=%d error=%v", opened.Load(), err)
 	}
@@ -742,5 +742,58 @@ func TestTelegramChromeCancelsInFlightPasswordVerification(t *testing.T) {
 	}
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("late verification persisted the password: %v", err)
+	}
+}
+
+func TestTelegramLogoutCancelsPasswordVerificationAndPausesSearches(t *testing.T) {
+	ctx := t.Context()
+	var deleted atomic.Int32
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/deleteMessage") {
+			deleted.Add(1)
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	watchID, err := b.db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	releaseLogin := sync.OnceFunc(func() { close(release) })
+	defer func() {
+		releaseLogin()
+		b.workers.Wait()
+	}()
+	b.newClient = func(bool) luxmed.Client { return blockedLoginClient{started: started, release: release} }
+	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "fixture"})
+	b.handleText(ctx, user, "fixture")
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("login did not start")
+	}
+	const command = "/logout_luxmed"
+	b.handleUpdate(ctx, tgbotapi.Update{Message: &tgbotapi.Message{
+		MessageID: 20,
+		From:      &tgbotapi.User{ID: user.TelegramUserID},
+		Chat:      &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
+		Text:      command, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(command)}},
+	}})
+	releaseLogin()
+	b.workers.Wait()
+	if deleted.Load() != 0 {
+		t.Fatal("logout was treated as a password message")
+	}
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("late verification stored credentials after logout: %v", err)
+	}
+	fresh, err := b.db.UserByID(ctx, user.ID)
+	if err != nil || fresh.CredentialSaveRevision <= user.CredentialSaveRevision {
+		t.Fatalf("logout did not advance the save revision: %v", err)
+	}
+	watch, err := b.db.Watch(ctx, watchID)
+	if err != nil || watch.Status != domain.WatchStatusPaused {
+		t.Fatalf("logout did not pause the watch: status=%s, err=%v", watch.Status, err)
 	}
 }

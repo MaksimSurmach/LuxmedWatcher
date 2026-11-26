@@ -39,19 +39,20 @@ type Config struct {
 }
 
 type Bot struct {
-	api          *tgbotapi.BotAPI
-	db           *storage.DB
-	catalog      *i18n.Catalog
-	cryptor      *security.Cryptor
-	cfg          Config
-	runner       *scheduler.Runner
-	manualChecks chan struct{}
-	workers      sync.WaitGroup
-	appMenuLocks sync.Map // User ID to *sync.Mutex.
-	logger       *slog.Logger
-	newClient    func(bool) luxmed.Client
-	flowMu       sync.Mutex
-	flowState    map[int64]*flow
+	api           *tgbotapi.BotAPI
+	db            *storage.DB
+	catalog       *i18n.Catalog
+	cryptor       *security.Cryptor
+	cfg           Config
+	runner        *scheduler.Runner
+	manualChecks  chan struct{}
+	workers       sync.WaitGroup
+	appMenuLocks  sync.Map // User ID to *sync.Mutex.
+	logger        *slog.Logger
+	newClient     func(bool) luxmed.Client
+	pendingLogins sync.Map // Telegram user ID to *passwordAttempt.
+	flowMu        sync.Mutex
+	flowState     map[int64]*flow
 }
 
 type flowKind string
@@ -247,6 +248,9 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		(b.cfg.Browsers != nil && b.cfg.Browsers[update.Message.From.ID] == nil) {
 		return
 	}
+	if update.Message.Command() == "logout_luxmed" {
+		b.cancelPendingLogin(update.Message.From.ID)
+	}
 	user, err := b.upsertUser(ctx, update.Message)
 	if err != nil {
 		b.logger.Warn("upsert user failed", "err", err)
@@ -433,16 +437,16 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		return
 	}
 	data := cb.Data
-	b.cancelPendingChromeLogin(ctx, cb.From.ID, data)
+	attempt := b.cancelPendingChromeLogin(cb.From.ID, data)
 	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 	if strings.HasPrefix(data, "options:") && strings.Count(data, ":") == 2 {
 		// Only the opening button is on the notification itself. Page buttons carry its message ID.
 		data += ":" + strconv.Itoa(cb.Message.MessageID)
 	}
-	b.handleAction(ctx, cb.From.ID, data)
+	b.handleAction(ctx, cb.From.ID, data, attempt)
 }
 
-func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
+func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, attempt *passwordAttempt) {
 	user, err := b.db.UserByTelegramID(ctx, telegramID)
 	if err != nil {
 		return
@@ -495,7 +499,14 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 			return
 		}
 		b.clearFlow(user.ID)
-		err := b.db.ConfirmBrowserLogin(ctx, user)
+		var err error
+		overlapsSave := attempt != nil && attempt.owner.ID == user.ID && !attempt.previous.UseSavedLogin
+		if overlapsSave {
+			err = b.db.ChooseChromeDuringPasswordSave(ctx, attempt.owner, attempt.previous)
+		}
+		if !overlapsSave || errors.Is(err, storage.ErrCredentialsChanged) {
+			err = b.db.ConfirmBrowserLogin(ctx, user)
+		}
 		if errors.Is(err, storage.ErrCredentialsChanged) {
 			b.showConnect(ctx, user)
 			return

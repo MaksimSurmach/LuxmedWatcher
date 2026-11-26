@@ -189,10 +189,19 @@ function bindAccount() {
   let refreshTimer;
   let manualCheck = 0;
 
+  const modeChanged = (latest) => latest.SavedLogin !== state.SavedLogin ||
+    latest.HasCredentials !== state.HasCredentials;
+
   async function showAccountSnapshot(latest) {
+    const redraw = modeChanged(latest);
     applySnapshot(latest);
     if (tab === 'home' || tab === 'watches') {
       await switchTab(tab, { reload: false });
+      return;
+    }
+    if (redraw) {
+      main.querySelector('.account').outerHTML = accountSection();
+      bindAccount();
       return;
     }
     const account = state.AccountStatus;
@@ -215,7 +224,8 @@ function bindAccount() {
       const revision = manualCheck;
       try {
         const latest = await api('load');
-        if (check.isConnected && revision === manualCheck && latest.AccountStatus !== state.AccountStatus) {
+        if (check.isConnected && revision === manualCheck &&
+            (latest.AccountStatus !== state.AccountStatus || modeChanged(latest))) {
           await showAccountSnapshot(latest);
         }
       } catch (error) {

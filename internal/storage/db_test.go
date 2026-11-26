@@ -1219,3 +1219,43 @@ func TestWatchesAndReconnectStateStayConsistentDuringRecovery(t *testing.T) {
 		}
 	})
 }
+
+func TestChromeSelectionRestoresMigratedLoginAfterOverlappingSave(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42, Status: domain.UserStatusActive})
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, err := security.NewCryptor(make([]byte, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy := domain.LuxMedAccount{UserID: user.ID, EncryptedPassword: "migrated fixture"}
+		if err := db.UpsertLuxMedAccount(ctx, legacy); err != nil {
+			t.Fatal(err)
+		}
+		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		creds := security.Credentials{Login: "fixture", Password: "candidate"}
+		if _, err := db.SaveCredentials(ctx, key, user, creds); err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ChooseChromeDuringPasswordSave(ctx, user, legacy); err != nil {
+			t.Fatal(err)
+		}
+		a, err := db.LuxMedAccount(ctx, user.ID)
+		if err != nil || a.UseSavedLogin || a.EncryptedPassword != legacy.EncryptedPassword {
+			t.Fatalf("migrated credentials not restored: mode=%v err=%v", a.UseSavedLogin, err)
+		}
+		if _, err := db.SaveCredentials(ctx, key, user, creds); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("old verification was allowed to save again: %v", err)
+		}
+		watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+		if err != nil || len(watches) != 1 || watches[0].ID != id ||
+			watches[0].Status != domain.WatchStatusActive || access.Status != LuxMedAccessPending {
+			t.Fatalf("Chrome switch lost search state: watches=%+v access=%+v err=%v", watches, access, err)
+		}
+	})
+}

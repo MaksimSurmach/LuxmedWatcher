@@ -282,7 +282,7 @@ func TestBotLanguageSurvivesTelegramProfileUpdates(t *testing.T) {
 	}
 	for _, locale := range i18n.SupportedLocales {
 		t.Run(locale, func(t *testing.T) {
-			b.handleAction(ctx, user.TelegramUserID, "lang:"+locale)
+			b.handleAction(ctx, user.TelegramUserID, "lang:"+locale, nil)
 			got, err := b.upsertUser(ctx, msg)
 			if err != nil || got.Locale != locale {
 				t.Fatalf("language after next Telegram message = %q, error = %v", got.Locale, err)

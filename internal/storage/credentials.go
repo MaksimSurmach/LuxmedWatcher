@@ -106,6 +106,65 @@ func (db *DB) ConfirmBrowserLogin(ctx context.Context, owner domain.User) error 
 	return err
 }
 
+// ChooseChromeDuringPasswordSave fences an attempt that began in Chrome mode.
+// If it committed first, undo only that revision and restore any migrated row.
+func (db *DB) ChooseChromeDuringPasswordSave(ctx context.Context, owner domain.User, previous domain.LuxMedAccount) error {
+	if previous.UseSavedLogin || (previous.UserID != 0 && previous.UserID != owner.ID) {
+		return ErrCredentialsChanged
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var revision int64
+	err = tx.QueryRowContext(ctx, `
+		UPDATE users SET credential_save_revision=credential_save_revision+1
+		WHERE id=$1 AND credential_save_revision=$3 AND status=$4 AND role <> ''
+			AND credential_revision IN ($2, $5)
+		RETURNING credential_revision
+	`, owner.ID, owner.CredentialRevision, owner.CredentialSaveRevision,
+		domain.UserStatusActive, owner.CredentialRevision+1).Scan(&revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrCredentialsChanged
+	}
+	if err != nil {
+		return err
+	}
+	// Read the account after taking the user row lock. In PostgreSQL a waiter
+	// can see the updated user row before a new statement sees the account write.
+	var savedMode bool
+	err = tx.QueryRowContext(ctx, `
+		SELECT use_saved_login FROM luxmed_accounts WHERE user_id=$1
+	`, owner.ID).Scan(&savedMode)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if savedMode != (revision == owner.CredentialRevision+1) {
+		return ErrCredentialsChanged
+	}
+	if revision == owner.CredentialRevision {
+		return tx.Commit()
+	}
+	if previous.UserID == owner.ID {
+		if err := upsertLuxMedAccount(ctx, tx, previous); err != nil {
+			return err
+		}
+	} else if _, err := tx.ExecContext(ctx, `DELETE FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login`, owner.ID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE users SET credential_revision=credential_revision+1 WHERE id=$1`, owner.ID); err != nil {
+		return err
+	}
+	if err := db.finalizeLuxMedAccountSave(ctx, tx, owner.ID, false); err != nil {
+		return err
+	}
+	if err := db.setModeAccessStatus(ctx, tx, owner.ID, LuxMedAccessUnchecked); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // Earlier versions stored the login in plaintext and encrypted only the password.
 // Preserve the previous mode in installations with a browser configured.
 func (db *DB) EncryptLegacyLogins(ctx context.Context, key *security.Cryptor) error {
