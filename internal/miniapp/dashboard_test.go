@@ -11,6 +11,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -214,6 +215,138 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	watch, err = db.Watch(ctx, id)
 	if err != nil || watch.ServiceName != "Konsultacja dermatologiczna" {
 		t.Fatalf("stored Polish label changed: %q, %v", watch.ServiceName, err)
+	}
+}
+
+func TestDashboardHistoryKeepsPageOrderWhenAvailabilityChanges(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		change string
+	}{
+		{name: "the first time passes", change: "passes"},
+		{name: "the provider removes the first time", change: "removed"},
+		{name: "the provider returns the first time", change: "returned"},
+		{name: "the user hides a pending time", change: "hidden"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				testDashboardHistoryPageOrder(t, tt.change)
+			})
+		})
+	}
+}
+
+func testDashboardHistoryPageOrder(t *testing.T, change string) {
+	t.Helper()
+	ctx := t.Context()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "database.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	user, err := db.UpsertTelegramUser(ctx, domain.User{
+		TelegramUserID: 24, Status: domain.UserStatusActive, Locale: "pl",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	addWatch := func() int64 {
+		t.Helper()
+		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	firstWatch, otherWatch := addWatch(), addWatch()
+	now := time.Now()
+	firstSlot := domain.Appointment{Fingerprint: "slot-0", DateTime: now.Add(time.Second)}
+	var slotIDs []int64
+	for i := range 26 {
+		watchID := otherWatch
+		slot := domain.Appointment{Fingerprint: fmt.Sprintf("slot-%d", i), DateTime: now.Add(time.Duration(i+1) * time.Hour)}
+		if i == 0 {
+			watchID = firstWatch
+			slot = firstSlot
+		}
+		item, _, err := db.UpsertAppointmentHistory(ctx, watchID, slot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		slotIDs = append(slotIDs, item.ID)
+	}
+
+	const origin = "https://app.example"
+	d := &dashboard{db: db, sessions: newSessions(), cfg: DashboardConfig{Origin: origin},
+		browsers: map[int64]*luxmed.Browser{user.TelegramUserID: {}}}
+	handler := d.handler()
+	token := d.sessions.issue(user.TelegramUserID, now)
+	type page struct {
+		Slots []dashboardHistory
+		More  bool
+		Next  json.RawMessage
+	}
+	request := func(body string) page {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, dashboardPrefix+"history", strings.NewReader(body))
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Authorization", "Bearer "+token)
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		var result page
+		if err := json.Unmarshal(res.Body.Bytes(), &result); err != nil || res.Code != http.StatusOK {
+			t.Fatalf("history status = %d, body = %s, err = %v", res.Code, res.Body, err)
+		}
+		return result
+	}
+	markFirstMissing := func() {
+		t.Helper()
+		if err := db.MarkMissingAppointments(ctx, firstWatch, now.Add(time.Minute), now); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wantFirst := slotIDs[0]
+	wantNext := slotIDs[24:]
+	if change == "returned" {
+		markFirstMissing()
+		wantFirst = slotIDs[1]
+		wantNext = []int64{slotIDs[25], slotIDs[0]}
+	}
+	first := request("{}")
+	if len(first.Slots) != 24 || !first.More || len(first.Next) == 0 || first.Slots[0].ID != wantFirst {
+		t.Fatalf("unexpected first page: %+v", first)
+	}
+	switch change {
+	case "removed":
+		markFirstMissing()
+	case "returned":
+		if _, _, err := db.UpsertAppointmentHistory(ctx, firstWatch, firstSlot); err != nil {
+			t.Fatal(err)
+		}
+	case "passes":
+		time.Sleep(2 * time.Second)
+	case "hidden":
+		if err := db.HideAppointmentHistory(ctx, user.ID, slotIDs[24]); err != nil {
+			t.Fatal(err)
+		}
+		wantNext = slotIDs[25:]
+	}
+	second := request(fmt.Sprintf(`{"After":%s}`, first.Next))
+	var got []int64
+	for _, slot := range second.Slots {
+		got = append(got, slot.ID)
+	}
+	if !slices.Equal(got, wantNext) || second.More {
+		t.Fatalf("next page IDs = %v, want %v, more = %v", got, wantNext, second.More)
+	}
+	if change == "returned" && second.Slots[1].Status == domain.HistoryStatusExpired {
+		t.Fatal("returned time still has expired status")
+	}
+	if change == "returned" {
+		fresh := request("{}")
+		if len(fresh.Slots) == 0 || fresh.Slots[0].ID != slotIDs[0] {
+			t.Fatalf("new view did not prioritize the returned time: %+v", fresh.Slots)
+		}
 	}
 }
 

@@ -1,8 +1,7 @@
-/* Quiet, warm-white interface with a single deep muted teal accent.
-   The Mini App is deliberately light, independent of Telegram's theme: every surface,
-   text and border colour is set explicitly so contrast holds inside Telegram's dark chrome. */
+/* Quiet interface with a single deep muted teal accent. Light and dark follow the system theme;
+   every surface, text and border colour is set explicitly so contrast holds inside Telegram's chrome. */
 :root {
-  color-scheme: light;
+  color-scheme: light dark;
   --paper: #faf8f4;
   --surface: #fffefc;
   --ink: #1f2623;
@@ -22,6 +21,13 @@
   color: var(--ink);
   font: 16px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
   -webkit-text-size-adjust: 100%;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #141a18; --surface: #1b2321; --ink: #edf1ee; --muted: #a9b5b0; --line: #2f3a37;
+    --field-line: #7d8a85; --accent: #7fcfc6; --accent-ink: #0c1f1d; --accent-soft: #1f3532; --focus: #9be0d7;
+    --neutral: #26302d; --amber: #3a2e14; --amber-ink: #f0cd8b; --danger: #ff9c92;
+  }
 }
 * { box-sizing: border-box; }
 [hidden] { display: none !important; }
@@ -54,7 +60,7 @@ dl, dd { margin: 0; }
 /* Buttons and links */
 .primary, .secondary, .flat, .row {
   display: inline-flex; justify-content: center; align-items: center; gap: 8px;
-  min-height: 46px; border-radius: 10px; padding: 8px 14px;
+  min-height: 48px; border-radius: 10px; padding: 8px 14px;
   border: 1px solid transparent; cursor: pointer; font-weight: 600;
   text-align: center; text-decoration: none; line-height: 1.25;
 }
@@ -106,6 +112,7 @@ dl, dd { margin: 0; }
 
 /* Searches */
 .watch .actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.watch .actions .primary { grid-column: 1 / -1; }
 .watch .actions button { min-width: 0; padding-inline: 6px; font-size: .9rem; line-height: 1.2; }
 
 .card-head { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
@@ -117,18 +124,47 @@ dl, dd { margin: 0; }
 .empty { padding: 24px 18px; color: var(--muted); }
 .empty h2 { color: var(--ink); margin-bottom: 6px; }
 
-/* Results */
-.slot { display: grid; grid-template-columns: 56px 1fr; gap: 6px 14px; }
-.date-tile { display: grid; align-content: center; justify-items: center; align-self: start; padding: 8px 3px; background: var(--accent-soft); color: var(--accent); border-radius: 10px; line-height: 1.1; font-size: .78rem; font-weight: 600; text-transform: uppercase; }
-.date-tile strong { font-size: 1.5rem; font-weight: 650; }
-.slot h2 { font-size: 1.5rem; font-weight: 650; letter-spacing: -.02em; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
-.slot-clinic { font-weight: 600; }
-.slot-body .meta { display: block; }
-.slot-service { color: var(--ink); margin-top: 6px; }
-.slot .primary { grid-column: 1 / -1; margin-top: 8px; }
-.slot.expired { background: var(--paper); }
-.slot.expired h2, .slot.expired .date-tile { color: var(--muted); }
-.slot.expired .date-tile { background: var(--neutral); }
+/* Results: day, then one block per clinic address, then times with their doctors */
+.day { display: grid; gap: 12px; }
+.day + .day { margin-top: 10px; }
+.day-title { font-size: .85rem; font-weight: 650; color: var(--muted); text-transform: capitalize; letter-spacing: 0; padding-top: 6px; border-top: 1px solid var(--line); }
+.place { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px 6px; min-width: 0; overflow-wrap: anywhere; }
+.place h3 { font-size: 1rem; }
+.place .meta { margin-top: 2px; }
+.times { list-style: none; margin: 10px 0 0; padding: 0; }
+.slot-row {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px;
+  width: 100%; min-height: 56px; padding: 8px 0; border: 0; border-top: 1px solid var(--line);
+  background: none; color: var(--ink); text-align: start; cursor: pointer; font: inherit;
+}
+.slot-row time { min-width: 3.1em; white-space: nowrap; font-size: 1.5rem; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.slot-row .doctor { min-width: 0; overflow-wrap: anywhere; }
+.slot-row .doctor .service { display: block; color: var(--muted); font-size: .85rem; }
+.slot-row .doctor small { display: block; color: var(--muted); font-size: .82rem; }
+.slot-row .arrow { color: var(--accent); font-size: 1.5rem; line-height: 1; padding-inline: 6px; }
+.slot-row:focus-visible { outline-offset: -3px; border-radius: 8px; }
+.slot-row.expired { cursor: default; color: var(--muted); }
+.slot-row.expired time { text-decoration: line-through; }
+@media (hover: hover) { button.slot-row:hover .doctor { text-decoration: underline; text-underline-offset: 3px; } }
+
+/* Search card health */
+.watch { display: grid; gap: 4px; }
+.watch h2 { overflow-wrap: anywhere; }
+.health { display: grid; gap: 6px; margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--line); font-size: .92rem; }
+.health > div { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 2px 12px; }
+.health dt { color: var(--muted); }
+.health dd { font-weight: 600; text-align: end; }
+.health .badge { margin: 0; }
+.notice { margin-top: 8px; padding: 10px 12px; border-radius: 10px; background: var(--amber); color: var(--amber-ink); font-size: .92rem; font-weight: 500; }
+
+/* Booking handoff */
+dialog { width: min(380px, calc(100% - 32px)); border: 1px solid var(--line); border-radius: 16px; background: var(--surface); color: var(--ink); padding: 20px; }
+dialog::backdrop { background: rgb(8 14 12 / .6); }
+dialog h2 { font-size: 1.2rem; margin-bottom: 12px; }
+dialog .note { margin: 14px 0 16px; }
+.booking-facts { display: grid; gap: 4px; }
+.booking-facts dt { font-weight: 650; overflow-wrap: anywhere; }
+.booking-facts dd { color: var(--muted); }
 .muted { color: var(--muted); font-size: .9rem; }
 .error { color: var(--danger); }
 .error:empty { display: none; }
@@ -211,3 +247,10 @@ nav [aria-current="page"] { background: var(--accent-soft); color: var(--accent)
 
 .more-options { margin-top: 5px; }
 .more-options summary { min-height: 44px; align-content: center; }
+
+/* Booking outcome and auto-booking (shown only when the server offers booking) */
+.outcome { padding: 12px; border-radius: 10px; font-weight: 600; }
+.outcome[data-kind="confirmed"] { background: var(--accent-soft); color: var(--accent); }
+.outcome[data-kind="taken"] { background: var(--amber); color: var(--amber-ink); }
+.autobook { margin-top: 8px; font-size: .92rem; }
+.autobook[data-on="true"] { color: var(--accent); font-weight: 600; }

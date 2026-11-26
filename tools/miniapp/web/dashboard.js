@@ -137,22 +137,24 @@ function accountSection(compact = false) {
   </section>`;
 }
 
+async function signIn() {
+  const { url } = await api('connect');
+  let target;
+  try {
+    target = new URL(url);
+  } catch {
+    throw new DashboardError('error.link');
+  }
+  if (target.origin !== location.origin || target.pathname !== '/') throw new DashboardError('error.link');
+  target.searchParams.set('return', 'app');
+  target.hash = location.hash;
+  location.assign(target.href);
+}
+
 function bindAccount() {
   const failure = main.querySelector('[data-account-error]');
   const connect = main.querySelector('#connect');
-  connect.onclick = () => void run(connect, async () => {
-    const { url } = await api('connect');
-    let target;
-    try {
-      target = new URL(url);
-    } catch {
-      throw new DashboardError('error.link');
-    }
-    if (target.origin !== location.origin || target.pathname !== '/') throw new DashboardError('error.link');
-    target.searchParams.set('return', 'app');
-    target.hash = location.hash;
-    location.assign(target.href);
-  }, failure);
+  connect.onclick = () => void run(connect, signIn, failure);
   const check = main.querySelector('#account-check');
   check.onclick = () => void run(check, async () => {
     const result = await api('account');
@@ -215,32 +217,65 @@ const watchErrors = new Map([
   ['luxmed_unavailable', 'error.luxmed_unavailable'],
   ['luxmed_partial', 'watches.check_partial'],
 ]);
+const timeOf = (date) => `${dateText(date)}, ${clock.format(new Date(date))}`;
 
+// Monitoring state and the last successful check are separate facts: a search can be
+// active and still be failing, and the user needs to see when it last worked.
 function watchCard(watch) {
   const active = watch.Status === 'active';
   const dates = watch.DateFrom && watch.DateTo
     ? `${escape(dateText(watch.DateFrom))} — ${escape(dateText(watch.DateTo))}`
     : text('watches.period_days', { days: watch.NextDays });
-  const lastRun = watch.LastCheckedAt ? `${escape(dateText(watch.LastCheckedAt))}, ${clock.format(new Date(watch.LastCheckedAt))}` : '';
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
   const checkError = watch.LastError ? watchErrors.get(watch.LastError) ?? 'watches.check_error' : '';
   const needsLogin = checkError === 'error.connect_first' || checkError === 'error.no_account';
+  const success = watch.LastSuccessAt ? timeOf(watch.LastSuccessAt) : t('watches.never_succeeded');
   return `<article class="card watch" data-status="${active ? 'active' : 'paused'}">
-    <div class="card-head"><h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
-      <span class="badge ${active ? 'active' : ''}">${text(active ? 'watches.active' : 'watches.paused')}</span></div>
-    <p class="meta">${icon('pin')}${escape(watch.CityName)}</p>
-    <p class="meta">${icon('calendar')}${dates}</p>
-    ${watch.DoctorName ? `<p class="meta">${escape(watch.DoctorName)}</p>` : ''}
-    ${watch.TimeWindows?.length ? `<p class="meta">${escape(hoursLabel(watch.TimeWindows))}</p>` : ''}
-    ${minutes ? `<p class="meta">${text('watches.interval_card', { minutes })}</p>` : ''}
-    ${lastRun ? `<p class="meta">${text('watches.checked')} · ${lastRun}</p>` : ''}
-    ${checkError ? `<p class="meta error">${text(checkError)}</p>` : ''}
+    <h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
+    <p class="meta">${escape(watch.CityName)}${watch.DoctorName ? ` · ${escape(watch.DoctorName)}` : ''}</p>
+    <p class="meta">${dates}${watch.TimeWindows?.length ? ` · ${escape(hoursLabel(watch.TimeWindows))}` : ''}${minutes ? ` · ${text('watches.interval_card', { minutes })}` : ''}</p>
+    <dl class="health">
+      <div><dt>${text('watches.monitoring')}</dt><dd><span class="badge ${active ? 'active' : ''}">${text(active ? 'watches.active' : 'watches.paused')}</span></dd></div>
+      ${state.Booking ? `<div><dt>${text('watches.autobook')}</dt><dd class="autobook" data-on="${Boolean(watch.AutoBook)}">${text(watch.AutoBook ? 'watches.autobook_on' : 'watches.autobook_off')}</dd></div>` : ''}
+      <div><dt>${text('watches.last_success')}</dt><dd>${escape(success)}</dd></div>
+    </dl>
+    ${checkError ? `<p class="notice" role="status">${text(checkError)}</p>` : ''}
     <div class="actions">
+      ${needsLogin ? `<button type="button" class="primary" data-sign-in>${text('account.sign_in')} ${icon('link')}</button>` : ''}
       ${needsLogin ? `<button type="button" class="secondary" data-account-settings>${text('account.settings')}</button>` : ''}
+      ${state.Booking ? `<button type="button" class="secondary" data-autobook="${watch.ID}" aria-pressed="${Boolean(watch.AutoBook)}" aria-describedby="watch-${watch.ID}">${text(watch.AutoBook ? 'watches.autobook_disable' : 'watches.autobook_enable')}</button>` : ''}
       <button type="button" class="secondary" data-edit="${watch.ID}" aria-describedby="watch-${watch.ID}">${text('watches.edit')}</button>
       <button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}" aria-describedby="watch-${watch.ID}">${text(active ? 'watches.pause' : 'watches.resume')}</button>
     </div>
   </article>`;
+}
+
+function setAutoBook(button, watch, enabled) {
+  void run(button, async () => {
+    await api('autobook', { ID: watch.ID, Enabled: enabled });
+    await update('watches');
+    flash(t(enabled ? 'watches.autobook_enabled' : 'watches.autobook_disabled'));
+  });
+}
+
+// Auto-booking acts on the user's behalf, so it needs an explicit confirmation of what it will do.
+function autoBookDialog(button, watch) {
+  const dialog = document.querySelector('#booking');
+  openSession(dialog);
+  dialog.querySelector('h2').textContent = t('watches.autobook_title');
+  dialog.querySelector('dl').innerHTML = `<div><dt>${escape(watch.ServiceName || watch.Name)}</dt><dd>${escape(watch.CityName)}</dd></div>`;
+  const note = dialog.querySelector('#booking-note');
+  note.className = 'muted note';
+  note.removeAttribute('role');
+  note.textContent = t('watches.autobook_note');
+  const open = dialog.querySelector('#booking-open');
+  open.hidden = false;
+  open.lastElementChild.hidden = true;
+  open.firstChild.textContent = t('watches.autobook_enable');
+  open.onclick = () => { dialog.close(); setAutoBook(button, watch, true); };
+  dialog.querySelector('#booking-cancel').textContent = t('common.cancel');
+  dialog.querySelector('#booking-cancel').onclick = () => dialog.close();
+  dialog.showModal();
 }
 
 function watches() {
@@ -268,6 +303,11 @@ function watches() {
       await update('watches');
     });
   }
+  for (const button of main.querySelectorAll('[data-autobook]')) {
+    const watch = items.find((item) => item.ID === Number(button.dataset.autobook));
+    button.onclick = () => (watch.AutoBook ? setAutoBook(button, watch, false) : autoBookDialog(button, watch));
+  }
+  for (const button of main.querySelectorAll('[data-sign-in]')) button.onclick = () => void run(button, signIn);
   const chat = main.querySelector('#check-in-chat');
   if (chat) chat.onclick = () => {
     if (telegram?.close) telegram.close();
@@ -275,46 +315,182 @@ function watches() {
   };
 }
 
-function slotExpired(slot, now) {
-  return slot.Status === 'expired' || new Date(slot.DateTime) <= now;
+const longDay = () => new Intl.DateTimeFormat(language, { timeZone, weekday: 'short', day: 'numeric', month: 'long' });
+const isExpired = (slot, now) => slot.Status === 'expired' || new Date(slot.DateTime) <= now;
+
+function timeRow({ slot, index, available, time }, mixed, now) {
+  const when = clock.format(time);
+  const doctor = slot.Doctor || t('history.no_doctor');
+  const service = mixed && slot.Service ? `<span class="service">${escape(slot.Service)}</span>` : '';
+  if (!available) {
+    const reason = time <= now ? 'history.expired' : 'history.unavailable';
+    return `<li><div class="slot-row expired" tabindex="-1" data-expired-slot="${index}">
+      <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}<small>${text(reason)}</small></span></div></li>`;
+  }
+  return `<li><button type="button" class="slot-row" data-slot="${index}" aria-label="${escape(t('history.row_label', { time: when, doctor: mixed && slot.Service ? `${doctor}, ${slot.Service}` : doctor, address: slot.Address || slot.Facility }))}">
+    <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}</span><span class="arrow" aria-hidden="true">›</span></button></li>`;
 }
 
-function slotCard(slot, now) {
+// Date first, then one block per clinic address, then the times with their doctors.
+function slotGroups(slots, now) {
+  const format = longDay();
+  const days = new Map();
+  slots.forEach((slot, index) => {
+    const key = dateOnly(slot.DateTime);
+    const time = Date.parse(slot.DateTime);
+    const available = !isExpired(slot, now);
+    if (!days.has(key)) days.set(key, { key, label: format.format(time), places: new Map(), available: false });
+    const day = days.get(key);
+    day.available ||= available;
+    const place = `${slot.Facility}\n${slot.Address}`;
+    if (!day.places.has(place)) day.places.set(place, []);
+    day.places.get(place).push({ slot, index, available, time });
+  });
+  // Reorder the display without changing the slots or cursor used for pagination.
+  const orderedDays = [...days.values()].sort((a, b) => {
+    const availability = Number(b.available) - Number(a.available);
+    return availability || (a.available ? a.key.localeCompare(b.key) : b.key.localeCompare(a.key));
+  });
+  return orderedDays.map((day) => `<section class="day">
+    <h2 class="day-title">${escape(day.label)}</h2>
+    ${[...day.places.values()].map((rows) => {
+      rows.sort((a, b) => {
+        const availability = Number(b.available) - Number(a.available);
+        return availability || a.time - b.time;
+      });
+      const first = rows[0];
+      return {
+        rows,
+        nextTime: first.available ? first.time : Infinity,
+        firstTime: first.time,
+      };
+    }).sort((a, b) => a.nextTime - b.nextTime || a.firstTime - b.firstTime).map(({ rows }) => {
+      const { Facility, Address, Service } = rows[0].slot;
+      // One address per block; the service moves to each time when the block mixes services.
+      const services = new Set(rows.map(({ slot }) => slot.Service));
+      const mixed = services.size > 1;
+      return `<div class="place">
+        <h3>${escape(Address || Facility)}</h3>
+        <p class="meta">${escape([Facility !== Address ? Facility : '', mixed ? '' : Service].filter(Boolean).join(' · '))}</p>
+        <ul class="times">${rows.map((row) => timeRow(row, mixed, now)).join('')}</ul></div>`;
+    }).join('')}</section>`).join('');
+}
+
+// The booking dialog is shared; each opening gets a session so late answers can tell
+// whether the dialog still shows their request.
+let dialogSession = 0;
+function openSession(dialog) {
+  dialog.dataset.session = String(++dialogSession);
+  return dialog.dataset.session;
+}
+const current = (dialog, session) => dialog.open && dialog.dataset.session === session;
+
+function bookingDialog(slot) {
+  const dialog = document.querySelector('#booking');
   const date = new Date(slot.DateTime);
-  const expired = slotExpired(slot, now);
-  const { day, month } = shortDate(date);
-  return `<article class="card slot${expired ? ' expired' : ''}">
-    <div class="date-tile"><strong>${day}</strong>${escape(month)}</div>
-    <div class="slot-body">
-      <h2>${clock.format(date)}</h2>
-      ${slot.Facility ? `<p class="slot-clinic">${escape(slot.Facility)}</p>` : ''}
-      ${slot.Address ? `<p class="meta">${escape(slot.Address)}</p>` : ''}
-      ${slot.Doctor ? `<p class="meta">${escape(slot.Doctor)}</p>` : ''}
-      <p class="meta slot-service">${escape(slot.Service || t('history.appointment'))}</p>
-      ${expired ? `<p class="muted">${text(date <= now ? 'history.expired' : 'history.unavailable')}</p>` : ''}
-    </div>
-    ${expired ? '' : `<a class="primary" href="${portal}" target="_blank" rel="noopener">${text('history.open_portal')} ${icon('link')}</a>`}
-  </article>`;
+  dialog.querySelector('h2').textContent = t('history.confirm_title');
+  dialog.querySelector('dl').innerHTML = [
+    [t('history.appointment'), slot.Service || t('history.appointment')],
+    [longDay().format(date), clock.format(date)],
+    [slot.Doctor || t('history.no_doctor'), slot.Facility],
+    [slot.Address, ''],
+  ].filter(([a]) => a).map(([a, b]) => `<div><dt>${escape(a)}</dt>${b ? `<dd>${escape(b)}</dd>` : ''}</div>`).join('');
+  const note = dialog.querySelector('#booking-note');
+  const open = dialog.querySelector('#booking-open');
+  note.textContent = t(state.Booking ? 'history.book_note' : 'history.confirm_note');
+  note.className = 'muted note';
+  note.removeAttribute('role');
+  open.hidden = false;
+  open.lastElementChild.hidden = Boolean(state.Booking);
+  open.firstChild.textContent = `${t(state.Booking ? 'history.book_confirm' : 'history.confirm_open')} `;
+  const session = openSession(dialog);
+  open.onclick = state.Booking ? () => void run(open, async () => {
+    // The server answers with the provider's decision: confirmed, or the time is already taken.
+    let Status;
+    try {
+      ({ Status } = await api('book', { ID: slot.ID }));
+    } catch (error) {
+      if (current(dialog, session)) note.textContent = errorText(error);
+      else flash(errorText(error));
+      return;
+    }
+    const confirmed = Status === 'confirmed';
+    const outcome = confirmed
+      ? t('history.book_confirmed', { time: `${longDay().format(date)}, ${clock.format(date)}`, address: slot.Address || slot.Facility })
+      : t('history.book_taken');
+    slot.Status = 'expired';
+    // A late answer must not rewrite a dialog that now shows another time: announce it
+    // and refresh the list once no dialog is open.
+    if (!current(dialog, session)) {
+      // switchTab clears announcements, so announce after the list is refreshed.
+      const refresh = async () => { await switchTab('history'); flash(outcome); };
+      if (tab !== 'history') flash(outcome);
+      else if (!dialog.open) void refresh();
+      else {
+        flash(outcome);
+        dialog.addEventListener('close', () => void refresh(), { once: true });
+      }
+      return;
+    }
+    note.className = 'note outcome';
+    note.dataset.kind = confirmed ? 'confirmed' : 'taken';
+    note.setAttribute('role', 'status');
+    note.textContent = outcome;
+    open.hidden = true;
+    dialog.querySelector('#booking-cancel').textContent = t('common.close');
+    dialog.addEventListener('close', () => void switchTab('history'), { once: true });
+  }) : () => {
+    dialog.close();
+    if (telegram?.openLink) telegram.openLink(portal);
+    else window.open(portal, '_blank', 'noopener');
+  };
+  dialog.querySelector('#booking-cancel').textContent = t('common.cancel');
+  dialog.querySelector('#booking-cancel').onclick = () => dialog.close();
+  dialog.showModal();
 }
 
 async function historyScreen(id) {
-  show(titleFor('history'), `<div class="stack" id="slots"><p class="muted">${text('history.loading')}</p></div>`);
+  show(titleFor('history'), `<div class="stack" id="slots" tabindex="-1"><p class="muted">${text('history.loading')}</p></div>`);
   const results = main.querySelector('#slots');
-  async function append(offset) {
-    const { Slots, More } = await api('history', { Offset: offset });
-    if (id !== renderID) return;
-    results.querySelector('button')?.remove();
-    const now = new Date();
-    const cards = Slots.map((slot) => slotCard(slot, now)).join('');
-    if (!offset) results.replaceChildren();
-    if (!results.querySelector('[data-found-note]') && Slots.some((slot) => !slotExpired(slot, now))) {
-      results.insertAdjacentHTML('beforeend', `<p class="muted" data-found-note>${text('history.found_note')}</p>`);
+  const loaded = [];
+  const byID = new Map();
+  async function append(offset, cursor) {
+    let page;
+    try {
+      page = await api('history', cursor ? { After: cursor } : { Offset: offset });
+    } catch (error) {
+      if (cursor && error?.key === 'error.stale' && id === renderID) return historyScreen(id);
+      throw error;
     }
-    results.insertAdjacentHTML('beforeend', cards || `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`);
-    if (More) {
-      results.insertAdjacentHTML('beforeend', `<button class="secondary" type="button">${text('common.more')}</button>`);
-      const next = results.lastElementChild;
-      next.onclick = () => void run(next, () => append(offset + Slots.length));
+    if (id !== renderID) return;
+    const { Slots, More, Next } = page;
+    const first = loaded.length;
+    for (const slot of Slots) {
+      const previous = byID.get(slot.ID);
+      if (previous) {
+        Object.assign(previous, slot);
+      } else {
+        byID.set(slot.ID, slot);
+        loaded.push(slot);
+      }
+    }
+    if (!loaded.length) {
+      results.innerHTML = `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`;
+      return;
+    }
+    const now = new Date();
+    const note = loaded.some((slot) => !isExpired(slot, now))
+      ? `<p class="muted" data-found-note>${text('history.found_note')}</p>` : '';
+    results.innerHTML = `${note}${slotGroups(loaded, now)}${More ? `<button class="secondary" type="button" data-more>${text('common.more')}</button>` : ''}`;
+    for (const button of results.querySelectorAll('[data-slot]')) button.onclick = () => bookingDialog(loaded[Number(button.dataset.slot)]);
+    const next = results.querySelector('[data-more]');
+    if (next) next.onclick = () => void run(next, () => append(offset + Slots.length, Next));
+    // Re-rendering removes the focused button. Keep focus at the newly loaded results.
+    if (offset) {
+      const available = [...results.querySelectorAll('[data-slot]')].find((row) => Number(row.dataset.slot) >= first);
+      const unavailable = [...results.querySelectorAll('[data-expired-slot]')].find((row) => Number(row.dataset.expiredSlot) >= first);
+      const target = available ?? next ?? unavailable ?? results;
+      target.focus();
     }
   }
   await append(0);
