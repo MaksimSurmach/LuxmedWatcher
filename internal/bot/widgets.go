@@ -156,7 +156,7 @@ func (b *Bot) sendWidget(card widgetCard, caption string, fallback tgbotapi.Mess
 	params.AddNonEmpty("parse_mode", fallback.ParseMode)
 	// The client exposes Telegram errors and discards the HTTP status.
 	api := *b.api
-	client := &widgetHTTP{HTTPClient: api.Client}
+	client := &telegramStatusHTTP{HTTPClient: api.Client}
 	api.Client = client
 	res, err := api.MakeRequest("sendWidget", params)
 	if err != nil {
@@ -181,12 +181,12 @@ func (b *Bot) sendWidget(card widgetCard, caption string, fallback tgbotapi.Mess
 	return sent.MessageID, nil
 }
 
-type widgetHTTP struct {
+type telegramStatusHTTP struct {
 	tgbotapi.HTTPClient
 	status int
 }
 
-func (c *widgetHTTP) Do(req *http.Request) (*http.Response, error) {
+func (c *telegramStatusHTTP) Do(req *http.Request) (*http.Response, error) {
 	res, err := c.HTTPClient.Do(req)
 	if err == nil {
 		c.status = res.StatusCode

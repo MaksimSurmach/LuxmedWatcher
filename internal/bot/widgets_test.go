@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -330,5 +331,69 @@ func TestAppMenuUsesSavedLanguageForLabelAndLaunchURL(t *testing.T) {
 		default:
 			t.Fatalf("menu was not synced after saving %s", tc.locale)
 		}
+	}
+}
+
+func TestAppMenuRetriesTemporaryTelegramFailures(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name         string
+		firstStatus  int
+		secondStatus int
+		wantAttempts int32
+	}{
+		{name: "recovers from gateway failure", firstStatus: http.StatusServiceUnavailable, secondStatus: http.StatusOK, wantAttempts: 2},
+		{name: "stops after one retry", firstStatus: http.StatusServiceUnavailable, secondStatus: http.StatusServiceUnavailable, wantAttempts: 2},
+		{name: "does not retry a rejected request", firstStatus: http.StatusBadRequest, wantAttempts: 1},
+		{name: "does not retry a rate limit immediately", firstStatus: http.StatusTooManyRequests, wantAttempts: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var attempts atomic.Int32
+			b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/botfake/setChatMenuButton" {
+					t.Errorf("unexpected Telegram method: %s", r.URL.Path)
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+				}
+				var button struct {
+					Text   string
+					WebApp struct{ URL string } `json:"web_app"`
+				}
+				if err := json.Unmarshal([]byte(r.Form.Get("menu_button")), &button); err != nil {
+					t.Error(err)
+				}
+				if button.Text != "Відкрити застосунок" || button.WebApp.URL != "https://app.example/app?lang=uk" {
+					t.Errorf("unexpected menu payload: %+v", button)
+				}
+				status := tc.firstStatus
+				if attempts.Add(1) > 1 && tc.secondStatus != 0 {
+					status = tc.secondStatus
+				}
+				switch status {
+				case http.StatusOK:
+					fmt.Fprint(w, `{"ok":true,"result":true}`)
+				case http.StatusServiceUnavailable:
+					http.Error(w, "upstream unavailable", status)
+				default:
+					w.WriteHeader(status)
+					fmt.Fprintf(w, `{"ok":false,"error_code":%d,"parameters":{"retry_after":10}}`, status)
+				}
+			})
+			var err error
+			b.cfg.MiniApp, err = luxmed.NewMiniApp("http://localhost", "https://app.example", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			user := createUser(t, b, 101, domain.UserStatusActive)
+			if err := b.db.SetUserPreferences(t.Context(), user.ID, "uk", domain.City{}); err != nil {
+				t.Fatal(err)
+			}
+			b.SyncAppMenu(t.Context(), user.ID)
+			if got := attempts.Load(); got != tc.wantAttempts {
+				t.Errorf("menu updates = %d, want %d", got, tc.wantAttempts)
+			}
+		})
 	}
 }

@@ -3,9 +3,11 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/url"
 	"strconv"
 	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -72,10 +74,26 @@ func (b *Bot) SyncAppMenu(ctx context.Context, userID int64) {
 	if b.cfg.MenuClient != nil {
 		api.Client = b.cfg.MenuClient
 	}
-	_, err = api.MakeRequest("setChatMenuButton", tgbotapi.Params{
+	client := &telegramStatusHTTP{HTTPClient: api.Client}
+	api.Client = client
+	params := tgbotapi.Params{
 		"chat_id":     strconv.FormatInt(user.TelegramChatID, 10),
 		"menu_button": string(button),
-	})
+	}
+	_, err = api.MakeRequest("setChatMenuButton", params)
+	temporary := client.status == 0 || (client.status >= http.StatusInternalServerError && client.status < 600)
+	if err != nil && temporary {
+		// Reapplying the same button is safe if the first response was lost.
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+			if ctx.Err() != nil {
+				return
+			}
+			_, err = api.MakeRequest("setChatMenuButton", params)
+		}
+	}
 	if err != nil {
 		b.logger.Warn("set Telegram chat menu failed")
 	}
