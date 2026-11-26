@@ -158,6 +158,10 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err != nil || legacy.UseSavedLogin || legacy.EncryptedPassword == "" {
 		t.Fatalf("Chrome opening changed the migrated account: %v", err)
 	}
+	request("forget-credentials", "{}", origin, token, http.StatusNoContent)
+	if _, err := db.LuxMedAccount(ctx, owner.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("explicit Mini App removal retained migrated credentials: %v", err)
+	}
 	const secret = "  example password  "
 	d.saveLogin = func(ctx context.Context, user domain.User, creds luxmed.Credentials) error {
 		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 17*time.Second {
@@ -566,6 +570,11 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 	}
 	var failPopular atomic.Bool
 	owner := addUser(24, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == luxmed.DoctorsAndFacilitiesURL && r.URL.Query().Get("cityId") == "4" &&
+			r.URL.Query().Get("serviceVariantId") == "8" {
+			fmt.Fprint(w, `{"doctors":[{"id":20,"firstName":"Fixture","lastName":"Doctor"}],"facilities":[{"id":21,"name":"Fixture clinic"}]}`)
+			return
+		}
 		switch r.URL.RequestURI() {
 		case luxmed.ReferralServicesURL:
 			fmt.Fprint(w, `{"referrals":[{"id":43210,"serviceVariantId":6,"serviceName":"private referral label","doctor":"private doctor"},{"serviceVariantId":6,"serviceName":"duplicate"},{"serviceVariantId":98,"serviceName":"unknown"},{"id":2,"eReferralId":"private referral id","serviceName":"No procedure ID"}]}`)
@@ -701,20 +710,27 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, scenario := range []struct {
-			user domain.User
-			code int
+			user   domain.User
+			action string
+			code   int
 		}{
-			{user: other, code: http.StatusNotFound},
-			{user: owner, code: http.StatusNoContent},
+			{user: other, action: "providers", code: http.StatusNotFound},
+			{user: other, action: "watch", code: http.StatusNotFound},
+			{user: owner, action: "providers", code: http.StatusOK},
+			{user: owner, action: "watch", code: http.StatusNoContent},
 		} {
-			req := httptest.NewRequest(http.MethodPost, dashboardPrefix+"watch",
-				strings.NewReader(`{"CityID":4,"ServiceID":8,"NextDays":7,"CheckMinutes":30}`))
+			req := httptest.NewRequest(http.MethodPost, dashboardPrefix+scenario.action,
+				strings.NewReader(`{"CityID":4,"ServiceID":8,"DoctorID":20,"FacilityIDs":[21],"NextDays":7,"CheckMinutes":30}`))
 			req.Header.Set("Origin", origin)
 			req.Header.Set("Authorization", "Bearer "+d.sessions.issue(scenario.user.TelegramUserID, time.Now()))
 			res := httptest.NewRecorder()
 			handler.ServeHTTP(res, req)
 			if res.Code != scenario.code {
-				t.Fatalf("save status for user %d = %d, want %d", scenario.user.ID, res.Code, scenario.code)
+				t.Fatalf("%s for user %d = %d, want %d", scenario.action, scenario.user.ID, res.Code, scenario.code)
+			}
+			if scenario.code == http.StatusOK && (!strings.Contains(res.Body.String(), "Doctor") ||
+				!strings.Contains(res.Body.String(), "Fixture clinic")) {
+				t.Fatalf("providers for saved service: %s", res.Body)
 			}
 		}
 	})

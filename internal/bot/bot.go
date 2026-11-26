@@ -501,17 +501,21 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 			b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
 			b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
 		}
-	case data == "connect:open":
-		// Old sign-in buttons predate the explicit choice to erase saved credentials.
-		if _, err := b.db.LoginAccount(ctx, user.ID, true); err == nil {
+	case data == "connect:open" || data == "connect:chrome":
+		if b.cfg.Browsers[user.TelegramUserID] == nil {
+			return
+		}
+		err := b.db.ConfirmBrowserLogin(ctx, user)
+		if errors.Is(err, storage.ErrCredentialsChanged) {
 			b.showConnect(ctx, user)
 			return
-		} else if !errors.Is(err, sql.ErrNoRows) {
+		}
+		if err != nil {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
 		b.showAccount(ctx, user)
-	case data == "connect:chrome":
+	case data == "connect:forget":
 		if b.cfg.Browsers[user.TelegramUserID] == nil {
 			return
 		}
@@ -519,7 +523,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
-		b.showAccount(ctx, user)
+		b.showConnect(ctx, user)
 	case data == "app":
 		b.showApp(ctx, user, "")
 	case data == "app:history":

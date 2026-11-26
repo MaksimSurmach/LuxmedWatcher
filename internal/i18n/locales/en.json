@@ -1,7 +1,8 @@
 {
   "button.chrome": "Sign in with Chrome",
   "button.saved_login": "Save login and password",
-  "widget.login_method": "Choose how to sign in. Choosing Chrome removes your saved login and password.",
+  "button.delete_credentials": "Delete saved credentials",
+  "widget.login_method": "Choose how to sign in.",
   "button.connect_luxmed": "Connect LUX MED",
   "notification.search_paused": "Search paused. Sign in to LUX MED so we can check for available appointments again.",
   "button.connect": "Connect LUX MED",

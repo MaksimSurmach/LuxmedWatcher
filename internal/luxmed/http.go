@@ -132,9 +132,9 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 		c.accessToken = ""
 		return ctx.Err()
 	}
-	if errors.Is(err, ErrUnavailable) {
+	if errors.Is(err, ErrUnavailable) || RetryAfter(err) > 0 {
 		c.accessToken = ""
-		return err
+		return errors.Join(ErrUnavailable, err)
 	}
 	// The read-only portal endpoints also work without an XSRF token on older deployments.
 	var xsrf struct {
@@ -181,15 +181,20 @@ func (c *HTTPClient) get(ctx context.Context, endpoint string) ([]byte, error) {
 	if !errors.As(err, &status) || !status.login {
 		return data, err
 	}
-	if err := c.Authenticate(ctx, c.creds); err != nil {
-		return nil, err
+	if status.RetryAfter <= 0 {
+		if err := c.Authenticate(ctx, c.creds); err != nil {
+			return nil, err
+		}
+		data, err = c.getWithRetry(ctx, endpoint)
+		if !errors.As(err, &status) || !status.login {
+			return data, err
+		}
 	}
-	data, err = c.getWithRetry(ctx, endpoint)
-	if errors.As(err, &status) && status.login {
-		c.accessToken = ""
-		return nil, fmt.Errorf("%w: %w", ErrAuthentication, err)
+	c.accessToken = ""
+	if status.RetryAfter > 0 {
+		return nil, errors.Join(ErrUnavailable, err)
 	}
-	return data, err
+	return nil, errors.Join(ErrAuthentication, err)
 }
 
 func (c *HTTPClient) getWithRetry(ctx context.Context, endpoint string) ([]byte, error) {
@@ -229,7 +234,7 @@ func (c *HTTPClient) getWithRetry(ctx context.Context, endpoint string) ([]byte,
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return nil, errors.Join(ctx.Err(), err)
 		case <-timer.C:
 		}
 	}

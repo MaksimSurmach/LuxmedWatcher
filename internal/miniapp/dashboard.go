@@ -326,7 +326,7 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 	var saved []domain.Procedure
 	for _, watch := range watches {
 		if watch.CityID == city.ID && watch.ServiceID > 0 {
-			saved = append(saved, domain.Procedure{ID: watch.ServiceID, Name: strings.TrimSpace(watch.ServiceName)})
+			saved = append(saved, domain.Procedure{ID: watch.ServiceID})
 		}
 	}
 
@@ -375,13 +375,17 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 			if seen[item.ID] {
 				continue
 			}
-			service, err := d.db.Procedure(ctx, city.ID, item.ID)
+			var service domain.Procedure
+			var err error
+			if isSaved {
+				service, err = d.serviceForUser(ctx, user.ID, city.ID, item.ID)
+			} else {
+				service, err = d.db.Procedure(ctx, city.ID, item.ID)
+			}
 			if errors.Is(err, sql.ErrNoRows) {
-				if !isSaved || item.Name == "" {
-					continue
-				}
-				service.Name = item.Name
-			} else if err != nil {
+				continue
+			}
+			if err != nil {
 				dashboardResult(w, nil, err)
 				return
 			}
@@ -422,12 +426,21 @@ func (d *dashboard) ensureProcedureCatalog(ctx context.Context, user domain.User
 	return d.db.UpsertProcedures(ctx, city, procedures)
 }
 
+func (d *dashboard) serviceForUser(ctx context.Context, userID int64, cityID, serviceID int) (domain.Procedure, error) {
+	service, err := d.db.Procedure(ctx, cityID, serviceID)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return service, err
+	}
+	name, err := d.db.SavedWatchServiceName(ctx, userID, cityID, serviceID)
+	return domain.Procedure{ID: serviceID, CityID: cityID, Name: name}, err
+}
+
 func (d *dashboard) providers(w http.ResponseWriter, r *http.Request, user domain.User) {
 	var input catalogInput
 	if !decodeDashboard(w, r, &input) {
 		return
 	}
-	if _, err := d.db.Procedure(r.Context(), input.CityID, input.ServiceID); err != nil {
+	if _, err := d.serviceForUser(r.Context(), user.ID, input.CityID, input.ServiceID); err != nil {
 		dashboardResult(w, nil, err)
 		return
 	}
@@ -627,11 +640,7 @@ func (d *dashboard) saveWatch(w http.ResponseWriter, r *http.Request, user domai
 		dashboardResult(w, nil, err)
 		return
 	}
-	service, err := d.db.Procedure(ctx, city.ID, input.ServiceID)
-	if errors.Is(err, sql.ErrNoRows) {
-		service.ID = input.ServiceID
-		service.Name, err = d.db.SavedWatchServiceName(ctx, user.ID, city.ID, input.ServiceID)
-	}
+	service, err := d.serviceForUser(ctx, user.ID, city.ID, input.ServiceID)
 	if err != nil {
 		dashboardResult(w, nil, err)
 		return

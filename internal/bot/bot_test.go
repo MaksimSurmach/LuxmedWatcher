@@ -552,6 +552,69 @@ func TestStandaloneConnectLinkUsesSavedLanguage(t *testing.T) {
 	}
 }
 
+func TestTelegramChromeOpeningKeepsMigratedCredentialsUntilExplicitRemoval(t *testing.T) {
+	ctx := t.Context()
+	var opened atomic.Int32
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/viewer" {
+			t.Errorf("unexpected worker request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		fmt.Fprintf(w, `{"ticket":%q}`, strings.Repeat("a", 64))
+	}))
+	t.Cleanup(worker.Close)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Error(err)
+		}
+		if strings.Contains(r.Form.Get("text"), "/connect?") {
+			opened.Add(1)
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	user := createUser(t, b, 101, domain.UserStatusActive)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+	sealed, err := b.cryptor.SealCredentials(user.ID, luxmed.Credentials{Login: "legacy", Password: "fixture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
+		UserID: user.ID, EncryptedPassword: sealed, Status: domain.AccountStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b.handleAction(ctx, user.TelegramUserID, "connect:chrome")
+	account, err := b.db.LuxMedAccount(ctx, user.ID)
+	if err != nil || account.EncryptedPassword != sealed || opened.Load() != 1 {
+		t.Fatalf("Chrome did not open with the legacy record intact: opened=%d error=%v", opened.Load(), err)
+	}
+	b.handleAction(ctx, user.TelegramUserID, "connect:forget")
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("explicit removal did not delete the record: %v", err)
+	}
+	current, err := b.db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.db.SaveCredentials(ctx, b.cryptor, current, luxmed.Credentials{Login: "opt-in", Password: "fixture"}); err != nil {
+		t.Fatal(err)
+	}
+	b.handleAction(ctx, user.TelegramUserID, "connect:open")
+	if _, err := b.db.LoginAccount(ctx, user.ID, true); err != nil || opened.Load() != 1 {
+		t.Fatalf("old Chrome action switched away from saved login: opened=%d error=%v", opened.Load(), err)
+	}
+	b.handleAction(ctx, user.TelegramUserID, "connect:forget")
+	b.handleAction(ctx, user.TelegramUserID, "connect:chrome")
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) || opened.Load() != 2 {
+		t.Fatalf("Chrome did not open after explicit opt-out: opened=%d error=%v", opened.Load(), err)
+	}
+}
+
 func TestTelegramBrowserAccountCheckLeavesSearchVerificationPending(t *testing.T) {
 	ctx := t.Context()
 	b := testBot(t)

@@ -1,7 +1,8 @@
 {
   "button.chrome": "Zaloguj się przez Chrome",
   "button.saved_login": "Zapisz login i hasło",
-  "widget.login_method": "Wybierz sposób logowania. Wybór Chrome usunie zapisany login i hasło.",
+  "button.delete_credentials": "Usuń zapisane dane logowania",
+  "widget.login_method": "Wybierz sposób logowania.",
   "button.connect_luxmed": "Połącz LUX MED",
   "notification.search_paused": "Wyszukiwanie zostało wstrzymane. Zaloguj się do LUX MED, aby wznowić sprawdzanie wolnych terminów.",
   "button.connect": "Połącz konto LUX MED",

@@ -1,7 +1,8 @@
 {
   "button.chrome": "Увайсці праз Chrome",
   "button.saved_login": "Захаваць лагін і пароль",
-  "widget.login_method": "Выберыце спосаб уваходу. Калі вы выбераце Chrome, бот выдаліць захаваныя лагін і пароль.",
+  "button.delete_credentials": "Выдаліць захаваныя даныя ўваходу",
+  "widget.login_method": "Выберыце спосаб уваходу.",
   "button.connect_luxmed": "Падключыць LUX MED",
   "notification.search_paused": "Пошук прыпынены. Увайдзіце ў LUX MED, каб мы зноў правяралі вольныя запісы.",
   "button.connect": "Падключыць LUX MED",
