@@ -56,8 +56,11 @@ func TestAppointmentWidgetDelivery(t *testing.T) {
 							t.Errorf("missing %q in widget HTML", part)
 						}
 					}
-					if !strings.Contains(r.Form.Get("caption"), "Street 12") || r.Form.Get("allow_queries") != "true" {
+					if strings.Count(r.Form.Get("caption"), "Street 12") != 1 || r.Form.Get("allow_queries") != "true" {
 						t.Error("widget lacks a readable caption or querying is disabled")
+					}
+					if strings.Count(markup, "Street 12") != 1 {
+						t.Error("widget must render the address once")
 					}
 					var compressed bytes.Buffer
 					zipper, err := zlib.NewWriterLevel(&compressed, zlib.BestCompression)
@@ -74,7 +77,7 @@ func TestAppointmentWidgetDelivery(t *testing.T) {
 					fmt.Fprint(w, tc.response)
 				case "/botfake/sendMessage":
 					fallbackSends++
-					if !strings.Contains(r.Form.Get("text"), "Street 12") || r.Form.Get("disable_web_page_preview") != "true" {
+					if strings.Count(r.Form.Get("text"), "Street 12") != 1 || r.Form.Get("disable_web_page_preview") != "true" {
 						t.Error("fallback lost appointment details or preview setting")
 					}
 					fmt.Fprint(w, `{"ok":true,"result":{"message_id":93}}`)
@@ -91,9 +94,9 @@ func TestAppointmentWidgetDelivery(t *testing.T) {
 			}
 			watch := domain.Watch{ID: 30, UserID: user.ID, Name: "A < B"}
 			history := []domain.AppointmentHistory{{Appointment: domain.Appointment{
-				DateTime: time.Unix(0, 0), DoctorName: "<script>", FacilityName: "A & B", Address: "Street 12", BookingURL: "https://other.example",
+				DateTime: time.Unix(0, 0), DoctorName: "<script>", FacilityName: "Street 12", Address: "Street 12", BookingURL: "https://other.example",
 			}}}
-			gotID, err := b.NotifyAppointments(t.Context(), user, watch, history, 2)
+			gotID, err := b.NotifyAppointments(t.Context(), user, watch, history, 1)
 			if gotID != tc.messageID || (err != nil) != (tc.messageID == 0) {
 				t.Fatalf("got ID %d and err %v, want ID %d", gotID, err, tc.messageID)
 			}
@@ -193,11 +196,11 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 	tests := []struct {
 		locale, title, more, date, days string
 	}{
-		{"pl", "Znaleziono wolne terminy · ", "Więcej w historii: ", "02.07.2026 · 01:30", "Dni: "},
-		{"en", "Appointment times found · ", "More in history: ", "Jul 2, 2026 · 01:30", "Days: "},
-		{"ru", "Свободное время найдено · ", "Ещё в истории: ", "02.07.2026 · 01:30", "Дней: "},
-		{"be", "Знойдзены вольны час · ", "Яшчэ варыянтаў у гісторыі: ", "02.07.2026 · 01:30", "Дзён: "},
-		{"uk", "Знайдено вільний час · ", "Ще варіантів в історії: ", "02.07.2026 · 01:30", "Днів: "},
+		{"pl", "Znaleziono wolne terminy · ", "Inne terminy: ", "02.07.2026 · 01:30", "Dni: "},
+		{"en", "Appointment times found · ", "More options: ", "Jul 2, 2026 · 01:30", "Days: "},
+		{"ru", "Свободное время найдено · ", "Другие варианты: ", "02.07.2026 · 01:30", "Дней: "},
+		{"be", "Знойдзены вольны час · ", "Іншыя варыянты: ", "02.07.2026 · 01:30", "Дзён: "},
+		{"uk", "Знайдено вільний час · ", "Інші варіанти: ", "02.07.2026 · 01:30", "Днів: "},
 	}
 	for _, tc := range tests {
 		t.Run(tc.locale, func(t *testing.T) {
@@ -213,17 +216,18 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 						}
 					}
 				}
+				date, clock, _ := strings.Cut(tc.date, " · ")
 				switch r.URL.Path {
 				case "/botfake/sendWidget":
 					body := r.Form.Get("html")
 					check(body, `lang="`+tc.locale+`"`, tc.date, luxmed.ReservationPageURL,
 						"Konsultacja dermatologiczna", "dr Żółć", "Placówka LUX MED", "ul. Główna",
 						b.catalog.T(tc.locale, "button.book_portal"), b.catalog.T(tc.locale, "notification.booking_hint"))
-					check(r.Form.Get("caption"), tc.date, "Konsultacja dermatologiczna")
+					check(r.Form.Get("caption"), date, clock, "Konsultacja dermatologiczna")
 					w.WriteHeader(http.StatusNotFound)
 					fmt.Fprint(w, `{"ok":false,"error_code":404}`)
 				case "/botfake/sendMessage":
-					check(r.Form.Get("text"), tc.date, "Konsultacja dermatologiczna", "ul. Główna",
+					check(r.Form.Get("text"), date, clock, "Konsultacja dermatologiczna", "ul. Główna",
 						b.catalog.T(tc.locale, "notification.booking_hint"))
 					check(r.Form.Get("reply_markup"), b.catalog.T(tc.locale, "button.book_portal"), luxmed.ReservationPageURL)
 					fmt.Fprint(w, `{"ok":true,"result":{"message_id":93}}`)
@@ -241,7 +245,7 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 				Address:      "ul. Główna",
 			}}}
 			for _, count := range []int{1, 2, 5} {
-				text := b.appointmentNotification(tc.locale, watch, history, count, 1)
+				text, _ := b.appointmentNotification(tc.locale, watch, history, count, 1)
 				if !strings.Contains(text, fmt.Sprint(tc.title, count)) {
 					t.Errorf("count %d: unexpected notification %q", count, text)
 				}
@@ -255,6 +259,9 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 				if got := b.catalog.T(tc.locale, "button.next_days", count); got != want {
 					t.Errorf("count %d: search period %q, want %q", count, got, want)
 				}
+			}
+			if _, err := b.NotifyAppointments(t.Context(), user, watch, history, 1); err != nil {
+				t.Fatal(err)
 			}
 			if _, err := b.NotifyAppointments(t.Context(), user, watch, history, 5); err != nil {
 				t.Fatal(err)

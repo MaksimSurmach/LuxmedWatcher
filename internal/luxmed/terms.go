@@ -379,7 +379,7 @@ func normalizeTerms(watch domain.Watch, days []termsDay, payload string) ([]doma
 				BookingURL:   ReservationPageURL,
 				RawPayload:   payload,
 			}
-			app.Fingerprint = Fingerprint(app)
+			app.Fingerprint, app.LegacyFingerprint = appointmentFingerprints(app)
 			if app.ExternalID == "" {
 				app.ExternalID = app.Fingerprint
 			}
@@ -396,6 +396,11 @@ func normalizeTerms(watch domain.Watch, days []termsDay, payload string) ([]doma
 }
 
 func Fingerprint(app domain.Appointment) string {
+	fingerprint, _ := appointmentFingerprints(app)
+	return fingerprint
+}
+
+func appointmentFingerprints(app domain.Appointment) (fingerprint, legacy string) {
 	// Keep existing slot IDs from when wall-clock dates were parsed as UTC.
 	parts := []string{
 		app.DateTime.Format(wallTime) + "Z",
@@ -405,6 +410,13 @@ func Fingerprint(app domain.Appointment) string {
 		strings.ToLower(strings.TrimSpace(app.DoctorName)),
 		strings.ToLower(strings.TrimSpace(app.FacilityName)),
 	}
+	if address := domain.NormalizeAppointmentAddress(app.Address); app.FacilityID <= 0 && address != "" {
+		return hashFingerprint(append(parts, address)), hashFingerprint(parts)
+	}
+	return hashFingerprint(parts), ""
+}
+
+func hashFingerprint(parts []string) string {
 	sum := sha256.Sum256([]byte(strings.Join(parts, "|")))
 	return hex.EncodeToString(sum[:])
 }
