@@ -12,6 +12,8 @@ test('catalog only treats a redirect to the portal login page as authentication 
       res.writeHead(302, { Location: '/maintenance' }).end();
     } else if (req.url === '/unauthorized') {
       res.writeHead(401).end();
+    } else if (req.url === '/throttled') {
+      res.writeHead(429, { 'Retry-After': '120' }).end();
     } else if (req.url === '/catalog') {
       res.writeHead(200, { 'Content-Type': 'application/json' }).end('[]');
     } else {
@@ -28,5 +30,6 @@ test('catalog only treats a redirect to the portal login page as authentication 
   assert.deepEqual(await fetchCatalog(page, '/login-redirect'), { status: 401 });
   assert.deepEqual(await fetchCatalog(page, '/maintenance-redirect'), { status: 502 });
   assert.deepEqual(await fetchCatalog(page, '/unauthorized'), { status: 401 });
+  assert.deepEqual(await fetchCatalog(page, '/throttled'), { status: 429, retryAfter: '120' });
   assert.deepEqual(await fetchCatalog(page, '/catalog'), { status: 200, body: '[]' });
 });

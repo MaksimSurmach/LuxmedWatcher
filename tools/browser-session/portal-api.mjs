@@ -22,7 +22,10 @@ export async function fetchCatalog(page, path) {
       return { status: final.origin === location.origin && loginPath.test(final.pathname) ? 401 : 502 };
     }
     if (response.status === 0) return { status: 502 };
-    if (!response.ok) return { status: response.status };
+    if (!response.ok) {
+      const retryAfter = response.headers.get('Retry-After');
+      return { status: response.status, ...(retryAfter && { retryAfter }) };
+    }
     if (!response.headers.get('Content-Type')?.toLowerCase().includes('json')) return { status: 502 };
     const reader = response.body.getReader();
     const decoder = new TextDecoder();

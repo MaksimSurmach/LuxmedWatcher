@@ -25,8 +25,12 @@ let deadline = 0;
 let readyUntil = 0;
 let busy = false;
 
-function reply(res, status, body = '') {
-  res.writeHead(status, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }).end(body);
+function reply(res, status, body = '', retryAfter) {
+  res.writeHead(status, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'no-store',
+    ...(retryAfter && { 'Retry-After': retryAfter }),
+  }).end(body);
 }
 
 async function portalReady(force = false) {
@@ -67,7 +71,7 @@ const api = createServer(async (req, res) => {
       if (url.pathname === '/session') return reply(res, 200);
       const result = await fetchCatalog(page, url.pathname + url.search);
       if (result.status === 401) readyUntil = 0;
-      return reply(res, result.status, result.body);
+      return reply(res, result.status, result.body, result.retryAfter);
     } finally {
       busy = false;
     }

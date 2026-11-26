@@ -57,7 +57,8 @@ type accountCheck struct {
 	client                   luxmed.Client
 	recoveryPending          bool
 	nextProbeFilter          int
-	rejectedReconnectWatchID int64
+	rejectedReconnectWatch   *domain.Watch
+	sessionRetryAt           time.Time
 }
 
 type Runner struct {
@@ -146,7 +147,7 @@ func (r *Runner) saveLuxMedAccount(ctx context.Context, userID int64, save func(
 			if err == nil {
 				state.client = nil
 				state.recoveryPending = false
-				state.rejectedReconnectWatchID = 0
+				state.rejectedReconnectWatch = nil
 				state.nextProbeFilter = 0
 			}
 			return err
@@ -468,7 +469,7 @@ func (r *Runner) confirmReconnectRecovery(ctx context.Context, userID int64, sta
 	err := r.resolveReconnect(ctx, userID)
 	state.recoveryPending = err != nil
 	if err == nil {
-		state.rejectedReconnectWatchID = 0
+		state.rejectedReconnectWatch = nil
 		state.nextProbeFilter = 0
 	}
 	return err
@@ -526,6 +527,9 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		}
 		return BrowserSessionCheck{}, r.recheckPasswordSession(ctx, user, state)
 	}
+	if background && time.Now().Before(state.sessionRetryAt) {
+		return BrowserSessionCheck{}, nil
+	}
 	timeout := 25 * time.Second
 	if !background {
 		timeout = 15 * time.Second
@@ -533,6 +537,13 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	err := browser.Check(probeCtx)
 	cancel()
+	if upstream, ok := errors.AsType[*luxmed.HTTPError](err); ok &&
+		upstream.StatusCode == http.StatusTooManyRequests && upstream.RetryAfter > 0 {
+		state.sessionRetryAt = maxTime(state.sessionRetryAt, time.Now().Add(upstream.RetryAfter))
+		r.mu.Lock()
+		state.next = maxTime(state.next, state.sessionRetryAt)
+		r.mu.Unlock()
+	}
 	if err == nil {
 		episodeID, needsTerms, readErr := r.db.LuxMedReconnectVerification(ctx, user.ID)
 		if readErr != nil {
@@ -597,15 +608,16 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 	if err != nil {
 		return err
 	}
-	if state.rejectedReconnectWatchID != 0 {
-		if index := slices.IndexFunc(watches, func(watch domain.Watch) bool {
-			return watch.ID == state.rejectedReconnectWatchID
-		}); index >= 0 && index < len(watches)-1 {
+	if state.rejectedReconnectWatch != nil {
+		index := slices.IndexFunc(watches, state.hasRejectedReconnectFilters)
+		if index >= 0 && watches[index].Status == domain.WatchStatusActive {
 			rejected := watches[index]
 			copy(watches[index:], watches[index+1:])
 			watches[len(watches)-1] = rejected
+			return r.probeReconnectFilters(ctx, userID, state, browser, watches)
 		}
-		return r.probeReconnectFilters(ctx, userID, state, browser, watches)
+		state.rejectedReconnectWatch = nil
+		state.nextProbeFilter = 0
 	}
 	hasSearch := false
 	for _, watch := range watches {
@@ -621,7 +633,7 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 					return candidate.ID != watch.ID && candidate.CityID > 0 && candidate.ServiceID > 0
 				}) {
 				// The next probe can use another filter once the normal cooldown expires.
-				state.rejectedReconnectWatchID = watch.ID
+				state.rejectedReconnectWatch = &watch
 				state.nextProbeFilter = 0
 			}
 			return err
@@ -631,6 +643,29 @@ func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *
 		return nil
 	}
 	return r.probeReconnectFilters(ctx, userID, state, browser, watches)
+}
+
+// Search results update UpdatedAt too, so compare the saved filters themselves.
+func (state *accountCheck) hasRejectedReconnectFilters(watch domain.Watch) bool {
+	rejected := state.rejectedReconnectWatch
+	if rejected == nil || watch.ID != rejected.ID {
+		return false
+	}
+	return watch.CityID == rejected.CityID && watch.CityName == rejected.CityName &&
+		watch.ServiceID == rejected.ServiceID && watch.DoctorMode == rejected.DoctorMode &&
+		optionalValue(watch.DoctorID) == optionalValue(rejected.DoctorID) &&
+		watch.FacilityMode == rejected.FacilityMode && slices.Equal(watch.FacilityIDs, rejected.FacilityIDs) &&
+		optionalValue(watch.DateFrom).Equal(optionalValue(rejected.DateFrom)) &&
+		optionalValue(watch.DateTo).Equal(optionalValue(rejected.DateTo)) &&
+		watch.NextDays == rejected.NextDays && slices.Equal(watch.TimeWindows, rejected.TimeWindows)
+}
+
+func optionalValue[T any](value *T) T {
+	if value != nil {
+		return *value
+	}
+	var zero T
+	return zero
 }
 
 func (r *Runner) probeReconnectFilters(ctx context.Context, userID int64, state *accountCheck, browser *luxmed.Browser, watches []domain.Watch) error {
@@ -677,7 +712,7 @@ func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *
 		}
 		err := client.CheckTermsAccess(ctx, watches[index])
 		if err == nil {
-			if state.rejectedReconnectWatchID != 0 {
+			if state.rejectedReconnectWatch != nil {
 				return r.confirmReconnectRecovery(ctx, userID, state)
 			}
 			state.nextProbeFilter = 0
@@ -712,7 +747,7 @@ func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *
 func (r *Runner) recordAccessRejection(ctx context.Context, userID int64, state *accountCheck, rejection error) error {
 	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
-	if state.rejectedReconnectWatchID == 0 {
+	if state.rejectedReconnectWatch == nil {
 		return errors.Join(rejection, r.db.SetLuxMedAccessStatus(recordCtx, userID, storage.LuxMedAccessRejected, true))
 	}
 
@@ -957,7 +992,7 @@ func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched
 		}
 		s.runner.mu.Lock()
 		account := s.runner.accounts[watch.UserID]
-		blocked := account != nil && (account.inFlight != nil || now.Before(account.next) || account.rejectedReconnectWatchID == watch.ID)
+		blocked := account != nil && (account.inFlight != nil || now.Before(account.next) || account.hasRejectedReconnectFilters(watch))
 		s.runner.mu.Unlock()
 		if blocked {
 			continue
