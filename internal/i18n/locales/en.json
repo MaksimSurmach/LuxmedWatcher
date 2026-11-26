@@ -56,7 +56,7 @@
   "errors.invite_required": "Send an invite code to activate this bot.",
   "errors.luxmed_partial": "Only some dates were checked. Check the remaining dates in the LUX MED portal.",
   "errors.luxmed_unavailable": "LUX MED is temporarily unavailable. Try again later.",
-  "errors.no_account": "Connect your LuxMed account first.",
+  "errors.no_account": "Connect your LUX MED account first.",
   "errors.no_watches": "You do not have watches yet.",
   "flow.browser.open": "Sign in to LUX MED in the window that opens. Enter a code there if asked. Close the window after signing in. The link can be used once.",
   "flow.browser.dashboard": "Searches, appointments and settings in Luxmed Watcher.",

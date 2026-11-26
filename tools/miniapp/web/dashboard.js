@@ -644,7 +644,7 @@ async function editor(watch, focusPicks = false) {
   form.onsubmit = (event) => {
     event.preventDefault();
     void run(form.querySelector('[type="submit"]'), async () => {
-      if (!service) throw new Error(t('editor.choose_service'));
+      if (!service) throw new DashboardError('editor.choose_service');
       const windows = selectedHours();
       const range = fields.dateMode.value === 'range';
       await api('watch', { ID: watch?.ID ?? 0, CityID: Number(fields.city.value), ServiceID: service.ID, DoctorID: doctor,

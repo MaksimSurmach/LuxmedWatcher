@@ -56,7 +56,7 @@
   "errors.invite_required": "Адпраўце код запрашэння, каб актываваць бота.",
   "errors.luxmed_partial": "Праверана толькі частка дат. Астатнія даты праверце на партале LUX MED.",
   "errors.luxmed_unavailable": "LUX MED часова недаступны. Паспрабуйце пазней.",
-  "errors.no_account": "Спачатку падключыце акаўнт LuxMed.",
+  "errors.no_account": "Спачатку падключыце акаўнт LUX MED.",
   "errors.no_watches": "У вас пакуль няма пошукаў.",
   "flow.browser.open": "Увайдзіце ў LUX MED у акне, якое адкрыецца. Калі спатрэбіцца код, увядзіце яго там. Закрыйце акно пасля ўваходу. Спасылка аднаразовая.",
   "flow.browser.dashboard": "Пошукі, знойдзеныя слоты і налады Luxmed Watcher.",

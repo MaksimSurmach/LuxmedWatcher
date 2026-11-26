@@ -56,7 +56,7 @@
   "errors.invite_required": "Wyślij kod zaproszenia, aby aktywować bota.",
   "errors.luxmed_partial": "Sprawdzono tylko część dni. Pozostałe dni sprawdź w Portalu Pacjenta LUX MED.",
   "errors.luxmed_unavailable": "LUX MED jest chwilowo niedostępny. Spróbuj później.",
-  "errors.no_account": "Najpierw podłącz konto LuxMed.",
+  "errors.no_account": "Najpierw podłącz konto LUX MED.",
   "errors.no_watches": "Nie masz jeszcze obserwacji.",
   "flow.browser.open": "Zaloguj się do LUX MED w otwartym oknie. Jeśli pojawi się prośba o kod, wpisz go tam. Po zalogowaniu zamknij okno. Link jest jednorazowy.",
   "flow.browser.dashboard": "Obserwacje, terminy i ustawienia w Luxmed Watcher.",
