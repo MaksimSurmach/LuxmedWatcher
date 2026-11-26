@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -249,6 +250,76 @@ func TestOnlyOwnerCanHideHistory(t *testing.T) {
 	}
 }
 
+func TestHistoryExplainsUnavailableTimes(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		offset  time.Duration
+		missing bool
+		message string
+	}{
+		{
+			name:    "appointment time passed",
+			offset:  -24 * time.Hour,
+			message: "This appointment time has passed.",
+		},
+		{
+			name:    "future time missing from results",
+			offset:  24 * time.Hour,
+			missing: true,
+			message: "This time no longer appears in search results. Check other times.",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := t.Context()
+			var sends atomic.Int32
+			b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/botfake/sendMessage" {
+					t.Errorf("unexpected Telegram method: %s", r.URL.Path)
+					return
+				}
+				sends.Add(1)
+				if err := r.ParseForm(); err != nil {
+					t.Error(err)
+					return
+				}
+				if text := r.Form.Get("text"); !strings.Contains(text, tc.message) {
+					t.Errorf("message %q does not contain %q", text, tc.message)
+				}
+				if markup := r.Form.Get("reply_markup"); strings.Contains(markup, luxmed.ReservationPageURL) {
+					t.Errorf("unavailable time offered a portal action: %s", markup)
+				}
+				fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+			})
+			user := createUser(t, b, 101, domain.UserStatusActive)
+			id, err := b.db.CreateWatch(ctx, domain.Watch{
+				UserID: user.ID, Name: "Example", CityID: 1, ServiceID: 12, CheckIntervalSeconds: 300,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			item, _, err := b.db.UpsertAppointmentHistory(ctx, id, domain.Appointment{
+				Fingerprint: "test-slot",
+				DateTime:    time.Now().Add(tc.offset),
+				BookingURL:  luxmed.ReservationPageURL,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.missing {
+				nextCheck := item.LastSeenAt.Add(time.Minute)
+				if err := b.db.MarkMissingAppointments(ctx, id, nextCheck, item.LastSeenAt); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			b.showHistory(ctx, user)
+			if got := sends.Load(); got != 1 {
+				t.Errorf("sent %d messages, want 1", got)
+			}
+		})
+	}
+}
+
 func TestAppointmentNotificationEscapesHTMLAndShowsRemainingSlots(t *testing.T) {
 	b := testBot(t)
 	text := b.appointmentNotification("en", domain.Watch{Name: "A < B & C"}, []domain.AppointmentHistory{
@@ -266,7 +337,13 @@ func TestAppointmentNotificationEscapesHTMLAndShowsRemainingSlots(t *testing.T) 
 
 func TestWatchWithExpiredSessionOffersSignIn(t *testing.T) {
 	ctx := t.Context()
+	var sends atomic.Int32
 	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/botfake/sendMessage" {
+			t.Errorf("unexpected Telegram method: %s", r.URL.Path)
+			return
+		}
+		sends.Add(1)
 		if err := r.ParseForm(); err != nil {
 			t.Error(err)
 			return
@@ -292,6 +369,9 @@ func TestWatchWithExpiredSessionOffersSignIn(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.showWatches(ctx, user)
+	if got := sends.Load(); got != 1 {
+		t.Errorf("sent %d messages, want 1", got)
+	}
 }
 
 func TestBrowserBotAdmitsOnlyInvitedUsersWithAnAssignedWorker(t *testing.T) {

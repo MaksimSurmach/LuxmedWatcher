@@ -58,6 +58,7 @@
   "errors.luxmed_unavailable": "LUX MED is temporarily unavailable. Try again later.",
   "errors.no_account": "Connect your LUX MED account first.",
   "errors.no_watches": "You do not have watches yet.",
+  "flow.booking.open": "Choose an appointment time and book in the LUX MED portal.",
   "flow.browser.open": "Sign in to LUX MED in the window that opens. Enter a code there if asked. Close the window after signing in. The link can be used once.",
   "flow.browser.dashboard": "Searches, appointments and settings in Luxmed Watcher.",
   "flow.browser.logout": "Watches paused. To end the browser session, sign out in LuxMed.",

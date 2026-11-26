@@ -58,6 +58,7 @@
   "errors.luxmed_unavailable": "LUX MED jest chwilowo niedostępny. Spróbuj później.",
   "errors.no_account": "Najpierw podłącz konto LUX MED.",
   "errors.no_watches": "Nie masz jeszcze obserwacji.",
+  "flow.booking.open": "Wybierz termin i umów wizytę w Portalu Pacjenta LUX MED.",
   "flow.browser.open": "Zaloguj się do LUX MED w otwartym oknie. Jeśli pojawi się prośba o kod, wpisz go tam. Po zalogowaniu zamknij okno. Link jest jednorazowy.",
   "flow.browser.dashboard": "Obserwacje, terminy i ustawienia w Luxmed Watcher.",
   "flow.browser.logout": "Obserwacje wstrzymane. Aby zakończyć sesję przeglądarki, wyloguj się w LUX MED.",
