@@ -133,12 +133,13 @@ dl, dd { margin: 0; }
 .place .meta { margin-top: 2px; }
 .times { list-style: none; margin: 10px 0 0; padding: 0; }
 .slot-row {
-  display: grid; grid-template-columns: 4.2ch minmax(0, 1fr) auto; align-items: center; gap: 14px;
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 14px;
   width: 100%; min-height: 56px; padding: 8px 0; border: 0; border-top: 1px solid var(--line);
   background: none; color: var(--ink); text-align: start; cursor: pointer; font: inherit;
 }
-.slot-row time { font-size: 1.5rem; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.slot-row time { min-width: 3.1em; white-space: nowrap; font-size: 1.5rem; font-weight: 650; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
 .slot-row .doctor { min-width: 0; overflow-wrap: anywhere; }
+.slot-row .doctor .service { display: block; color: var(--muted); font-size: .85rem; }
 .slot-row .doctor small { display: block; color: var(--muted); font-size: .82rem; }
 .slot-row .arrow { color: var(--accent); font-size: 1.5rem; line-height: 1; padding-inline: 6px; }
 .slot-row:focus-visible { outline-offset: -3px; border-radius: 8px; }
@@ -246,3 +247,10 @@ nav [aria-current="page"] { background: var(--accent-soft); color: var(--accent)
 
 .more-options { margin-top: 5px; }
 .more-options summary { min-height: 44px; align-content: center; }
+
+/* Booking outcome and auto-booking (shown only when the server offers booking) */
+.outcome { padding: 12px; border-radius: 10px; font-weight: 600; }
+.outcome[data-kind="confirmed"] { background: var(--accent-soft); color: var(--accent); }
+.outcome[data-kind="taken"] { background: var(--amber); color: var(--amber-ink); }
+.autobook { margin-top: 8px; font-size: .92rem; }
+.autobook[data-on="true"] { color: var(--accent); font-weight: 600; }

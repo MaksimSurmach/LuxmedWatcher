@@ -192,15 +192,43 @@ function watchCard(watch) {
     <p class="meta">${dates}${watch.TimeWindows?.length ? ` · ${escape(hoursLabel(watch.TimeWindows))}` : ''}${minutes ? ` · ${text('watches.interval_card', { minutes })}` : ''}</p>
     <dl class="health">
       <div><dt>${text('watches.monitoring')}</dt><dd><span class="badge ${active ? 'active' : ''}">${text(active ? 'watches.active' : 'watches.paused')}</span></dd></div>
+      ${state.Booking ? `<div><dt>${text('watches.autobook')}</dt><dd class="autobook" data-on="${Boolean(watch.AutoBook)}">${text(watch.AutoBook ? 'watches.autobook_on' : 'watches.autobook_off')}</dd></div>` : ''}
       <div><dt>${text('watches.last_success')}</dt><dd>${escape(success)}</dd></div>
     </dl>
     ${failing ? `<p class="notice" role="status">${escape(problem)}</p>` : ''}
     <div class="actions">
       ${needsLogin ? `<button type="button" class="primary" data-sign-in>${text('account.sign_in')} ${icon('link')}</button>` : ''}
+      ${state.Booking ? `<button type="button" class="secondary" data-autobook="${watch.ID}" aria-pressed="${Boolean(watch.AutoBook)}" aria-describedby="watch-${watch.ID}">${text(watch.AutoBook ? 'watches.autobook_disable' : 'watches.autobook_enable')}</button>` : ''}
       <button type="button" class="secondary" data-edit="${watch.ID}" aria-describedby="watch-${watch.ID}">${text('watches.edit')}</button>
       <button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}" aria-describedby="watch-${watch.ID}">${text(active ? 'watches.pause' : 'watches.resume')}</button>
     </div>
   </article>`;
+}
+
+function setAutoBook(button, watch, enabled) {
+  void run(button, async () => {
+    await api('autobook', { ID: watch.ID, Enabled: enabled });
+    await update('watches');
+    flash(t(enabled ? 'watches.autobook_enabled' : 'watches.autobook_disabled'));
+  });
+}
+
+// Auto-booking acts on the user's behalf, so it needs an explicit confirmation of what it will do.
+function autoBookDialog(button, watch) {
+  const dialog = document.querySelector('#booking');
+  dialog.querySelector('h2').textContent = t('watches.autobook_title');
+  dialog.querySelector('dl').innerHTML = `<div><dt>${escape(watch.ServiceName || watch.Name)}</dt><dd>${escape(watch.CityName)}</dd></div>`;
+  const note = dialog.querySelector('.note');
+  note.className = 'muted note';
+  note.textContent = t('watches.autobook_note');
+  const open = dialog.querySelector('#booking-open');
+  open.hidden = false;
+  open.lastElementChild.hidden = true;
+  open.firstChild.textContent = t('watches.autobook_enable');
+  open.onclick = () => { dialog.close(); setAutoBook(button, watch, true); };
+  dialog.querySelector('#booking-cancel').textContent = t('common.cancel');
+  dialog.querySelector('#booking-cancel').onclick = () => dialog.close();
+  dialog.showModal();
 }
 
 function watches() {
@@ -223,6 +251,10 @@ function watches() {
       await update('watches');
     });
   }
+  for (const button of main.querySelectorAll('[data-autobook]')) {
+    const watch = items.find((item) => item.ID === Number(button.dataset.autobook));
+    button.onclick = () => (watch.AutoBook ? setAutoBook(button, watch, false) : autoBookDialog(button, watch));
+  }
   for (const button of main.querySelectorAll('[data-sign-in]')) button.onclick = () => void run(button, signIn);
   const chat = main.querySelector('#check-in-chat');
   if (chat) chat.onclick = () => {
@@ -235,15 +267,16 @@ const dayKey = (date) => localDate.format(new Date(date));
 const longDay = () => new Intl.DateTimeFormat(language, { timeZone: 'Europe/Warsaw', weekday: 'short', day: 'numeric', month: 'long' });
 const isExpired = (slot) => slot.Status === 'expired' || new Date(slot.DateTime) < new Date();
 
-function timeRow(slot, index) {
+function timeRow(slot, index, mixed) {
   const when = clock.format(new Date(slot.DateTime));
   const doctor = slot.Doctor || t('history.no_doctor');
+  const service = mixed && slot.Service ? `<span class="service">${escape(slot.Service)}</span>` : '';
   if (isExpired(slot)) {
     return `<li><div class="slot-row expired" aria-label="${escape(t('history.unavailable_row', { time: when, doctor }))}">
-      <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}<small>${text('history.expired')}</small></span></div></li>`;
+      <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}<small>${text('history.expired')}</small></span></div></li>`;
   }
   return `<li><button type="button" class="slot-row" data-slot="${index}" aria-label="${escape(t('history.row_label', { time: when, doctor, address: slot.Address || slot.Facility }))}">
-    <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}</span><span class="arrow" aria-hidden="true">›</span></button></li>`;
+    <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}</span><span class="arrow" aria-hidden="true">›</span></button></li>`;
 }
 
 // Date first, then one block per clinic address, then the times with their doctors.
@@ -262,11 +295,15 @@ function slotGroups(slots) {
     <h2 class="day-title">${escape(day.label)}</h2>
     ${[...day.places.values()].map((rows) => {
       rows.sort(([a], [b]) => new Date(a.DateTime) - new Date(b.DateTime));
-      const { Facility, Address, Service } = rows[0][0];
+      const { Facility, Address } = rows[0][0];
+      // One address per block; the service moves to each time when the block mixes services.
+      const services = new Set(rows.map(([slot]) => slot.Service));
+      const mixed = services.size > 1;
+      const Service = mixed ? '' : rows[0][0].Service;
       return `<div class="place">
         <h3>${escape(Address || Facility)}</h3>
         <p class="meta">${escape([Facility !== Address ? Facility : '', Service].filter(Boolean).join(' · '))}</p>
-        <ul class="times">${rows.map(([slot, index]) => timeRow(slot, index)).join('')}</ul></div>`;
+        <ul class="times">${rows.map(([slot, index]) => timeRow(slot, index, mixed)).join('')}</ul></div>`;
     }).join('')}</section>`).join('');
 }
 
@@ -280,10 +317,28 @@ function bookingDialog(slot) {
     [slot.Doctor || t('history.no_doctor'), slot.Facility],
     [slot.Address, ''],
   ].filter(([a]) => a).map(([a, b]) => `<div><dt>${escape(a)}</dt>${b ? `<dd>${escape(b)}</dd>` : ''}</div>`).join('');
-  dialog.querySelector('.note').textContent = t('history.confirm_note');
+  const note = dialog.querySelector('.note');
   const open = dialog.querySelector('#booking-open');
-  open.firstChild.textContent = `${t('history.confirm_open')} `;
-  open.onclick = () => {
+  note.textContent = t(state.Booking ? 'history.book_note' : 'history.confirm_note');
+  note.className = 'muted note';
+  open.hidden = false;
+  open.lastElementChild.hidden = Boolean(state.Booking);
+  open.firstChild.textContent = `${t(state.Booking ? 'history.book_confirm' : 'history.confirm_open')} `;
+  open.onclick = state.Booking ? () => void run(open, async () => {
+    // The server answers with the provider's decision: confirmed, or the time is already taken.
+    const { Status } = await api('book', { ID: slot.ID });
+    const confirmed = Status === 'confirmed';
+    note.className = 'outcome';
+    note.dataset.kind = confirmed ? 'confirmed' : 'taken';
+    note.setAttribute('role', 'status');
+    note.textContent = confirmed
+      ? t('history.book_confirmed', { time: `${longDay().format(date)}, ${clock.format(date)}`, address: slot.Address || slot.Facility })
+      : t('history.book_taken');
+    slot.Status = 'expired';
+    open.hidden = true;
+    dialog.querySelector('#booking-cancel').textContent = t('common.close');
+    dialog.onclose = () => { dialog.onclose = null; void switchTab('history'); };
+  }, note) : () => {
     dialog.close();
     if (telegram?.openLink) telegram.openLink(portal);
     else window.open(portal, '_blank', 'noopener');

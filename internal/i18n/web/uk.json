@@ -143,5 +143,19 @@
   "watches.problem_auth": "Увійдіть у LUX MED. Доки ви не ввійшли, пошук не перевіряється.",
   "watches.problem_generic": "Остання перевірка не вдалася.",
   "watches.problem_partial": "Вдалося перевірити лише частину результатів.",
-  "watches.problem_unavailable": "LUX MED тимчасово недоступний. Перевіримо ще раз."
+  "watches.problem_unavailable": "LUX MED тимчасово недоступний. Перевіримо ще раз.",
+  "common.close": "Закрити",
+  "history.book_note": "Запис буде надіслано в LUX MED. Відповідь прийде одразу.",
+  "history.book_confirm": "Підтвердити запис",
+  "history.book_confirmed": "LUX MED підтвердив запис · {time} · {address}",
+  "history.book_taken": "Цей час уже зайнятий. Виберіть інший.",
+  "watches.autobook": "Автозапис",
+  "watches.autobook_on": "Увімкнено",
+  "watches.autobook_off": "Вимкнено",
+  "watches.autobook_enable": "Увімкнути автозапис",
+  "watches.autobook_disable": "Вимкнути автозапис",
+  "watches.autobook_title": "Увімкнути автозапис?",
+  "watches.autobook_note": "Перший відповідний прийом буде записано автоматично. Після запису автозапис вимкнеться.",
+  "watches.autobook_enabled": "Автозапис увімкнено",
+  "watches.autobook_disabled": "Автозапис вимкнено"
 }

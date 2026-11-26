@@ -143,5 +143,19 @@
   "watches.problem_auth": "Zaloguj się do LUX MED. Bez tego wyszukiwanie nie jest sprawdzane.",
   "watches.problem_generic": "Ostatnie sprawdzenie nie powiodło się.",
   "watches.problem_partial": "Sprawdzono tylko część wyników.",
-  "watches.problem_unavailable": "LUX MED jest chwilowo niedostępny. Sprawdzimy ponownie."
+  "watches.problem_unavailable": "LUX MED jest chwilowo niedostępny. Sprawdzimy ponownie.",
+  "common.close": "Zamknij",
+  "history.book_note": "Rezerwacja zostanie wysłana do LUX MED. Odpowiedź przyjdzie od razu.",
+  "history.book_confirm": "Potwierdź rezerwację",
+  "history.book_confirmed": "LUX MED potwierdził rezerwację · {time} · {address}",
+  "history.book_taken": "Ten termin jest już zajęty. Wybierz inny.",
+  "watches.autobook": "Automatyczna rezerwacja",
+  "watches.autobook_on": "Włączona",
+  "watches.autobook_off": "Wyłączona",
+  "watches.autobook_enable": "Włącz automatyczną rezerwację",
+  "watches.autobook_disable": "Wyłącz automatyczną rezerwację",
+  "watches.autobook_title": "Włączyć automatyczną rezerwację?",
+  "watches.autobook_note": "Pierwszy pasujący termin zostanie zarezerwowany automatycznie. Po rezerwacji funkcja się wyłączy.",
+  "watches.autobook_enabled": "Automatyczna rezerwacja włączona",
+  "watches.autobook_disabled": "Automatyczna rezerwacja wyłączona"
 }
