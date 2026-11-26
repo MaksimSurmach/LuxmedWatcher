@@ -96,7 +96,7 @@ func newWidgetSlot(locale string, item domain.AppointmentHistory) *widgetSlot {
 	return &widgetSlot{
 		When:     appointmentDateTime(locale, item.DateTime),
 		Doctor:   truncateMessage(item.DoctorName, 64),
-		Facility: truncateMessage(item.FacilityName, 90),
+		Facility: truncateMessage(slotPlace(item).facility, 90),
 		Address:  truncateMessage(item.Address, 64),
 	}
 }

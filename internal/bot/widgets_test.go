@@ -56,8 +56,11 @@ func TestAppointmentWidgetDelivery(t *testing.T) {
 							t.Errorf("missing %q in widget HTML", part)
 						}
 					}
-					if !strings.Contains(r.Form.Get("caption"), "Street 12") || r.Form.Get("allow_queries") != "true" {
+					if strings.Count(r.Form.Get("caption"), "Street 12") != 1 || r.Form.Get("allow_queries") != "true" {
 						t.Error("widget lacks a readable caption or querying is disabled")
+					}
+					if strings.Count(markup, "Street 12") != 1 {
+						t.Error("widget must render the address once")
 					}
 					var compressed bytes.Buffer
 					zipper, err := zlib.NewWriterLevel(&compressed, zlib.BestCompression)
@@ -74,7 +77,7 @@ func TestAppointmentWidgetDelivery(t *testing.T) {
 					fmt.Fprint(w, tc.response)
 				case "/botfake/sendMessage":
 					fallbackSends++
-					if !strings.Contains(r.Form.Get("text"), "Street 12") || r.Form.Get("disable_web_page_preview") != "true" {
+					if strings.Count(r.Form.Get("text"), "Street 12") != 1 || r.Form.Get("disable_web_page_preview") != "true" {
 						t.Error("fallback lost appointment details or preview setting")
 					}
 					fmt.Fprint(w, `{"ok":true,"result":{"message_id":93}}`)
@@ -91,7 +94,7 @@ func TestAppointmentWidgetDelivery(t *testing.T) {
 			}
 			watch := domain.Watch{ID: 30, UserID: user.ID, Name: "A < B"}
 			history := []domain.AppointmentHistory{{Appointment: domain.Appointment{
-				DateTime: time.Unix(0, 0), DoctorName: "<script>", FacilityName: "A & B", Address: "Street 12", BookingURL: "https://other.example",
+				DateTime: time.Unix(0, 0), DoctorName: "<script>", FacilityName: "Street 12", Address: "Street 12", BookingURL: "https://other.example",
 			}}}
 			gotID, err := b.NotifyAppointments(t.Context(), user, watch, history, 1)
 			if gotID != tc.messageID || (err != nil) != (tc.messageID == 0) {

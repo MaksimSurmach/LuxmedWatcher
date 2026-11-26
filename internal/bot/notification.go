@@ -42,7 +42,8 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 	var prev *domain.AppointmentHistory
 	for i := range items {
 		item := &items[i]
-		newPlace := prev == nil || slotPlace(*prev) != slotPlace(*item)
+		place := slotPlace(*item)
+		newPlace := prev == nil || slotPlace(*prev) != place
 		newDate := newPlace || dayOf(*prev) != dayOf(*item)
 		var piece strings.Builder
 		if newPlace {
@@ -50,11 +51,11 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 			if item.CityName != "" {
 				fmt.Fprintf(&piece, "<b>%s</b>\n", html.EscapeString(truncateMessage(item.CityName, 60)))
 			}
-			if item.FacilityName != "" {
-				fmt.Fprintf(&piece, "%s", html.EscapeString(truncateMessage(item.FacilityName, 120)))
+			if place.facility != "" {
+				piece.WriteString(html.EscapeString(truncateMessage(place.facility, 120)))
 			}
 			if item.Address != "" {
-				if item.FacilityName != "" {
+				if place.facility != "" {
 					piece.WriteString("\n")
 				}
 				piece.WriteString(html.EscapeString(truncateMessage(item.Address, 100)))
@@ -83,8 +84,18 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 	return text.String(), shown
 }
 
-func slotPlace(item domain.AppointmentHistory) [3]string {
-	return [3]string{item.CityName, item.FacilityName, domain.NormalizeAppointmentAddress(item.Address)}
+type notificationPlace struct {
+	city, facility, address string
+}
+
+func slotPlace(item domain.AppointmentHistory) notificationPlace {
+	address := domain.NormalizeAppointmentAddress(item.Address)
+	facility := item.FacilityName
+	// LuxMed normalization can copy the address into an empty facility name.
+	if address != "" && domain.NormalizeAppointmentAddress(facility) == address {
+		facility = ""
+	}
+	return notificationPlace{city: item.CityName, facility: facility, address: address}
 }
 
 func dayOf(item domain.AppointmentHistory) string {
@@ -94,7 +105,9 @@ func dayOf(item domain.AppointmentHistory) string {
 func compareSlotGroups(a, b domain.AppointmentHistory) int {
 	pa, pb := slotPlace(a), slotPlace(b)
 	return cmp.Or(
-		slices.Compare(pa[:], pb[:]),
+		cmp.Compare(pa.city, pb.city),
+		cmp.Compare(pa.facility, pb.facility),
+		cmp.Compare(pa.address, pb.address),
 		cmp.Compare(a.DateTime.In(luxmed.Location()).Format("20060102"), b.DateTime.In(luxmed.Location()).Format("20060102")),
 		a.DateTime.Compare(b.DateTime),
 		cmp.Compare(a.DoctorName, b.DoctorName),

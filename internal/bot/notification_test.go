@@ -69,6 +69,27 @@ func TestNotificationKeepsSameTimeInDifferentBranchesDistinct(t *testing.T) {
 	}
 }
 
+func TestNotificationGroupsFallbackClinicNamesByAddress(t *testing.T) {
+	b := testBot(t)
+	items := []domain.AppointmentHistory{
+		slot("Krakow", "MAIN 1", "MAIN 1", "Dr A", 5, 14, 0),
+		slot("Krakow", " Main  1 ", "Main 1", "Dr B", 5, 9, 0),
+		slot("Krakow", "Clinic A", "Main 1", "Dr C", 5, 10, 0),
+	}
+	text, shown := b.appointmentNotification("en", domain.Watch{}, items, len(items), 10)
+	for _, block := range []string{
+		"\nMain 1\n<b>Jan 5, 2030</b>\n09:00 · Dr B\n14:00 · Dr A",
+		"\nClinic A\nMain 1\n<b>Jan 5, 2030</b>\n10:00 · Dr C",
+	} {
+		if !strings.Contains(text, block) {
+			t.Errorf("missing block %q in %q", block, text)
+		}
+	}
+	if shown != len(items) || strings.Count(text, "\nMain 1\n") != 2 || strings.Contains(text, "MAIN 1") {
+		t.Errorf("expected one address per clinic block, got %d slots in %q", shown, text)
+	}
+}
+
 func TestNotificationLongListShowsCountPreviewAndFitsTelegram(t *testing.T) {
 	b := testBot(t)
 	var items []domain.AppointmentHistory
