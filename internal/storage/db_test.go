@@ -552,74 +552,6 @@ func TestLegacySQLiteAppointmentTimeMigration(t *testing.T) {
 	}
 }
 
-func TestReconnectDeliveryCounterMigration(t *testing.T) {
-	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
-		must := func(err error) {
-			t.Helper()
-			if err != nil {
-				t.Fatal(err)
-			}
-		}
-		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
-		must(err)
-		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
-		must(err)
-		must(db.BeginLuxMedReconnect(ctx, user.ID))
-
-		now := time.Now().UTC()
-		_, err = db.sql.ExecContext(ctx, `ALTER TABLE luxmed_reconnect_delivery DROP COLUMN forbidden_failures`)
-		must(err)
-		_, err = db.sql.ExecContext(ctx, `ALTER TABLE luxmed_reconnect_delivery DROP COLUMN claim_id`)
-		must(err)
-		_, err = db.sql.ExecContext(ctx, `ALTER TABLE luxmed_reconnect_delivery DROP COLUMN last_failure_forbidden`)
-		must(err)
-		_, err = db.sql.ExecContext(ctx, `
-			INSERT INTO luxmed_reconnect_delivery(user_id, attempts, retry_at) VALUES ($1, 3, $2)
-		`, user.ID, now.Add(time.Hour))
-		must(err)
-		must(db.Migrate(ctx))
-		must(db.Migrate(ctx))
-
-		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
-		must(err)
-		if claim.Attempt != 0 {
-			t.Fatalf("migration changed the existing retry time: attempt=%d", claim.Attempt)
-		}
-		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Hour))
-		must(err)
-		if claim.Attempt != 4 {
-			t.Fatalf("migration changed the total attempt count: attempt=%d", claim.Attempt)
-		}
-		for range 2 {
-			must(db.RecordLuxMedReconnectRejection(ctx, user.ID, claim, now.Add(8*time.Hour), 2))
-		}
-		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(9*time.Hour))
-		must(err)
-		if claim.Attempt != 5 {
-			t.Fatalf("legacy attempts consumed the new 403 budget: attempt=%d", claim.Attempt)
-		}
-		must(db.JournalReconnectRejection(ctx, user.ID, claim, now.Add(15*time.Hour), 2))
-		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(16*time.Hour))
-		must(err)
-		if claim.Attempt != 0 {
-			t.Fatalf("delivery resumed after reaching the 403 limit: attempt=%d", claim.Attempt)
-		}
-		unblockedAt := now.Add(17 * time.Hour)
-		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 2, unblockedAt))
-		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt)
-		must(err)
-		if claim.Attempt != 6 {
-			t.Fatalf("delivery was not resumed after unblock: attempt=%d", claim.Attempt)
-		}
-		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 2, unblockedAt))
-		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt)
-		must(err)
-		if claim.Attempt != 0 {
-			t.Fatalf("repeat unblock reopened an attempt with an unknown outcome: attempt=%d", claim.Attempt)
-		}
-	})
-}
-
 func TestAddressFallbackPreservesLegacyNotification(t *testing.T) {
 	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
 		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 101, TelegramChatID: 101})
@@ -840,24 +772,102 @@ func TestUnblockAcceleratesOnlyConfirmedForbiddenDelivery(t *testing.T) {
 		must(err)
 		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, first, now.Add(6*time.Hour), 4))
 		unblockedAt := now.Add(time.Minute)
-		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 4, unblockedAt))
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, unblockedAt))
 		second, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt.Add(time.Second))
 		must(err)
 		if second.Attempt != 2 {
 			t.Fatalf("first forbidden rejection still blocked delivery: %+v", second)
 		}
-		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 4, unblockedAt))
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, unblockedAt))
 		unknown, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt.Add(time.Second))
 		must(err)
 		if unknown.Attempt != 0 {
 			t.Fatalf("unblock retried a send with unknown outcome: %+v", unknown)
 		}
 		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, second, now.Add(time.Hour), 0))
-		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 4, unblockedAt))
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, unblockedAt))
 		throttled, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt.Add(time.Second))
 		must(err)
 		if throttled.Attempt != 0 {
 			t.Fatalf("unblock bypassed Telegram rate limiting: %+v", throttled)
+		}
+	})
+}
+
+func TestUnblockDoesNotReopenWeeklyAttemptWithUnknownOutcome(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		for i := range 4 {
+			at := now.Add(time.Duration(i) * 7 * time.Hour)
+			claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, at)
+			must(err)
+			if claim.Attempt != i+1 {
+				t.Fatalf("unexpected claim: %+v", claim)
+			}
+			must(db.RecordLuxMedReconnectRejection(ctx, user.ID, claim, at.Add(6*time.Hour), 4))
+		}
+		later := now.Add(8 * 24 * time.Hour)
+		weekly, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, later)
+		must(err)
+		if weekly.Attempt != 5 {
+			t.Fatalf("expected weekly retry: %+v", weekly)
+		}
+		// A crash or lost Telegram reply leaves this claim without an outcome.
+		restarted := &DB{sql: db.sql, postgres: db.postgres}
+		must(restarted.ResumeLuxMedReconnectDelivery(ctx, user.ID, later.Add(time.Second)))
+		duplicate, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, later.Add(time.Minute))
+		must(err)
+		if duplicate.Attempt != 0 {
+			t.Fatalf("unblock made an unknown weekly attempt retryable: %+v", duplicate)
+		}
+	})
+}
+
+func TestReconnectJournalKeepsBothOutcomesDuringDatabaseFailure(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		journal := t.TempDir()
+		must(db.SetReconnectJournalDirectory(journal))
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		now := time.Now().UTC()
+		claim, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now)
+		must(err)
+		unavailable, cancel := context.WithCancel(ctx)
+		cancel()
+		if err := db.JournalReconnectRejection(unavailable, user.ID, claim, now.Add(time.Minute), 0); !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected the initial write failure: %v", err)
+		}
+		newClaim := ReconnectDeliveryClaim{ID: "new-unknown-id"}
+		if err := db.JournalUnsentReconnectReservation(unavailable, user.ID, newClaim, now.Add(time.Minute)); !errors.Is(err, context.Canceled) {
+			t.Fatalf("expected the later write failure: %v", err)
+		}
+		restarted := &DB{sql: db.sql, postgres: db.postgres}
+		must(restarted.SetReconnectJournalDirectory(journal))
+		must(restarted.ReplayReconnectRejection(ctx, user.ID))
+		claim, err = restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Minute))
+		must(err)
+		if claim.Attempt != 2 {
+			t.Fatalf("later reservation lost the confirmed rejection: %+v", claim)
 		}
 	})
 }
@@ -890,14 +900,14 @@ func TestUnsentReservationJournalWaitsForPostgresCommit(t *testing.T) {
 		must(err)
 		now := time.Now().UTC()
 		must(db.JournalUnsentReconnectReservation(ctx, user.ID, claim, now.Add(time.Minute)))
-		_, err = os.Stat(db.reconnectRejectionPath(user.ID))
+		_, err = os.Stat(filepath.Join(journal, reconnectRejectionName(user.ID, claim.ID)))
 		must(err)
 		must(tx.Commit())
 
 		restarted := &DB{sql: db.sql, postgres: true}
 		must(restarted.SetReconnectJournalDirectory(journal))
 		must(restarted.ReplayReconnectRejection(ctx, user.ID))
-		if _, err := os.Stat(db.reconnectRejectionPath(user.ID)); !errors.Is(err, os.ErrNotExist) {
+		if _, err := os.Stat(filepath.Join(journal, reconnectRejectionName(user.ID, claim.ID))); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("confirmed journal was not cleared: %v", err)
 		}
 		next, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Minute))

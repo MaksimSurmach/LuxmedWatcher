@@ -143,14 +143,17 @@ func (r *Runner) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.L
 }
 
 // ResumeLuxMedReconnectDelivery lets the next session check deliver a warning after an unblock.
-func (r *Runner) ResumeLuxMedReconnectDelivery(ctx context.Context, userID int64, forbiddenLimit int) error {
+func (r *Runner) ResumeLuxMedReconnectDelivery(ctx context.Context, userID int64) error {
 	state, _ := r.acquireAccount(userID, false)
 	if state == nil {
 		return luxmed.ErrBrowserBusy
 	}
 	defer r.releaseAccount(state)
 	replayErr := r.db.ReplayReconnectRejection(ctx, userID)
-	resumeErr := r.db.ResumeLuxMedReconnectDelivery(ctx, userID, forbiddenLimit, time.Now())
+	if replayErr != nil && !errors.Is(replayErr, storage.ErrReconnectJournalUnreadable) {
+		return replayErr
+	}
+	resumeErr := r.db.ResumeLuxMedReconnectDelivery(ctx, userID, time.Now())
 	if errors.Is(replayErr, storage.ErrReconnectJournalUnreadable) {
 		return resumeErr
 	}
@@ -395,6 +398,9 @@ func (r *Runner) replayReconnect(ctx context.Context, userID int64) error {
 }
 
 func (r *Runner) deliverReconnectAfterReplay(ctx context.Context, user domain.User, now time.Time, replayErr error) error {
+	if replayErr != nil && !errors.Is(replayErr, storage.ErrReconnectJournalUnreadable) {
+		return replayErr
+	}
 	notifier, ok := r.notifier.(reconnectNotifier)
 	if !ok {
 		return nil

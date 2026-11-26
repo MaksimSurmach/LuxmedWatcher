@@ -104,10 +104,19 @@ func TestWatchActionsRequireActiveOwnerInPrivateChat(t *testing.T) {
 
 type authClient struct {
 	luxmed.Client
-	err error
+	err       error
+	searchErr error
 }
 
 func (c authClient) Authenticate(context.Context, luxmed.Credentials) error { return c.err }
+
+func (c authClient) GetRecentProcedures(context.Context) ([]domain.Procedure, error) {
+	return nil, c.searchErr
+}
+
+func (c authClient) SearchAppointments(context.Context, domain.Watch) (luxmed.SearchResult, error) {
+	return luxmed.SearchResult{Checked: c.searchErr == nil}, c.searchErr
+}
 
 func TestPasswordLoginResumesOnlyActiveSearchesAfterAuthentication(t *testing.T) {
 	ctx := context.Background()
@@ -116,6 +125,7 @@ func TestPasswordLoginResumesOnlyActiveSearchesAfterAuthentication(t *testing.T)
 	const minimum = 5 * time.Minute
 	runner := scheduler.NewRunner(b.db, b.cryptor, b, minimum, time.Hour, false)
 	b.SetRunner(runner)
+	b.cfg.MinimumInterval = minimum
 	must := func(err error) {
 		t.Helper()
 		if err != nil {
@@ -136,7 +146,8 @@ func TestPasswordLoginResumesOnlyActiveSearchesAfterAuthentication(t *testing.T)
 		t.Fatalf("claim reconnect warning: attempt=%d, err=%v", claim.Attempt, err)
 	}
 	must(b.db.RecordLuxMedReconnectRejection(ctx, user.ID, claim, time.Now().Add(time.Minute), 0))
-	if reserved, err := b.db.ReserveLuxMedSearch(ctx, user.ID, time.Now(), minimum); err != nil || !reserved {
+	started := time.Now().UTC()
+	if reserved, err := b.db.ReserveLuxMedSearch(ctx, user.ID, started, minimum); err != nil || !reserved {
 		t.Fatalf("reserve search before login: reserved=%v, err=%v", reserved, err)
 	}
 
@@ -150,6 +161,11 @@ func TestPasswordLoginResumesOnlyActiveSearchesAfterAuthentication(t *testing.T)
 		t.Fatalf("failed login closed reconnect episode: required=%v, err=%v", required, err)
 	}
 	b.newClient = func(bool) luxmed.Client { return authClient{} }
+	b.handleText(ctx, user, "example password")
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("login during search cooldown saved unverified credentials: %v", err)
+	}
+	must(b.db.ReleaseLuxMedSearch(ctx, user.ID, started))
 	b.handleText(ctx, user, "example password")
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil || account.Status != domain.AccountStatusActive || account.EncryptedPassword == "example password" {
@@ -173,6 +189,33 @@ func TestPasswordLoginResumesOnlyActiveSearchesAfterAuthentication(t *testing.T)
 	paused, err := b.db.Watch(ctx, pausedID)
 	if err != nil || paused.Status != domain.WatchStatusPaused || paused.LastCheckedAt == nil {
 		t.Fatalf("successful login changed a paused search: %+v, err=%v", paused, err)
+	}
+}
+
+func TestPasswordLoginKeepsReconnectOpenWhenSearchRejectsToken(t *testing.T) {
+	ctx := t.Context()
+	b := testBot(t)
+	user := createUser(t, b, 10, domain.UserStatusActive)
+	if _, err := b.db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 12}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.BeginLuxMedReconnect(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.MarkLuxMedReconnectNotified(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
+	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "example"})
+	b.newClient = func(bool) luxmed.Client { return authClient{searchErr: luxmed.ErrAuthentication} }
+	b.handleText(ctx, user, "example password")
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("password saved after protected search returned 401: %v", err)
+	}
+	if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err != nil || !required {
+		t.Fatalf("search 401 closed the episode: required=%v err=%v", required, err)
+	}
+	if claim, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, time.Now()); err != nil || claim.Attempt != 0 {
+		t.Fatalf("search 401 reopened delivery for a notified episode: %+v %v", claim, err)
 	}
 }
 

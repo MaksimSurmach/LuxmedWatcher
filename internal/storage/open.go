@@ -21,7 +21,7 @@ type DB struct {
 	sql                *sql.DB
 	postgres           bool
 	reconnectDirectory string
-	pendingRejections  sync.Map // user ID to a confirmed rejection awaiting a durable write
+	pendingRejections  sync.Map // reconnectJournalKey to an outcome awaiting a durable write
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {
@@ -107,21 +107,10 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("apply storage schema: %w", err)
 	}
-	if db.postgres {
-		if _, err := tx.ExecContext(ctx, `
-			ALTER TABLE luxmed_reconnect_delivery ADD COLUMN IF NOT EXISTS forbidden_failures INTEGER NOT NULL DEFAULT 0,
-			    ADD COLUMN IF NOT EXISTS claim_id TEXT NOT NULL DEFAULT '',
-			    ADD COLUMN IF NOT EXISTS last_failure_forbidden BOOLEAN NOT NULL DEFAULT FALSE
-		`); err != nil {
-			return fmt.Errorf("add PostgreSQL reconnect delivery columns: %w", err)
-		}
-	} else {
+	if !db.postgres {
 		for _, column := range []struct{ table, name, definition string }{
 			{"users", "preferred_city_id", "INTEGER"},
 			{"users", "preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
-			{"luxmed_reconnect_delivery", "forbidden_failures", "INTEGER NOT NULL DEFAULT 0"},
-			{"luxmed_reconnect_delivery", "claim_id", "TEXT NOT NULL DEFAULT ''"},
-			{"luxmed_reconnect_delivery", "last_failure_forbidden", "BOOLEAN NOT NULL DEFAULT FALSE"},
 		} {
 			var exists bool
 			err := tx.QueryRowContext(ctx, `
@@ -143,12 +132,6 @@ func (db *DB) Migrate(ctx context.Context) error {
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM luxmed_procedures WHERE is_recent = TRUE`); err != nil {
 		return fmt.Errorf("remove private procedures from shared cache: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `
-		UPDATE luxmed_reconnect_delivery SET retry_at=$1
-		WHERE last_failure_forbidden AND retry_at IS NULL
-	`, time.Now().UTC().Add(blockedReconnectRetry)); err != nil {
-		return fmt.Errorf("schedule previously blocked reconnect deliveries: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit storage migration: %w", err)

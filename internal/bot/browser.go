@@ -42,7 +42,40 @@ func (b *Bot) resumeAfterTelegramUnblock(ctx context.Context, telegramID int64) 
 	if err != nil {
 		return err
 	}
-	return b.runner.ResumeLuxMedReconnectDelivery(ctx, user.ID, reconnectForbiddenLimit)
+	return b.runner.ResumeLuxMedReconnectDelivery(ctx, user.ID)
+}
+
+func (b *Bot) verifyPasswordAccess(ctx context.Context, userID int64, client luxmed.Client) error {
+	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	watches, err := b.db.WatchesByUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	for _, watch := range watches {
+		if watch.Status != domain.WatchStatusActive || !luxmed.SearchWindowOpen(watch, now) {
+			continue
+		}
+		ok, err := b.db.ReserveLuxMedSearch(ctx, userID, now, b.cfg.MinimumInterval)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return scheduler.ErrRateLimited
+		}
+		result, err := client.SearchAppointments(ctx, watch)
+		if result.Checked && !errors.Is(err, luxmed.ErrAuthentication) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return luxmed.ErrResponse
+	}
+	// A new account has no saved filters yet. Its personal search history is protected too.
+	_, err = client.GetRecentProcedures(ctx)
+	return err
 }
 
 func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error {

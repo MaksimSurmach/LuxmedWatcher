@@ -115,7 +115,7 @@ func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
 	runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: browser, other.TelegramUserID: browser})
 	b.SetRunner(runner)
 	must(os.MkdirAll(path+".reconnect", 0o700))
-	must(os.WriteFile(filepath.Join(path+".reconnect", fmt.Sprintf("%d.json", user.ID)), []byte("corrupt"), 0o600))
+	must(os.WriteFile(filepath.Join(path+".reconnect", fmt.Sprintf("%d-invalid.json", user.ID)), []byte("corrupt"), 0o600))
 	for range 2 {
 		config.Offset = 0
 		must(b.processUpdates(ctx, &config, updates))

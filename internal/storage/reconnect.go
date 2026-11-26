@@ -123,17 +123,14 @@ func (db *DB) recordLuxMedReconnectRejection(ctx context.Context, userID int64, 
 	return n != 0, err
 }
 
-// ResumeLuxMedReconnectDelivery accelerates confirmed 403s, including legacy capped attempts.
-func (db *DB) ResumeLuxMedReconnectDelivery(ctx context.Context, userID int64, forbiddenLimit int, now time.Time) error {
-	if forbiddenLimit <= 0 {
-		return errors.New("missing reconnect forbidden limit")
-	}
+// ResumeLuxMedReconnectDelivery accelerates the latest confirmed 403.
+func (db *DB) ResumeLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time) error {
 	_, err := db.sql.ExecContext(ctx, `
 		UPDATE luxmed_reconnect_delivery
-		SET forbidden_failures=0, retry_at=$3, last_failure_forbidden=FALSE
-		WHERE user_id=$1 AND (last_failure_forbidden OR (forbidden_failures >= $2 AND retry_at IS NULL))
+		SET forbidden_failures=0, retry_at=$2, last_failure_forbidden=FALSE
+		WHERE user_id=$1 AND last_failure_forbidden
 		    AND EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified)
-	`, userID, forbiddenLimit, now.UTC())
+	`, userID, now.UTC())
 	return err
 }
 
@@ -171,7 +168,7 @@ func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
 		return err
 	}
 	if !pending {
-		db.pendingRejections.Delete(userID)
+		db.clearPendingReconnectRejections(userID)
 		return nil
 	}
 	tx, err := db.sql.BeginTx(ctx, nil)
@@ -186,7 +183,7 @@ func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	db.pendingRejections.Delete(userID)
+	db.clearPendingReconnectRejections(userID)
 	return nil
 }
 

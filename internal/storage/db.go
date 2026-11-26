@@ -175,7 +175,7 @@ func (db *DB) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.LuxM
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	db.pendingRejections.Delete(account.UserID)
+	db.clearPendingReconnectRejections(account.UserID)
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,11 @@ type reconnectRejection struct {
 	RetryAt          time.Time
 	ForbiddenLimit   int
 	UnconfirmedClaim bool
+}
+
+type reconnectJournalKey struct {
+	userID  int64
+	claimID string
 }
 
 var ErrReconnectJournalUnreadable = errors.New("reconnect journal unreadable")
@@ -53,7 +59,7 @@ func (db *DB) JournalUnsentReconnectReservation(ctx context.Context, userID int6
 func (db *DB) journalReconnectOutcome(ctx context.Context, userID int64, outcome reconnectRejection) error {
 	var journalErr error
 	if db.reconnectDirectory != "" {
-		journalErr = db.writeReconnectFile(strconv.FormatInt(userID, 10)+".json", outcome)
+		journalErr = db.writeReconnectFile(reconnectRejectionName(userID, outcome.Claim.ID), outcome)
 		if journalErr == nil {
 			return db.ReplayReconnectRejection(ctx, userID)
 		}
@@ -61,26 +67,53 @@ func (db *DB) journalReconnectOutcome(ctx context.Context, userID int64, outcome
 	}
 	applied, err := db.persistReconnectRejection(ctx, userID, outcome)
 	if err != nil || !applied {
-		db.pendingRejections.Store(userID, outcome)
+		db.pendingRejections.Store(reconnectJournalKey{userID, outcome.Claim.ID}, outcome)
 		return errors.Join(journalErr, err)
 	}
 	return nil
 }
 
 func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error {
-	if pending, ok := db.pendingRejections.Load(userID); ok {
-		applied, err := db.persistReconnectRejection(ctx, userID, pending.(reconnectRejection))
+	var replayErr error
+	db.pendingRejections.Range(func(key, value any) bool {
+		if key.(reconnectJournalKey).userID != userID {
+			return true
+		}
+		applied, err := db.persistReconnectRejection(ctx, userID, value.(reconnectRejection))
 		if err != nil {
-			return fmt.Errorf("persist pending reconnect rejection: %w", err)
+			replayErr = fmt.Errorf("persist pending reconnect rejection: %w", err)
+			return false
 		}
 		if applied {
-			db.pendingRejections.CompareAndDelete(userID, pending)
+			db.pendingRejections.CompareAndDelete(key, value)
 		}
+		return true
+	})
+	if replayErr != nil || db.reconnectDirectory == "" {
+		return replayErr
 	}
-	if db.reconnectDirectory == "" {
+	entries, err := os.ReadDir(db.reconnectDirectory)
+	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	path := db.reconnectRejectionPath(userID)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrReconnectJournalUnreadable, err)
+	}
+	prefix := strconv.FormatInt(userID, 10) + "-"
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), prefix) || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		err := db.replayReconnectFile(ctx, userID, filepath.Join(db.reconnectDirectory, entry.Name()))
+		if err != nil && !errors.Is(err, ErrReconnectJournalUnreadable) {
+			return err
+		}
+		replayErr = errors.Join(replayErr, err)
+	}
+	return replayErr
+}
+
+func (db *DB) replayReconnectFile(ctx context.Context, userID int64, path string) error {
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -102,8 +135,9 @@ func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error 
 	if err := json.Unmarshal(payload, &outcome); err != nil {
 		return fmt.Errorf("%w: %w", ErrReconnectJournalUnreadable, err)
 	}
-	if outcome.Claim.ID == "" || outcome.RetryAt.IsZero() {
-		return fmt.Errorf("%w: missing claim ID or retry time", ErrReconnectJournalUnreadable)
+	if outcome.Claim.ID == "" || outcome.RetryAt.IsZero() ||
+		filepath.Base(path) != reconnectRejectionName(userID, outcome.Claim.ID) {
+		return fmt.Errorf("%w: invalid claim ID or retry time", ErrReconnectJournalUnreadable)
 	}
 	applied, err := db.persistReconnectRejection(ctx, userID, outcome)
 	if err != nil {
@@ -131,8 +165,17 @@ func (db *DB) persistReconnectRejection(ctx context.Context, userID int64, outco
 	return applied, err
 }
 
-func (db *DB) reconnectRejectionPath(userID int64) string {
-	return filepath.Join(db.reconnectDirectory, strconv.FormatInt(userID, 10)+".json")
+func reconnectRejectionName(userID int64, claimID string) string {
+	return fmt.Sprintf("%d-%x.json", userID, claimID)
+}
+
+func (db *DB) clearPendingReconnectRejections(userID int64) {
+	db.pendingRejections.Range(func(key, _ any) bool {
+		if key.(reconnectJournalKey).userID == userID {
+			db.pendingRejections.Delete(key)
+		}
+		return true
+	})
 }
 
 func (db *DB) writeReconnectFile(name string, value any) error {

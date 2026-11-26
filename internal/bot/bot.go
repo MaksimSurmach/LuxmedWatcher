@@ -380,9 +380,23 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, "flow.account.password"), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		if err := b.newClient(false).Authenticate(ctx, luxmed.Credentials{Login: state.Login, Password: text}); err != nil {
+		client := b.newClient(false)
+		if err := client.Authenticate(ctx, luxmed.Credentials{Login: state.Login, Password: text}); err != nil {
 			key := "errors.auth_failed"
 			if errors.Is(err, luxmed.ErrUnavailable) {
+				key = "errors.luxmed_unavailable"
+			}
+			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
+			return
+		}
+		if err := b.verifyPasswordAccess(ctx, user.ID, client); err != nil {
+			key := "errors.generic"
+			switch {
+			case errors.Is(err, scheduler.ErrRateLimited):
+				key = "watch.check_rate_limited"
+			case errors.Is(err, luxmed.ErrAuthentication):
+				key = "errors.auth_failed"
+			case errors.Is(err, luxmed.ErrUnavailable), errors.Is(err, context.DeadlineExceeded):
 				key = "errors.luxmed_unavailable"
 			}
 			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
