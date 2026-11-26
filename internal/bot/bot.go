@@ -4,9 +4,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"log/slog"
 	randv2 "math/rand/v2"
 	"net/url"
@@ -146,7 +146,8 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	if len(histories) == 0 {
 		return 0, nil
 	}
-	msg := tgbotapi.NewMessage(user.TelegramChatID, b.appointmentNotification(user.Locale, watch, histories, total, 10))
+	text, shown := b.appointmentNotification(user.Locale, watch, histories, total, maxNotificationSlots)
+	msg := tgbotapi.NewMessage(user.TelegramChatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.DisableWebPagePreview = true
 	booking := miniAppButton{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonURL(
@@ -160,12 +161,26 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		keyboard[1] = []miniAppButton{results}
 		keyboard = append(keyboard, []miniAppButton{details})
 	}
+	if max(total, len(histories)) > shown {
+		keyboard[1] = append(keyboard[1], b.actionButton(user, "button.all_options", fmt.Sprintf("options:%d:0", watch.ID)))
+	}
 	keyboard = append(keyboard, []miniAppButton{
 		b.actionButton(user, "button.pause", fmt.Sprintf("watch:pause:%d", watch.ID)),
 		b.actionButton(user, "button.check_again", fmt.Sprintf("watch:check:%d", watch.ID)),
 	})
 	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": keyboard}
-	title := b.catalog.T(user.Locale, "notification.title", max(total, len(histories)))
+	if max(total, len(histories)) > 1 {
+		// The widget card has room for one slot; grouped lists go in the text message.
+		res, err := b.api.Request(msg)
+		var sent struct {
+			MessageID int `json:"message_id"`
+		}
+		if err != nil || json.Unmarshal(res.Result, &sent) != nil || sent.MessageID <= 0 {
+			return 0, fmt.Errorf("Telegram notification delivery failed")
+		}
+		return sent.MessageID, nil
+	}
+	title := b.catalog.T(user.Locale, "notification.title", 1)
 	card := widgetCard{
 		Locale:      user.Locale,
 		Title:       title,
@@ -175,43 +190,12 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		BookingHint: b.catalog.T(user.Locale, "notification.booking_hint"),
 		Failure:     b.catalog.T(user.Locale, "widget.error"),
 	}
-	if remaining := max(total, len(histories)) - 1; remaining > 0 {
-		card.More = b.catalog.T(user.Locale, "notification.more", remaining)
-	}
-	caption := b.appointmentNotification(user.Locale, watch, histories, total, 2)
+	caption, _ := b.appointmentNotification(user.Locale, watch, histories, total, 2)
 	messageID, err := b.sendWidget(card, caption, msg)
 	if err != nil {
 		return 0, fmt.Errorf("Telegram notification delivery failed")
 	}
 	return messageID, nil
-}
-
-func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histories []domain.AppointmentHistory, total, limit int) string {
-	var text strings.Builder
-	count := max(total, len(histories))
-	title := b.catalog.T(locale, "notification.title", count)
-	fmt.Fprintf(&text, "<b>%s</b>\n%s", html.EscapeString(title), html.EscapeString(truncateMessage(procedures.WatchTitle(watch), 240)))
-	preview := histories[:min(limit, len(histories))]
-	for _, item := range preview {
-		fmt.Fprintf(&text, "\n\n<b>%s</b>", appointmentDateTime(locale, item.DateTime))
-		var details []string
-		for _, value := range []string{truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120)} {
-			if value != "" {
-				details = append(details, html.EscapeString(value))
-			}
-		}
-		if len(details) > 0 {
-			text.WriteString("\n" + strings.Join(details, " · "))
-		}
-		if item.Address != "" {
-			text.WriteString("\n" + html.EscapeString(truncateMessage(item.Address, 100)))
-		}
-	}
-	if remaining := count - len(preview); remaining > 0 {
-		fmt.Fprintf(&text, "\n\n<i>%s</i>", html.EscapeString(b.catalog.T(locale, "notification.more", remaining)))
-	}
-	text.WriteString("\n\n" + html.EscapeString(b.catalog.T(locale, "notification.booking_hint")))
-	return text.String()
 }
 
 func portalURL(raw string) string {
@@ -449,7 +433,12 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		return
 	}
 	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
-	b.handleAction(ctx, cb.From.ID, cb.Data)
+	data := cb.Data
+	if strings.HasPrefix(data, "options:") && strings.Count(data, ":") == 2 {
+		// Only the opening button is on the notification itself. Page buttons carry its message ID.
+		data += ":" + strconv.Itoa(cb.Message.MessageID)
+	}
+	b.handleAction(ctx, cb.From.ID, data)
 }
 
 func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
@@ -632,6 +621,8 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 		b.handleDoctorChoice(ctx, user, b.getFlow(user.ID), strings.TrimPrefix(data, "doctor:"))
 	case strings.HasPrefix(data, "history:"):
 		b.handleHistoryPage(ctx, user, data)
+	case strings.HasPrefix(data, "options:"):
+		b.handleNotificationOptions(ctx, user, strings.TrimPrefix(data, "options:"))
 	case strings.HasPrefix(data, "hide:"):
 		b.hideHistory(ctx, user, data)
 	case strings.HasPrefix(data, "back:"):

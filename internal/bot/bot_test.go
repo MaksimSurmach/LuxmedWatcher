@@ -322,12 +322,12 @@ func TestHistoryExplainsUnavailableTimes(t *testing.T) {
 
 func TestAppointmentNotificationEscapesHTMLAndShowsRemainingSlots(t *testing.T) {
 	b := testBot(t)
-	text := b.appointmentNotification("en", domain.Watch{Name: "A < B & C"}, []domain.AppointmentHistory{
+	text, _ := b.appointmentNotification("en", domain.Watch{Name: "A < B & C"}, []domain.AppointmentHistory{
 		{Appointment: domain.Appointment{DateTime: time.Unix(0, 0), DoctorName: "<b>Example</b>", FacilityName: "A & B", Address: "Street 12"}},
 	}, 3, 10)
 	for _, value := range []string{
 		"<b>Appointment times found · 3</b>", "A &lt; B &amp; C", "&lt;b&gt;Example&lt;/b&gt;", "A &amp; B",
-		"Street 12", "<i>More in history: 2</i>", "Check the time and book in the LUX MED portal.",
+		"Street 12", "<i>More options: 2</i>", "Check the time and book in the LUX MED portal.",
 	} {
 		if !strings.Contains(text, value) {
 			t.Errorf("notification missing %q in %q", value, text)

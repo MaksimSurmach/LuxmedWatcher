@@ -179,3 +179,39 @@ func TestDecodeTermsFailsOnUnreadableResults(t *testing.T) {
 		t.Fatalf("empty calendar: apps = %v, err = %v", preview.apps, err)
 	}
 }
+
+func TestSearchAppointmentsKeepsDifferentAddressesWithoutClinicID(t *testing.T) {
+	day := startOfDay(time.Now()).AddDate(0, 0, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != TermsURL {
+			t.Errorf("unexpected endpoint: %s", r.URL.Path)
+		}
+		at := day.Format(dateFormat) + "T10:15:00"
+		fmt.Fprintf(w, `{"success":true,"termsForService":{"termsForDays":[{"terms":[
+			{"dateTimeFrom":%q,"doctor":{"id":42},"clinic":"Clinic","address":"Main 1"},
+			{"dateTimeFrom":%q,"doctor":{"id":42},"clinic":"Clinic","address":"Side 2"},
+			{"dateTimeFrom":%q,"doctor":{"id":42},"clinic":"Clinic","address":" MAIN 1 "},
+			{"dateTimeFrom":%q,"doctor":{"id":42},"clinic":"Clinic","address":"Other","clinicId":7},
+			{"dateTimeFrom":%q,"doctor":{"id":42},"clinic":"Clinic","address":"Other corrected","clinicId":7}
+		]}]}}`, at, at, at, at, at)
+	}))
+	defer server.Close()
+
+	client := newHTTPClient(server.URL, false)
+	client.accessToken = "fixture"
+	apps, err := client.SearchAppointments(t.Context(), domain.Watch{
+		CityID: 1, ServiceID: 2, DateFrom: &day, DateTo: &day,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(apps) != 3 || apps[0].Address != "Main 1" || apps[1].Address != "Side 2" || apps[2].FacilityID != 7 {
+		t.Fatalf("search did not distinguish address fallback from a known clinic ID: %+v", apps)
+	}
+	legacy := apps[0]
+	legacy.Address = ""
+	if legacyHash := Fingerprint(legacy); apps[0].LegacyFingerprint != legacyHash ||
+		apps[1].LegacyFingerprint != legacyHash || apps[2].LegacyFingerprint != "" {
+		t.Fatal("search did not preserve the legacy lookup key for missing clinic IDs")
+	}
+}
