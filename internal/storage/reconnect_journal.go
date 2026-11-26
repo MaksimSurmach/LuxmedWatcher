@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -15,6 +16,72 @@ type reconnectRejection struct {
 	Claim          ReconnectDeliveryClaim
 	RetryAt        time.Time
 	ForbiddenLimit int
+}
+
+var ErrReconnectJournalUnreadable = errors.New("reconnect journal unreadable")
+
+type TelegramUnblock struct {
+	UserID   int64
+	UpdateID int
+}
+
+func (event TelegramUnblock) filename() string {
+	return fmt.Sprintf("unblock-%d-%d.json", event.UserID, event.UpdateID)
+}
+
+func (db *DB) QueueTelegramUnblock(event TelegramUnblock) error {
+	if db.reconnectDirectory != "" {
+		err := db.writeReconnectFile(event.filename(), event)
+		if err == nil {
+			return nil
+		}
+		db.pendingUnblocks.Store(event, struct{}{})
+		return err
+	}
+	db.pendingUnblocks.Store(event, struct{}{})
+	return nil
+}
+
+func (db *DB) PendingTelegramUnblocks() ([]TelegramUnblock, error) {
+	events := make(map[TelegramUnblock]struct{})
+	db.pendingUnblocks.Range(func(key, _ any) bool {
+		events[key.(TelegramUnblock)] = struct{}{}
+		return true
+	})
+	var readErr error
+	if db.reconnectDirectory != "" {
+		var entries []os.DirEntry
+		entries, readErr = os.ReadDir(db.reconnectDirectory)
+		for _, entry := range entries {
+			name, isEvent := strings.CutPrefix(entry.Name(), "unblock-")
+			user, update, found := strings.Cut(strings.TrimSuffix(name, ".json"), "-")
+			if !isEvent || !found || entry.IsDir() {
+				continue
+			}
+			id, idErr := strconv.ParseInt(user, 10, 64)
+			seq, seqErr := strconv.Atoi(update)
+			event := TelegramUnblock{UserID: id, UpdateID: seq}
+			if idErr == nil && seqErr == nil && event.filename() == entry.Name() {
+				events[event] = struct{}{}
+			}
+		}
+	}
+	pending := make([]TelegramUnblock, 0, len(events))
+	for event := range events {
+		pending = append(pending, event)
+	}
+	return pending, readErr
+}
+
+func (db *DB) FinishTelegramUnblock(event TelegramUnblock) error {
+	db.pendingUnblocks.Delete(event)
+	if db.reconnectDirectory != "" {
+		err := os.Remove(filepath.Join(db.reconnectDirectory, event.filename()))
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 // SetReconnectJournalDirectory selects a persistent local directory before workers start.
@@ -43,7 +110,7 @@ func (db *DB) JournalReconnectRejection(
 	outcome := reconnectRejection{Claim: claim, RetryAt: retryAt, ForbiddenLimit: forbiddenLimit}
 	var journalErr error
 	if db.reconnectDirectory != "" {
-		journalErr = db.writeReconnectRejection(userID, outcome)
+		journalErr = db.writeReconnectFile(strconv.FormatInt(userID, 10)+".json", outcome)
 		if journalErr == nil {
 			return db.ReplayReconnectRejection(ctx, userID)
 		}
@@ -67,22 +134,38 @@ func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error 
 		return nil
 	}
 	path := db.reconnectRejectionPath(userID)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrReconnectJournalUnreadable, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%w: expected a regular file", ErrReconnectJournalUnreadable)
+	}
 	payload, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	if err != nil {
-		return fmt.Errorf("read reconnect journal: %w", err)
+		return fmt.Errorf("%w: %w", ErrReconnectJournalUnreadable, err)
 	}
 	var outcome reconnectRejection
 	if err := json.Unmarshal(payload, &outcome); err != nil {
-		return fmt.Errorf("decode reconnect journal: %w", err)
+		return fmt.Errorf("%w: %w", ErrReconnectJournalUnreadable, err)
+	}
+	if outcome.Claim.ID == "" || outcome.RetryAt.IsZero() {
+		return fmt.Errorf("%w: missing claim ID or retry time", ErrReconnectJournalUnreadable)
 	}
 	if err := db.persistReconnectRejection(ctx, userID, outcome); err != nil {
 		return fmt.Errorf("persist reconnect journal: %w", err)
 	}
 	// The SQL update is idempotent and scoped to the original delivery claim.
-	return os.Remove(path)
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: %w", ErrReconnectJournalUnreadable, err)
+	}
+	return nil
 }
 
 func (db *DB) persistReconnectRejection(ctx context.Context, userID int64, outcome reconnectRejection) error {
@@ -93,7 +176,7 @@ func (db *DB) reconnectRejectionPath(userID int64) string {
 	return filepath.Join(db.reconnectDirectory, strconv.FormatInt(userID, 10)+".json")
 }
 
-func (db *DB) writeReconnectRejection(userID int64, outcome reconnectRejection) error {
+func (db *DB) writeReconnectFile(name string, value any) error {
 	if err := os.MkdirAll(db.reconnectDirectory, 0o700); err != nil {
 		return err
 	}
@@ -108,14 +191,14 @@ func (db *DB) writeReconnectRejection(userID int64, outcome reconnectRejection) 
 		return err
 	}
 	defer os.Remove(file.Name())
-	err = json.NewEncoder(file).Encode(outcome)
+	err = json.NewEncoder(file).Encode(value)
 	if err == nil {
 		err = file.Sync()
 	}
 	if err := errors.Join(err, file.Close()); err != nil {
 		return err
 	}
-	if err := os.Rename(file.Name(), db.reconnectRejectionPath(userID)); err != nil {
+	if err := os.Rename(file.Name(), filepath.Join(db.reconnectDirectory, name)); err != nil {
 		return err
 	}
 	return directory.Sync()

@@ -95,6 +95,7 @@ func (b *Bot) SetRunner(runner *scheduler.Runner) {
 
 func (b *Bot) Run(ctx context.Context) error {
 	defer b.manualWorkers.Wait()
+	b.manualWorkers.Go(func() { b.retryTelegramUnblocks(ctx) })
 	b.registerCommands()
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = b.cfg.PollTimeout
@@ -135,10 +136,7 @@ func (b *Bot) processUpdates(ctx context.Context, config *tgbotapi.UpdateConfig,
 		}
 		switch {
 		case update.MyChatMember != nil:
-			// Advancing past any later update would acknowledge this one as well.
-			if err := b.handleBotMembership(ctx, update.MyChatMember); err != nil {
-				return err
-			}
+			b.queueBotMembership(update.UpdateID, update.MyChatMember)
 		case update.WidgetQuery != nil:
 			b.handleWidgetQuery(ctx, update.WidgetQuery)
 		default:

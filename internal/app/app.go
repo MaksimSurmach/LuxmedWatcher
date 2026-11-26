@@ -2,13 +2,16 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -168,18 +171,47 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 func (a *App) configureReconnectJournal(db *storage.DB) error {
+	if a.cfg.ReconnectJournalDir == "-" && a.cfg.DatabaseURL != "" {
+		return nil
+	}
 	if a.cfg.ReconnectJournalDir != "" {
 		return db.SetReconnectJournalDirectory(a.cfg.ReconnectJournalDir)
 	}
-	if a.cfg.DatabasePath == "" && a.cfg.DatabaseURL != "" {
-		return nil
+	if a.cfg.DatabasePath != "" || a.cfg.DatabaseURL == "" {
+		err := db.SetReconnectJournalDirectory(a.cfg.DatabasePath + ".reconnect")
+		if err == nil || a.cfg.DatabaseURL == "" {
+			return err
+		}
 	}
-	err := db.SetReconnectJournalDirectory(a.cfg.DatabasePath + ".reconnect")
-	if err != nil && a.cfg.DatabaseURL != "" {
+	dir, err := postgresReconnectJournal(a.cfg.DatabaseURL)
+	if err == nil {
+		err = db.SetReconnectJournalDirectory(dir)
+	}
+	if err != nil {
 		a.logger.Warn("reconnect journal unavailable, using PostgreSQL for rejection records", "err", err)
-		return nil
 	}
-	return err
+	return nil
+}
+
+func postgresReconnectJournal(databaseURL string) (string, error) {
+	state := os.Getenv("XDG_STATE_HOME")
+	if !filepath.IsAbs(state) {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		state = filepath.Join(home, ".local", "state")
+	}
+	database, err := url.Parse(databaseURL)
+	if err != nil {
+		return "", errors.New("invalid database URL for reconnect journal")
+	}
+	// Keep the same path across credential rotation.
+	options := database.Query()
+	identity := database.Host + database.Path + "?" + options.Get("host") + ":" +
+		options.Get("port") + ":" + options.Get("search_path")
+	key := sha256.Sum256([]byte(identity))
+	return filepath.Join(state, "luxmed-watcher", fmt.Sprintf("reconnect-%x", key[:16])), nil
 }
 
 type telegramHTTP struct {

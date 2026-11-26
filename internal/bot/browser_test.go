@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -94,23 +95,54 @@ func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
 		BEGIN SELECT RAISE(ABORT, 'simulated write failure'); END
 	`)
 	must(err)
-	if err := b.processUpdates(ctx, &config, updates); err == nil || config.Offset != 0 {
-		t.Fatalf("failed rearm acknowledged an update: offset=%d err=%v", config.Offset, err)
+	must(b.processUpdates(ctx, &config, updates))
+	b.processTelegramUnblocks(ctx)
+	pending, err := b.db.PendingTelegramUnblocks()
+	must(err)
+	if config.Offset != 3 || len(pending) != 1 {
+		t.Fatalf("failed rearm blocked polling or lost the event: offset=%d pending=%v", config.Offset, pending)
 	}
 	_, err = faults.ExecContext(ctx, `DROP TRIGGER fail_rearm`)
 	must(err)
+	// A fresh storage handle must recover the queued event without Telegram redelivery.
+	reopened, err := storage.Open(ctx, path)
+	must(err)
+	t.Cleanup(func() { reopened.Close() })
+	b.db = reopened
+	runner = scheduler.NewRunner(reopened, b.cryptor, b, 0, time.Hour, false)
+	other := createUser(t, b, 43, domain.UserStatusActive)
+	otherID, err := reopened.CreateWatch(ctx, domain.Watch{UserID: other.ID, CityID: 1, ServiceID: 1, NextDays: 1})
+	must(err)
+	otherWatch, err := reopened.Watch(ctx, otherID)
+	must(err)
+	runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: browser, other.TelegramUserID: browser})
+	b.SetRunner(runner)
+	must(os.WriteFile(filepath.Join(path+".reconnect", fmt.Sprintf("%d.json", user.ID)), []byte("corrupt"), 0o600))
+	b.processTelegramUnblocks(ctx)
+	pending, err = b.db.PendingTelegramUnblocks()
+	must(err)
+	if len(pending) != 0 {
+		t.Fatalf("unreadable refusal journal prevented the queued unblock: %v", pending)
+	}
 	for range 2 {
-		config.Offset = 0 // Telegram can redeliver an unacknowledged update after restart.
+		config.Offset = 0
 		must(b.processUpdates(ctx, &config, updates))
-		if config.Offset != 3 {
-			t.Fatalf("successful retry did not advance the offset: %d", config.Offset)
-		}
+		b.processTelegramUnblocks(ctx)
 		if err := runner.CheckWatch(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
 			t.Fatalf("check watch: %v", err)
 		}
 	}
+	pending, err = b.db.PendingTelegramUnblocks()
+	must(err)
+	if len(pending) != 0 {
+		t.Fatalf("successful retry left pending events: %v", pending)
+	}
 	if sends := sends.Load(); sends != 1 {
 		t.Fatalf("delivered %d warnings, want one", sends)
+	}
+	if err := runner.CheckWatch(ctx, otherWatch); !errors.Is(err, luxmed.ErrAuthentication) ||
+		errors.Is(err, storage.ErrReconnectJournalUnreadable) || sends.Load() != 2 {
+		t.Fatalf("corrupt journal affected another user: sends=%d err=%v", sends.Load(), err)
 	}
 }
 

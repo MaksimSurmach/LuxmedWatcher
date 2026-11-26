@@ -17,17 +17,61 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
+	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
 const reconnectForbiddenLimit = 4
 
-func (b *Bot) handleBotMembership(ctx context.Context, update *tgbotapi.ChatMemberUpdated) error {
+func (b *Bot) queueBotMembership(updateID int, update *tgbotapi.ChatMemberUpdated) {
 	if b.runner == nil || !privateChat(&update.Chat, &update.From) ||
 		update.OldChatMember.Status != "kicked" || update.NewChatMember.Status != "member" ||
 		update.NewChatMember.User == nil || update.NewChatMember.User.ID != b.api.Self.ID {
-		return nil
+		return
 	}
-	user, err := b.db.UserByTelegramID(ctx, update.From.ID)
+	if err := b.db.QueueTelegramUnblock(storage.TelegramUnblock{UserID: update.From.ID, UpdateID: updateID}); err != nil {
+		b.logger.Warn("queue Telegram unblock in memory", "err", err)
+	}
+}
+
+func (b *Bot) retryTelegramUnblocks(ctx context.Context) {
+	timer := time.NewTicker(5 * time.Second)
+	defer timer.Stop()
+	for ctx.Err() == nil {
+		b.processTelegramUnblocks(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+	}
+}
+
+func (b *Bot) processTelegramUnblocks(ctx context.Context) {
+	if b.runner == nil {
+		return
+	}
+	events, err := b.db.PendingTelegramUnblocks()
+	if err != nil {
+		b.logger.Warn("read Telegram unblock queue", "err", err)
+	}
+	for _, event := range events {
+		if ctx.Err() != nil {
+			return
+		}
+		attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
+		err := b.resumeAfterTelegramUnblock(attempt, event.UserID)
+		cancel()
+		if err == nil {
+			err = b.db.FinishTelegramUnblock(event)
+		}
+		if err != nil && !errors.Is(err, luxmed.ErrBrowserBusy) {
+			b.logger.Warn("retry Telegram unblock", "err", err)
+		}
+	}
+}
+
+func (b *Bot) resumeAfterTelegramUnblock(ctx context.Context, telegramID int64) error {
+	user, err := b.db.UserByTelegramID(ctx, telegramID)
 	if errors.Is(err, sql.ErrNoRows) || (err == nil && !user.IsActive()) {
 		return nil
 	}

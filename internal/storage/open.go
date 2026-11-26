@@ -22,6 +22,7 @@ type DB struct {
 	postgres           bool
 	reconnectDirectory string
 	pendingRejections  sync.Map // user ID to a confirmed rejection awaiting a durable write
+	pendingUnblocks    sync.Map // TelegramUnblock events held when the journal is unavailable
 }
 
 func Open(ctx context.Context, path string) (*DB, error) {

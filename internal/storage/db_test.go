@@ -846,6 +846,13 @@ func TestReconnectRejectionIsRetriedWithoutDiskJournal(t *testing.T) {
 		if err := db.ReplayReconnectRejection(unavailable, user.ID); !errors.Is(err, context.Canceled) {
 			t.Fatalf("replay during outage = %v", err)
 		}
+		restarted := &DB{sql: db.sql, postgres: db.postgres}
+		must(restarted.ReplayReconnectRejection(ctx, user.ID))
+		unknown, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, retryAt.Add(time.Hour))
+		must(err)
+		if unknown.Attempt != 0 {
+			t.Fatalf("restart without a recorded outcome allowed an ambiguous resend: %+v", unknown)
+		}
 		must(db.ReplayReconnectRejection(ctx, user.ID))
 		must(db.ReplayReconnectRejection(ctx, user.ID))
 		early, err := db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(time.Minute))

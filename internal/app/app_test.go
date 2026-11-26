@@ -16,6 +16,8 @@ import (
 
 func TestPostgresReconnectJournalDirectoryIsIndependentOfSQLitePath(t *testing.T) {
 	root := t.TempDir()
+	state := filepath.Join(root, "state")
+	t.Setenv("XDG_STATE_HOME", state)
 	blocked := filepath.Join(root, "not-a-directory")
 	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -26,6 +28,13 @@ func TestPostgresReconnectJournalDirectoryIsIndependentOfSQLitePath(t *testing.T
 	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err := app.configureReconnectJournal(new(storage.DB)); err != nil {
 		t.Fatalf("PostgreSQL startup depends on the SQLite path: %v", err)
+	}
+	dir, err := postgresReconnectJournal(app.cfg.DatabaseURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(dir); err != nil || !info.IsDir() {
+		t.Fatalf("independent default journal was not created: %v", err)
 	}
 	app.cfg.ReconnectJournalDir = filepath.Join(root, "persistent", "reconnect")
 	if err := app.configureReconnectJournal(new(storage.DB)); err != nil {

@@ -1118,6 +1118,77 @@ func TestReconnectRejectionSurvivesRestartAfterDatabaseWriteFailure(t *testing.T
 	}
 }
 
+func TestReconnectEpisodeWriteFailures(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		operation string
+		searchErr error
+	}{
+		{name: "opening stays due", operation: "INSERT", searchErr: luxmed.ErrAuthentication},
+		{name: "closing retries before warning delivery", operation: "DELETE", searchErr: luxmed.ErrUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			path := filepath.Join(t.TempDir(), "watcher.sqlite")
+			sends := 0
+			runner, db, watch := testRunnerAt(t, reconnectNotifierFunc{send: func() error {
+				sends++
+				return nil
+			}}, path)
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			closing := test.operation == "DELETE"
+			if closing {
+				must(db.BeginLuxMedReconnect(ctx, watch.UserID))
+			}
+			client := &fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) {
+				return nil, test.searchErr
+			}}
+			runner.newClient = func(bool) luxmed.Client { return client }
+			faults, err := sql.Open("sqlite", path)
+			must(err)
+			t.Cleanup(func() { faults.Close() })
+			_, err = faults.ExecContext(ctx, `CREATE TRIGGER fail_episode BEFORE `+test.operation+` ON luxmed_reconnect
+				BEGIN SELECT RAISE(ABORT, 'simulated episode write failure'); END`)
+			must(err)
+			if err := runner.CheckWatch(ctx, watch); !errors.Is(err, test.searchErr) ||
+				!strings.Contains(err.Error(), "simulated episode write failure") {
+				t.Fatalf("search during write failure: %v", err)
+			}
+			if closing {
+				if err := runner.renewBrowserSession(ctx, 42, nil); err == nil || sends != 0 {
+					t.Fatalf("background retry during outage: err=%v sends=%d", err, sends)
+				}
+			} else {
+				saved, err := db.Watch(ctx, watch.ID)
+				must(err)
+				if saved.LastCheckedAt != nil || saved.LastError != "" {
+					t.Fatalf("failed episode took the search out of the queue: %+v", saved)
+				}
+			}
+			_, err = faults.ExecContext(ctx, `DROP TRIGGER fail_episode`)
+			must(err)
+			if closing {
+				must(runner.renewBrowserSession(ctx, 42, nil))
+				must(runner.renewBrowserSession(ctx, 42, nil))
+				if sends != 0 {
+					t.Fatalf("sent %d stale warnings after recovery", sends)
+				}
+			} else if err := runner.CheckWatch(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) || sends != 1 {
+				t.Fatalf("retry did not deliver the warning: err=%v sends=%d", err, sends)
+			}
+			required, err := db.LuxMedReconnectRequired(ctx, watch.UserID)
+			if err != nil || required == closing {
+				t.Fatalf("episode after retry: required=%v err=%v", required, err)
+			}
+		})
+	}
+}
+
 func TestPasswordAuthenticationResolvesReconnectBeforeFirstSearchResult(t *testing.T) {
 	for _, test := range []struct {
 		name      string
