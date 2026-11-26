@@ -316,9 +316,15 @@ function slotGroups(slots, now) {
   // Days keep the server's order: upcoming nearest first, then past times.
   return [...days.values()].map((day) => `<section class="day">
     <h2 class="day-title">${escape(day.label)}</h2>
-    ${[...day.places.values()].map((rows) => rows.sort(([a], [b]) => new Date(a.DateTime) - new Date(b.DateTime)))
-      // Within a day, the clinic with the earliest time comes first.
-      .sort((a, b) => new Date(a[0][0].DateTime) - new Date(b[0][0].DateTime)).map((rows) => {
+    ${[...day.places.values()].map((rows) => {
+      rows.sort(([a], [b]) => Date.parse(a.DateTime) - Date.parse(b.DateTime));
+      const next = rows.find(([slot]) => !isExpired(slot, now));
+      return {
+        rows,
+        nextTime: next ? Date.parse(next[0].DateTime) : Infinity,
+        firstTime: Date.parse(rows[0][0].DateTime),
+      };
+    }).sort((a, b) => a.nextTime - b.nextTime || a.firstTime - b.firstTime).map(({ rows }) => {
       const { Facility, Address } = rows[0][0];
       // One address per block; the service moves to each time when the block mixes services.
       const services = new Set(rows.map(([slot]) => slot.Service));
