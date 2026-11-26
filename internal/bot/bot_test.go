@@ -532,7 +532,7 @@ func TestStandaloneConnectLinkUsesSavedLanguage(t *testing.T) {
 	}
 }
 
-func TestTelegramBrowserAccountCheckResolvesReconnect(t *testing.T) {
+func TestTelegramBrowserAccountCheckLeavesSearchVerificationPending(t *testing.T) {
 	ctx := t.Context()
 	b := testBot(t)
 	user := createUser(t, b, 10, domain.UserStatusActive)
@@ -562,7 +562,8 @@ func TestTelegramBrowserAccountCheckResolvesReconnect(t *testing.T) {
 	if err := b.checkAccount(ctx, user); err != nil {
 		t.Fatal(err)
 	}
-	if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err != nil || required {
-		t.Fatalf("confirmed browser session left reconnect episode open: required=%v, err=%v", required, err)
+	_, access, err := b.db.WatchesWithReconnectState(ctx, user.ID)
+	if err != nil || access.EpisodeID == "" || access.Status != storage.LuxMedAccessPending {
+		t.Fatalf("session check did not leave protected verification pending: %+v, %v", access, err)
 	}
 }

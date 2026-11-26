@@ -104,14 +104,6 @@ func (db *DB) WatchesWithReconnectState(ctx context.Context, userID int64) ([]do
 }
 
 func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) error {
-	return db.beginLuxMedReconnect(ctx, userID, false)
-}
-
-func (db *DB) BeginLuxMedReconnectAfterSearch(ctx context.Context, userID int64) error {
-	return db.beginLuxMedReconnect(ctx, userID, true)
-}
-
-func (db *DB) beginLuxMedReconnect(ctx context.Context, userID int64, requiresTerms bool) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -127,7 +119,7 @@ func (db *DB) beginLuxMedReconnect(ctx context.Context, userID int64, requiresTe
 	if err != nil {
 		return err
 	}
-	if err := setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessRejected, requiresTerms); err != nil {
+	if err := setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessRejected, true); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -157,7 +149,7 @@ func (db *DB) LuxMedReconnectVerification(ctx context.Context, userID int64) (st
 		SELECT `+reconnectEpisodeSQL+`,
 		    `+hasAccountTermsRequirement("$1")+` OR `+hasWatchSignInError("$2", "$3")+`
 	`, userID, domain.WatchStatusActive, domain.WatchStatusPaused).Scan(&episodeID, &required)
-	return episodeID, required, err
+	return episodeID, episodeID != "" || required, err
 }
 
 type ReconnectDeliveryClaim struct {

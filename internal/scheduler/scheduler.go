@@ -58,7 +58,7 @@ type accountCheck struct {
 	recoveryPending          bool
 	nextProbeFilter          int
 	rejectedReconnectWatch   *domain.Watch
-	sessionRetryAt           time.Time
+	retryAfter               time.Time
 }
 
 type Runner struct {
@@ -110,7 +110,7 @@ func (r *Runner) acquireAccount(userID int64, respectCooldown bool) (*accountChe
 	if state.inFlight != nil {
 		return nil, state.inFlight
 	}
-	if respectCooldown && time.Now().Before(state.next) {
+	if respectCooldown && !state.searchReady(time.Now()) {
 		return nil, nil
 	}
 	state.inFlight = make(chan struct{})
@@ -279,7 +279,7 @@ func (r *Runner) checkWithAccount(ctx context.Context, requested domain.Watch, m
 	if authFailed {
 		state.recoveryPending = false
 		notifyCtx, cancel := context.WithTimeout(parent, 10*time.Second)
-		beginErr := r.db.BeginLuxMedReconnectAfterSearch(notifyCtx, user.ID)
+		beginErr := r.db.BeginLuxMedReconnect(notifyCtx, user.ID)
 		if beginErr == nil {
 			err = errors.Join(err, r.deliverReconnect(notifyCtx, user, time.Now()))
 		}
@@ -393,17 +393,10 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 }
 
 func (r *Runner) requireReconnect(ctx context.Context, user domain.User) error {
-	if err := r.beginReconnect(ctx, user.ID); err != nil {
-		return err
-	}
-	return r.deliverReconnect(ctx, user, time.Now())
-}
-
-func (r *Runner) beginReconnect(ctx context.Context, userID int64) error {
-	if err := r.db.BeginLuxMedReconnect(ctx, userID); err != nil {
+	if err := r.db.BeginLuxMedReconnect(ctx, user.ID); err != nil {
 		return fmt.Errorf("save LuxMed reconnect status: %w", err)
 	}
-	return nil
+	return r.deliverReconnect(ctx, user, time.Now())
 }
 
 func (r *Runner) deliverReconnect(ctx context.Context, user domain.User, now time.Time) error {
@@ -527,8 +520,11 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 		}
 		return BrowserSessionCheck{}, r.recheckPasswordSession(ctx, user, state)
 	}
-	if background && time.Now().Before(state.sessionRetryAt) {
-		return BrowserSessionCheck{}, nil
+	if time.Now().Before(state.retryAfter) {
+		if background {
+			return BrowserSessionCheck{}, nil
+		}
+		return BrowserSessionCheck{}, luxmed.ErrUnavailable
 	}
 	timeout := 25 * time.Second
 	if !background {
@@ -537,11 +533,9 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	probeCtx, cancel := context.WithTimeout(ctx, timeout)
 	err := browser.Check(probeCtx)
 	cancel()
-	if upstream, ok := errors.AsType[*luxmed.HTTPError](err); ok &&
-		upstream.StatusCode == http.StatusTooManyRequests && upstream.RetryAfter > 0 {
-		state.sessionRetryAt = maxTime(state.sessionRetryAt, time.Now().Add(upstream.RetryAfter))
+	if err != nil {
 		r.mu.Lock()
-		state.next = maxTime(state.next, state.sessionRetryAt)
+		state.applyRetryAfter(time.Now(), err)
 		r.mu.Unlock()
 	}
 	if err == nil {
@@ -599,7 +593,7 @@ func (r *Runner) recheckPasswordSession(ctx context.Context, user domain.User, s
 
 func (r *Runner) checkReconnectSearch(ctx context.Context, userID int64, state *accountCheck, now time.Time, browser *luxmed.Browser) error {
 	r.mu.Lock()
-	ready := !now.Before(state.next)
+	ready := state.searchReady(now)
 	r.mu.Unlock()
 	if !ready {
 		return nil
@@ -732,16 +726,8 @@ func (r *Runner) probeReconnectAccess(ctx context.Context, userID int64, state *
 		rejectedFilter = err
 		state.nextProbeFilter = (index + 1) % len(watches)
 	}
-	if len(watches) > 0 {
-		return rejectedFilter
-	}
-	if _, err := client.GetRecentProcedures(ctx); err != nil {
-		if errors.Is(err, luxmed.ErrAuthentication) {
-			return r.recordAccessRejection(ctx, userID, state, err)
-		}
-		return err
-	}
-	return r.resolveAfterAccessProbe(ctx, userID)
+	// With no usable saved filter, there is no proof that the search endpoint works.
+	return rejectedFilter
 }
 
 func (r *Runner) recordAccessRejection(ctx context.Context, userID int64, state *accountCheck, rejection error) error {
@@ -755,7 +741,7 @@ func (r *Runner) recordAccessRejection(ctx context.Context, userID int64, state 
 	if err != nil {
 		return errors.Join(rejection, err)
 	}
-	if err := r.db.BeginLuxMedReconnectAfterSearch(recordCtx, userID); err != nil {
+	if err := r.db.BeginLuxMedReconnect(recordCtx, userID); err != nil {
 		return errors.Join(rejection, err)
 	}
 	return errors.Join(rejection, r.deliverReconnect(recordCtx, user, time.Now()))
@@ -858,9 +844,26 @@ func (state *accountCheck) backOffUnavailable(err error) {
 	backoff := (15 * time.Second) << (state.failures - 1)
 	now := time.Now()
 	state.next = maxTime(state.next, now.Add(backoff+jitter(backoff/5)))
-	if upstream, ok := errors.AsType[*luxmed.HTTPError](err); ok {
-		state.next = maxTime(state.next, now.Add(upstream.RetryAfter))
+	state.applyRetryAfter(now, err)
+}
+
+// applyRetryAfter is called with the runner mutex held.
+func (state *accountCheck) applyRetryAfter(now time.Time, err error) {
+	upstream, ok := errors.AsType[*luxmed.HTTPError](err)
+	if !ok || upstream.RetryAfter <= 0 {
+		return
 	}
+	until := now.Add(upstream.RetryAfter)
+	if upstream.StatusCode == http.StatusTooManyRequests {
+		state.retryAfter = maxTime(state.retryAfter, until)
+		return
+	}
+	state.next = maxTime(state.next, until)
+}
+
+// searchReady is called with the runner mutex held.
+func (state *accountCheck) searchReady(now time.Time) bool {
+	return !now.Before(state.next) && !now.Before(state.retryAfter)
 }
 
 func jitter(maximum time.Duration) time.Duration {
@@ -971,7 +974,7 @@ func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched
 	now := time.Now()
 	s.runner.mu.Lock()
 	for userID, account := range s.runner.accounts {
-		if account.inFlight == nil && !account.recoveryPending && now.After(account.next) && now.Sub(account.lastCheck) > 15*time.Minute {
+		if account.inFlight == nil && !account.recoveryPending && account.searchReady(now) && now.Sub(account.lastCheck) > 15*time.Minute {
 			delete(s.runner.accounts, userID)
 		}
 	}
@@ -992,7 +995,7 @@ func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched
 		}
 		s.runner.mu.Lock()
 		account := s.runner.accounts[watch.UserID]
-		blocked := account != nil && (account.inFlight != nil || now.Before(account.next) || account.hasRejectedReconnectFilters(watch))
+		blocked := account != nil && (account.inFlight != nil || !account.searchReady(now) || account.hasRejectedReconnectFilters(watch))
 		s.runner.mu.Unlock()
 		if blocked {
 			continue

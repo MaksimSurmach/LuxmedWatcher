@@ -818,7 +818,7 @@ func TestReconnectOnlyRequeuesCurrentSearches(t *testing.T) {
 				must(db.MarkWatchChecked(ctx, expiredID, false, "luxmed_authentication"))
 				before, err := db.Watch(ctx, expiredID)
 				must(err)
-				must(db.BeginLuxMedReconnectAfterSearch(ctx, user.ID))
+				must(db.BeginLuxMedReconnect(ctx, user.ID))
 				if mode == "pending password" {
 					must(db.SavePendingLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Status: domain.AccountStatusActive}))
 				} else {
@@ -864,7 +864,7 @@ func TestReconnectRequiresCurrentActiveSearchInWarsaw(t *testing.T) {
 		}
 		watch.DateFrom, watch.DateTo = &end, nil
 		must(db.UpdateWatch(ctx, watch))
-		must(db.BeginLuxMedReconnectAfterSearch(ctx, user.ID))
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
 		required, err = db.LuxMedReconnectRequired(ctx, user.ID)
 		if err != nil || required {
 			t.Fatalf("search beyond the horizon opened an episode: required=%v err=%v", required, err)

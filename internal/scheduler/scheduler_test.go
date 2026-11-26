@@ -1435,7 +1435,7 @@ func TestBrowserRecoveryChecksAccessWithoutRestartingPausedOrExpiredSearch(t *te
 				}
 			}
 			watch.CityID, watch.ServiceID, watch.CheckIntervalSeconds = 1, 12, 3600
-			must(db.BeginLuxMedReconnectAfterSearch(ctx, watch.UserID))
+			must(db.BeginLuxMedReconnect(ctx, watch.UserID))
 			if !paused {
 				past := time.Now().AddDate(0, 0, -2)
 				watch.DateTo = &past
@@ -1803,7 +1803,7 @@ func TestRejectedActiveFilterFallsBackToPausedSearchAfterCooldown(t *testing.T) 
 	beforeRateLimit := time.Now()
 	scheduler.maintainReconnectSessions(ctx)
 	runner.mu.Lock()
-	retryAt := runner.accounts[user.ID].next
+	retryAt := runner.accounts[user.ID].retryAfter
 	runner.mu.Unlock()
 	if accepted.Load() != 1 || retryAt.Before(beforeRateLimit.Add(2*time.Minute)) {
 		t.Fatalf("fallback ignored Retry-After: alternate=%d retry=%v", accepted.Load(), retryAt)
@@ -1815,6 +1815,7 @@ func TestRejectedActiveFilterFallsBackToPausedSearchAfterCooldown(t *testing.T) 
 	}
 	runner.mu.Lock()
 	runner.accounts[user.ID].next = time.Time{}
+	runner.accounts[user.ID].retryAfter = time.Time{}
 	runner.mu.Unlock()
 	scheduler.maintainReconnectSessions(ctx)
 	_, access, err := db.WatchesWithReconnectState(ctx, user.ID)
@@ -1859,7 +1860,7 @@ func TestPasswordReconnectUsesFallbackIndependentlyOfWarningDelivery(t *testing.
 			id, err := db.CreateWatch(ctx, domain.Watch{UserID: active.UserID, CityID: 1, ServiceID: 12})
 			must(err)
 			must(db.SetWatchStatus(ctx, id, domain.WatchStatusPaused))
-			must(db.BeginLuxMedReconnectAfterSearch(ctx, active.UserID))
+			must(db.BeginLuxMedReconnect(ctx, active.UserID))
 			if test.delivered {
 				must(db.MarkLuxMedReconnectNotified(ctx, active.UserID))
 			}
@@ -2006,46 +2007,175 @@ func TestPausedLegacySignInErrorRecoversWithAlternativeProtectedFilter(t *testin
 	}
 }
 
-func TestSharedSessionRefreshWaitsForRetryAfter(t *testing.T) {
-	ctx := t.Context()
-	runner, db, watch := testRunner(t, nil)
-	if err := db.BeginLuxMedReconnect(ctx, watch.UserID); err != nil {
-		t.Fatal(err)
-	}
-	var calls atomic.Int32
-	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		if req.URL.Path != "/accounts/42/session" {
-			t.Errorf("unexpected path: %s", req.URL.Path)
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-		if calls.Add(1) == 1 {
-			w.Header().Set("Retry-After", "120")
-			w.WriteHeader(http.StatusTooManyRequests)
-		}
-	}))
-	t.Cleanup(worker.Close)
-	browser, err := luxmed.NewRoutedBrowser(42, luxmed.BrowserRoute{
-		API: worker.URL + "/accounts/42", Shared: true,
-	}, "http://localhost:18769", strings.Repeat("a", 64))
-	if err != nil {
-		t.Fatal(err)
-	}
-	before := time.Now()
-	if err := runner.renewBrowserSession(ctx, 42, browser); !errors.Is(err, luxmed.ErrUnavailable) {
-		t.Fatalf("expected throttled refresh, got %v", err)
-	}
+func TestSharedBrowserPathsShareRetryAfter(t *testing.T) {
+	for _, source := range []string{"session", "slot search", "protected probe"} {
+		t.Run(source, func(t *testing.T) {
+			ctx := t.Context()
+			runner, db, watch := testRunner(t, nil)
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			watch.CityID, watch.ServiceID = 1, 12
+			must(db.UpdateWatch(ctx, watch))
+			must(db.BeginLuxMedReconnect(ctx, watch.UserID))
+			if source == "protected probe" {
+				must(db.SetWatchStatus(ctx, watch.ID, domain.WatchStatusPaused))
+			}
+			var sessions, searches atomic.Int32
+			worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch req.URL.Path {
+				case "/accounts/42/session":
+					if sessions.Add(1) != 1 || source != "session" {
+						return
+					}
+				case "/accounts/42" + luxmed.TermsURL:
+					if searches.Add(1) != 1 || source == "session" {
+						fmt.Fprint(w, `{"termsForService":{"termsForDays":[]}}`)
+						return
+					}
+				default:
+					t.Errorf("unexpected path: %s", req.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				w.Header().Set("Retry-After", "120")
+				w.WriteHeader(http.StatusTooManyRequests)
+			}))
+			t.Cleanup(worker.Close)
+			browser, err := luxmed.NewRoutedBrowser(42, luxmed.BrowserRoute{
+				API: worker.URL + "/accounts/42", Shared: true,
+			}, "http://localhost:18769", strings.Repeat("a", 64))
+			must(err)
+			runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
 
-	state := runner.accounts[watch.UserID]
-	if state.sessionRetryAt.Before(before.Add(2 * time.Minute)) {
-		t.Fatalf("refresh can retry before Retry-After: %v", state.sessionRetryAt)
+			before := time.Now()
+			if source == "slot search" {
+				err = runner.CheckWatch(ctx, watch)
+			} else {
+				err = runner.renewBrowserSession(ctx, 42, browser)
+			}
+			if !errors.Is(err, luxmed.ErrUnavailable) {
+				t.Fatalf("expected upstream throttle, got %v", err)
+			}
+			state := runner.accounts[watch.UserID]
+			if state.retryAfter.Before(before.Add(2 * time.Minute)) {
+				t.Fatalf("account can retry before Retry-After: %v", state.retryAfter)
+			}
+			firstSessions, firstSearches := sessions.Load(), searches.Load()
+			must(runner.renewBrowserSession(ctx, 42, browser))
+			if err := runner.CheckWatch(ctx, watch); !errors.Is(err, ErrRateLimited) {
+				t.Fatalf("scheduled search ignored the shared deadline: %v", err)
+			}
+			user, err := db.UserByID(ctx, watch.UserID)
+			must(err)
+			if _, err := runner.CheckBrowserSession(ctx, user); !errors.Is(err, luxmed.ErrUnavailable) {
+				t.Fatalf("manual check ignored the shared deadline: %v", err)
+			}
+			if sessions.Load() != firstSessions || searches.Load() != firstSearches {
+				t.Fatalf("called upstream before Retry-After: sessions=%d terms=%d", sessions.Load(), searches.Load())
+			}
+			state.retryAfter = time.Time{}
+			state.next = time.Time{}
+			must(runner.renewBrowserSession(ctx, 42, browser))
+			if sessions.Load() != firstSessions+1 || searches.Load() != firstSearches+1 {
+				t.Fatalf("checks did not resume after Retry-After: sessions=%d terms=%d", sessions.Load(), searches.Load())
+			}
+		})
 	}
-	if err := runner.renewBrowserSession(ctx, 42, browser); err != nil || calls.Load() != 1 {
-		t.Fatalf("refresh retried before Retry-After: calls=%d err=%v", calls.Load(), err)
-	}
-	state.sessionRetryAt = time.Time{}
-	if err := runner.renewBrowserSession(ctx, 42, browser); err != nil || calls.Load() != 2 {
-		t.Fatalf("refresh did not resume at the deadline: calls=%d err=%v", calls.Load(), err)
+}
+
+func TestSessionRejectionRequiresSearchAccessToCloseEpisode(t *testing.T) {
+	for _, status := range []domain.WatchStatus{domain.WatchStatusActive, domain.WatchStatusPaused, domain.WatchStatusDeleted} {
+		t.Run(string(status), func(t *testing.T) {
+			ctx := t.Context()
+			sends := 0
+			runner, db, watch := testRunner(t, reconnectNotifierFunc{send: func() error {
+				sends++
+				return nil
+			}})
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			watch.CityID, watch.ServiceID = 1, 12
+			must(db.UpdateWatch(ctx, watch))
+
+			var sessions, terms, catalog atomic.Int32
+			var searchReady atomic.Bool
+			worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				switch req.URL.Path {
+				case "/accounts/42/session":
+					// The shared worker can check its catalog once sign-in completes.
+					if sessions.Add(1) == 1 {
+						w.WriteHeader(http.StatusUnauthorized)
+					}
+				case "/accounts/42" + luxmed.TermsURL:
+					terms.Add(1)
+					if !searchReady.Load() {
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
+					fmt.Fprint(w, `{"termsForService":{"termsForDays":[]}}`)
+				default:
+					catalog.Add(1)
+					fmt.Fprint(w, `[]`)
+				}
+			}))
+			t.Cleanup(worker.Close)
+			browser, err := luxmed.NewRoutedBrowser(42, luxmed.BrowserRoute{
+				API: worker.URL + "/accounts/42", Shared: true,
+			}, "http://localhost:18769", strings.Repeat("a", 64))
+			must(err)
+			runner.UseBrowsers(map[int64]*luxmed.Browser{42: browser})
+			must(runner.renewBrowserSession(ctx, 42, browser))
+			episodeID, err := db.LuxMedReconnectEpisode(ctx, watch.UserID)
+			must(err)
+			if episodeID == "" || sends != 1 {
+				t.Fatalf("session 401 did not open one episode: id=%q sends=%d", episodeID, sends)
+			}
+			if status != domain.WatchStatusActive {
+				must(db.SetUserWatchStatus(ctx, watch.UserID, watch.ID, status))
+			}
+			user, err := db.UserByID(ctx, watch.UserID)
+			must(err)
+			result, err := runner.CheckBrowserSession(ctx, user)
+			must(err)
+			if !result.VerificationPending || result.EpisodeID != episodeID || terms.Load() != 0 {
+				t.Fatalf("session preflight bypassed pending search verification: %+v", result)
+			}
+
+			err = runner.renewBrowserSession(ctx, 42, browser)
+			if status == domain.WatchStatusDeleted {
+				must(err)
+				if terms.Load() != 0 {
+					t.Fatal("tried searching with no usable filter")
+				}
+			} else if !errors.Is(err, luxmed.ErrAuthentication) || terms.Load() != 1 {
+				t.Fatalf("expected protected terms 401, got %v after %d calls", err, terms.Load())
+			}
+			_, access, err := db.WatchesWithReconnectState(ctx, watch.UserID)
+			must(err)
+			if access.EpisodeID != episodeID || access.Status == storage.LuxMedAccessConnected || sends != 1 || catalog.Load() != 0 {
+				t.Fatalf("catalog or failed search resolved the episode: %+v sends=%d catalog=%d", access, sends, catalog.Load())
+			}
+			if status == domain.WatchStatusDeleted {
+				return
+			}
+
+			searchReady.Store(true)
+			must(runner.renewBrowserSession(ctx, 42, browser))
+			watches, access, err := db.WatchesWithReconnectState(ctx, watch.UserID)
+			must(err)
+			if access.EpisodeID != "" || access.Status != storage.LuxMedAccessConnected || sends != 1 ||
+				len(watches) != 1 || watches[0].Status != status {
+				t.Fatalf("successful protected check failed to close only this episode: %+v sends=%d watches=%+v", access, sends, watches)
+			}
+		})
 	}
 }
 
@@ -2065,7 +2195,7 @@ func TestEditedRejectedFilterResumesDespiteUnavailableFallback(t *testing.T) {
 			pausedID, err := db.CreateWatch(ctx, domain.Watch{UserID: watch.UserID, CityID: 1, ServiceID: 12})
 			must(err)
 			must(db.SetWatchStatus(ctx, pausedID, domain.WatchStatusPaused))
-			must(db.BeginLuxMedReconnectAfterSearch(ctx, watch.UserID))
+			must(db.BeginLuxMedReconnect(ctx, watch.UserID))
 
 			var rejected, fallback, corrected atomic.Int32
 			worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

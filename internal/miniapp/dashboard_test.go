@@ -187,7 +187,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 			t.Fatalf("load lost the pending sign-in evidence: %s (%v)", result.Body, err)
 		}
 		if scenario.episode && status == domain.WatchStatusActive {
-			if err := db.BeginLuxMedReconnectAfterSearch(ctx, other.ID); err != nil {
+			if err := db.BeginLuxMedReconnect(ctx, other.ID); err != nil {
 				t.Fatal(err)
 			}
 			result = request("load", "{}", origin, otherToken, http.StatusOK)
