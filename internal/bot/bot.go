@@ -475,6 +475,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 	if !allowsFlowCallback(b.getFlow(user.TelegramUserID), data) {
 		return
 	}
+	credentialMode, revisions := credentialButton(data)
 	switch {
 	case strings.HasPrefix(data, "lang:"):
 		locale := strings.TrimPrefix(data, "lang:")
@@ -506,7 +507,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 			b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountLogin})
 			b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
 		}
-	case attempt != nil || data == "connect:open" || data == "connect:chrome":
+	case credentialMode == "open" || credentialMode == "chrome" || credentialMode == "switch":
 		if b.cfg.Browsers[user.TelegramUserID] == nil {
 			return
 		}
@@ -521,12 +522,11 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 		}
 		b.clearFlow(user.TelegramUserID)
 		b.showAccount(ctx, user)
-	case data == "connect:forget" || strings.HasPrefix(data, "connect:forget:"):
+	case credentialMode == "forget":
 		if b.cfg.Browsers[user.TelegramUserID] == nil {
 			return
 		}
-		revision, ok := forgetButton(data)
-		if !ok || revision != user.CredentialRevision {
+		if revisions == nil || *revisions != user.CredentialRevisions() {
 			b.showConnect(ctx, user)
 			return
 		}

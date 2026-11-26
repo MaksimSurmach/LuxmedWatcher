@@ -101,9 +101,9 @@ func (db *DB) setModeAccessStatus(ctx context.Context, tx *sql.Tx, userID int64,
 func (db *DB) ConfirmBrowserLogin(ctx context.Context, owner domain.User) error {
 	err := requireOneRow(db.sql.ExecContext(ctx, `
 		UPDATE users SET credential_save_revision=credential_save_revision+1
-		WHERE id=$1 AND credential_revision=$2 AND status=$3 AND role <> ''
+		WHERE id=$1 AND credential_revision=$2 AND credential_save_revision=$3 AND status=$4 AND role <> ''
 			AND NOT EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login)
-	`, owner.ID, owner.CredentialRevision, domain.UserStatusActive))
+	`, owner.ID, owner.CredentialRevision, owner.CredentialSaveRevision, domain.UserStatusActive))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrCredentialsChanged
 	}
@@ -113,10 +113,7 @@ func (db *DB) ConfirmBrowserLogin(ctx context.Context, owner domain.User) error 
 // ChooseBrowserLogin opens Chrome or cancels a specified, overlapping save.
 // An already committed save may be undone only if its exact ciphertext matches.
 func (db *DB) ChooseBrowserLogin(ctx context.Context, user domain.User, choice *ChromeChoice) error {
-	if choice == nil {
-		return db.ConfirmBrowserLogin(ctx, user)
-	}
-	if choice.telegramID != user.TelegramUserID || choice.stale {
+	if choice == nil || choice.telegramID != user.TelegramUserID || choice.stale {
 		return ErrCredentialsChanged
 	}
 	// Order the transaction against newer local password submissions. The
@@ -135,7 +132,7 @@ func (db *DB) ChooseBrowserLogin(ctx context.Context, user domain.User, choice *
 			}
 		}
 	}
-	if choice.shownRevision != nil && user.CredentialRevision != *choice.shownRevision {
+	if user.CredentialRevisions() != choice.revisions {
 		return ErrCredentialsChanged
 	}
 	if choice.switchMode {
@@ -144,32 +141,37 @@ func (db *DB) ChooseBrowserLogin(ctx context.Context, user domain.User, choice *
 	return db.ConfirmBrowserLogin(ctx, user)
 }
 
-// BrowserLoginMode reads the mode and revision together for a sign-in menu.
-func (db *DB) BrowserLoginMode(ctx context.Context, userID int64) (revision int64, saved, stored bool, err error) {
+// BrowserLoginMode reads the mode and revisions together for a sign-in menu.
+func (db *DB) BrowserLoginMode(ctx context.Context, userID int64) (revisions domain.CredentialRevisions, saved, stored bool, err error) {
 	err = db.sql.QueryRowContext(ctx, `
-		SELECT credential_revision,
+		SELECT credential_revision, credential_save_revision,
 		       EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login),
 		       EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1)
 		FROM users WHERE id=$1
-	`, userID).Scan(&revision, &saved, &stored)
+	`, userID).Scan(&revisions.CredentialRevision, &revisions.CredentialSaveRevision, &saved, &stored)
 	return
 }
 
 func (db *DB) switchToBrowserLogin(ctx context.Context, owner domain.User) error {
 	return db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
 		err := requireOneRow(tx.ExecContext(ctx, `
-			DELETE FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login
-		`, owner.ID))
+			UPDATE users SET credential_revision=credential_revision+1,
+			                 credential_save_revision=credential_save_revision+1
+			WHERE id=$1 AND credential_save_revision=$2
+		`, owner.ID, owner.CredentialSaveRevision))
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrCredentialsChanged
 		}
 		if err != nil {
 			return err
 		}
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE users SET credential_revision=credential_revision+1,
-			                 credential_save_revision=credential_save_revision+1 WHERE id=$1
-		`, owner.ID); err != nil {
+		err = requireOneRow(tx.ExecContext(ctx, `
+			DELETE FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login
+		`, owner.ID))
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrCredentialsChanged
+		}
+		if err != nil {
 			return err
 		}
 		if err := db.finalizeLuxMedAccountSave(ctx, tx, owner.ID, false); err != nil {

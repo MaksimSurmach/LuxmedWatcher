@@ -573,20 +573,26 @@ func credentialAttemptID(r *http.Request) (string, bool) {
 	return id, true
 }
 
-func dashboardCredentialRevision(w http.ResponseWriter, r *http.Request) (int64, bool) {
-	var input struct{ CredentialRevision *int64 }
+func dashboardCredentialRevisions(w http.ResponseWriter, r *http.Request) (domain.CredentialRevisions, bool) {
+	var input struct {
+		CredentialRevision     *int64
+		CredentialSaveRevision *int64
+	}
 	if !decodeDashboard(w, r, &input) {
-		return 0, false
+		return domain.CredentialRevisions{}, false
 	}
-	if input.CredentialRevision == nil || *input.CredentialRevision < 0 {
+	if input.CredentialRevision == nil || *input.CredentialRevision < 0 ||
+		input.CredentialSaveRevision == nil || *input.CredentialSaveRevision < 0 {
 		dashboardResult(w, nil, storage.ErrCredentialsChanged)
-		return 0, false
+		return domain.CredentialRevisions{}, false
 	}
-	return *input.CredentialRevision, true
+	return domain.CredentialRevisions{
+		CredentialRevision: *input.CredentialRevision, CredentialSaveRevision: *input.CredentialSaveRevision,
+	}, true
 }
 
 func (d *dashboard) forgetCredentials(w http.ResponseWriter, r *http.Request, user domain.User) {
-	revision, ok := dashboardCredentialRevision(w, r)
+	revisions, ok := dashboardCredentialRevisions(w, r)
 	if !ok {
 		return
 	}
@@ -596,11 +602,11 @@ func (d *dashboard) forgetCredentials(w http.ResponseWriter, r *http.Request, us
 		return
 	}
 	if token != "" {
-		choice := d.db.SelectBrowserLogin(user.TelegramUserID, token, &revision, true)
+		choice := d.db.SelectBrowserLogin(user.TelegramUserID, token, revisions, true)
 		dashboardResult(w, nil, d.db.ChooseBrowserLogin(r.Context(), user, choice))
 		return
 	}
-	if revision != user.CredentialRevision {
+	if revisions != user.CredentialRevisions() {
 		dashboardResult(w, nil, storage.ErrCredentialsChanged)
 		return
 	}
@@ -623,11 +629,11 @@ func (d *dashboard) browserLogin(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusForbidden, nil)
 		return
 	}
-	revision, ok := dashboardCredentialRevision(w, r)
+	revisions, ok := dashboardCredentialRevisions(w, r)
 	if !ok {
 		return
 	}
-	attempt := d.db.SelectBrowserLogin(id, token, &revision, false)
+	attempt := d.db.SelectBrowserLogin(id, token, revisions, false)
 	d.withUser(func(w http.ResponseWriter, r *http.Request, user domain.User) {
 		d.openBrowser(w, r, user, attempt)
 	}, func(*http.Request) (int64, bool) { return id, true })(w, r)

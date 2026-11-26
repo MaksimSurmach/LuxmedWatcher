@@ -66,6 +66,18 @@ type User struct {
 	LastSeenAt             time.Time
 }
 
+// CredentialRevisions identifies both the login mode and its save barrier.
+type CredentialRevisions struct {
+	CredentialRevision     int64
+	CredentialSaveRevision int64
+}
+
+func (u User) CredentialRevisions() CredentialRevisions {
+	return CredentialRevisions{
+		CredentialRevision: u.CredentialRevision, CredentialSaveRevision: u.CredentialSaveRevision,
+	}
+}
+
 func (u User) IsActive() bool {
 	return u.Status == UserStatusActive && u.Role != ""
 }

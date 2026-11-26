@@ -596,7 +596,8 @@ func TestStandaloneConnectLinkUsesSavedLanguage(t *testing.T) {
 				t.Fatal(err)
 			}
 			b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
-			b.handleAction(t.Context(), user.TelegramUserID, "connect:open", nil)
+			action := credentialAction("chrome", user.CredentialRevisions())
+			b.handleAction(t.Context(), user.TelegramUserID, action, b.selectChrome(user.TelegramUserID, action))
 			select {
 			case got := <-sent:
 				want := tc.origin + "/connect?lang=be#" + ticket
@@ -646,17 +647,22 @@ func TestTelegramChromeOpeningKeepsMigratedCredentialsUntilExplicitRemoval(t *te
 	}); err != nil {
 		t.Fatal(err)
 	}
-	b.handleAction(ctx, user.TelegramUserID, "connect:chrome", nil)
+	choice := credentialAction("chrome", user.CredentialRevisions())
+	b.handleAction(ctx, user.TelegramUserID, choice, b.selectChrome(user.TelegramUserID, choice))
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil || account.EncryptedPassword != sealed || opened.Load() != 1 {
 		t.Fatalf("Chrome did not open with the legacy record intact: opened=%d error=%v", opened.Load(), err)
 	}
-	forgetAction := fmt.Sprintf("connect:forget:%d", user.CredentialRevision)
+	current, err := b.db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forgetAction := credentialAction("forget", current.CredentialRevisions())
 	b.handleAction(ctx, user.TelegramUserID, forgetAction, nil)
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("explicit removal did not delete the record: %v", err)
 	}
-	current, err := b.db.UserByID(ctx, user.ID)
+	current, err = b.db.UserByID(ctx, user.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -669,16 +675,21 @@ func TestTelegramChromeOpeningKeepsMigratedCredentialsUntilExplicitRemoval(t *te
 	if _, err := b.db.LoginAccount(ctx, user.ID, true); err != nil || opened.Load() != 1 {
 		t.Fatalf("old account actions switched away from saved login: opened=%d error=%v", opened.Load(), err)
 	}
-	revision, _, _, err := b.db.BrowserLoginMode(ctx, user.ID)
+	revisions, _, _, err := b.db.BrowserLoginMode(ctx, user.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	switchAction := fmt.Sprintf("connect:switch:%d", revision)
+	switchAction := credentialAction("switch", revisions)
 	b.handleAction(ctx, user.TelegramUserID, switchAction, b.selectChrome(user.TelegramUserID, switchAction))
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) || opened.Load() != 2 {
 		t.Fatalf("fresh confirmation failed to select Chrome and delete credentials: opened=%d err=%v", opened.Load(), err)
 	}
-	b.handleAction(ctx, user.TelegramUserID, "connect:chrome", nil)
+	revisions, _, _, err = b.db.BrowserLoginMode(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	choice = credentialAction("chrome", revisions)
+	b.handleAction(ctx, user.TelegramUserID, choice, b.selectChrome(user.TelegramUserID, choice))
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) || opened.Load() != 3 {
 		t.Fatalf("Chrome did not open after explicit opt-out: opened=%d error=%v", opened.Load(), err)
 	}
@@ -793,7 +804,7 @@ func TestTelegramChromeCancelsInFlightPasswordVerification(t *testing.T) {
 	if err := b.processUpdates(ctx, &config, []telegramUpdate{{Update: tgbotapi.Update{
 		UpdateID: 2,
 		CallbackQuery: &tgbotapi.CallbackQuery{
-			ID: "chrome", From: from, Message: &tgbotapi.Message{MessageID: 21, Chat: chat}, Data: fmt.Sprintf("connect:chrome:%d", user.CredentialRevision),
+			ID: "chrome", From: from, Message: &tgbotapi.Message{MessageID: 21, Chat: chat}, Data: credentialAction("chrome", user.CredentialRevisions()),
 		},
 	}}}); err != nil {
 		t.Fatal(err)
@@ -903,7 +914,7 @@ func TestTelegramChromeRollsBackMiniAppSaveDuringAcknowledgment(t *testing.T) {
 		return err
 	}
 	b.handleCallback(ctx, &tgbotapi.CallbackQuery{
-		ID: "chrome", Data: fmt.Sprintf("connect:chrome:%d", user.CredentialRevision), From: &tgbotapi.User{ID: user.TelegramUserID},
+		ID: "chrome", Data: credentialAction("chrome", user.CredentialRevisions()), From: &tgbotapi.User{ID: user.TelegramUserID},
 		Message: &tgbotapi.Message{MessageID: 1, Chat: &tgbotapi.Chat{ID: user.TelegramUserID, Type: "private"}},
 	})
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
@@ -927,7 +938,7 @@ func TestTelegramChromeRollsBackMiniAppSaveDuringAcknowledgment(t *testing.T) {
 	commit = func() error { return nil }
 	for _, phase := range []string{"before Finish", "after Finish"} {
 		b.handleCallback(ctx, &tgbotapi.CallbackQuery{
-			ID: "chrome-finished", Data: fmt.Sprintf("connect:chrome:%d", owner.CredentialRevision),
+			ID: "chrome-finished", Data: credentialAction("chrome", owner.CredentialRevisions()),
 			From:    &tgbotapi.User{ID: user.TelegramUserID},
 			Message: &tgbotapi.Message{MessageID: 2, Chat: &tgbotapi.Chat{ID: user.TelegramUserID, Type: "private"}},
 		})
@@ -938,13 +949,20 @@ func TestTelegramChromeRollsBackMiniAppSaveDuringAcknowledgment(t *testing.T) {
 	}
 }
 
-func TestTelegramConnectDuringPasswordVerificationShowsChoice(t *testing.T) {
+func TestTelegramRoutesCommandsDuringPasswordVerification(t *testing.T) {
 	ctx := t.Context()
 	var deleted atomic.Int32
-	var menu atomic.Bool
-	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+	var menu, watches, help atomic.Bool
+	var b *Bot
+	b = testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/deleteMessage") {
 			deleted.Add(1)
+		}
+		switch r.FormValue("text") {
+		case b.catalog.T("en", "errors.no_watches"):
+			watches.Store(true)
+		case b.catalog.T("en", "help.text"):
+			help.Store(true)
 		}
 		if strings.Contains(r.FormValue("reply_markup"), "connect:chrome:") {
 			menu.Store(true)
@@ -967,18 +985,88 @@ func TestTelegramConnectDuringPasswordVerificationShowsChoice(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("login did not start")
 	}
-	const command = "/connect"
-	b.handleUpdate(ctx, tgbotapi.Update{Message: &tgbotapi.Message{
-		MessageID: 20, From: &tgbotapi.User{ID: user.TelegramUserID},
-		Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
-		Text: command, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(command)}},
-	}})
+	update := func(text string, id int) {
+		b.handleUpdate(ctx, tgbotapi.Update{Message: &tgbotapi.Message{
+			MessageID: id, From: &tgbotapi.User{ID: user.TelegramUserID},
+			Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
+			Text: text, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(text)}},
+		}})
+	}
+	update("/watches", 20)
+	update("/help", 21)
+	update("/synthetic_password", 22)
+	if !watches.Load() || !help.Load() || deleted.Load() != 1 {
+		t.Fatalf("verification did not route known commands and scrub input: watches=%v help=%v deleted=%d",
+			watches.Load(), help.Load(), deleted.Load())
+	}
+	update("/connect", 23)
 	releaseLogin()
 	b.workers.Wait()
-	if deleted.Load() != 0 || !menu.Load() {
+	if deleted.Load() != 1 || !menu.Load() {
 		t.Fatalf("connect command did not show the mode menu: deleted=%d menu=%v", deleted.Load(), menu.Load())
 	}
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("late verification saved a password after /connect: %v", err)
+	}
+}
+
+func TestChromeWidgetUsesBothRevisionsAndAppliesChoiceWhenAcknowledgmentFails(t *testing.T) {
+	ctx := t.Context()
+	var acknowledgments atomic.Int32
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintf(w, `{"ticket":%q}`, strings.Repeat("a", 64))
+	}))
+	t.Cleanup(worker.Close)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/answerWidgetQuery") {
+			acknowledgments.Add(1)
+			http.Error(w, `{"ok":false,"description":"expired"}`, http.StatusBadRequest)
+			return
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+	if err := b.db.ConfirmBrowserLogin(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	current, err := b.db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := b.db.StartCredentialAttempt(ctx, current, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attempt.Finish()
+	if err := b.db.PrepareCredentialAttempt(attempt.Context(), b.cryptor, current,
+		luxmed.Credentials{Login: "fixture", Password: "synthetic"}, attempt); err != nil {
+		t.Fatal(err)
+	}
+	click := func(action string) {
+		query := &widgetQuery{
+			ID: "test-click", MessageID: 1, Data: action,
+			From: &tgbotapi.User{ID: user.TelegramUserID},
+			Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"},
+		}
+		query.Type.Type = "data"
+		b.handleWidgetQuery(ctx, query)
+	}
+	click(credentialAction("chrome", user.CredentialRevisions()))
+	if err := attempt.Context().Err(); err != nil {
+		t.Fatalf("stale widget canceled a newer save: %v", err)
+	}
+	click(credentialAction("chrome", current.CredentialRevisions()))
+	if !errors.Is(attempt.Context().Err(), context.Canceled) {
+		t.Fatal("current widget did not cancel the attached save")
+	}
+	fresh, err := b.db.UserByID(ctx, user.ID)
+	if err != nil || fresh.CredentialSaveRevision != current.CredentialSaveRevision+1 || acknowledgments.Load() != 2 {
+		t.Fatalf("widget did not apply Chrome after the failed acknowledgment: revisions=%+v acknowledgments=%d err=%v",
+			fresh.CredentialRevisions(), acknowledgments.Load(), err)
 	}
 }

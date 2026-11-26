@@ -22,47 +22,52 @@ func (state *flow) receivesCredential(message *tgbotapi.Message) bool {
 		return !message.IsCommand()
 	case flowAccountPass, flowAccountCheck:
 		command := message.Command()
-		return command != "cancel" && command != "logout_luxmed" && command != "connect"
+		if command == "logout_luxmed" || command == "invite" {
+			return false
+		}
+		for _, registered := range registeredCommands {
+			if command == registered.name {
+				return false
+			}
+		}
+		return true
 	default:
 		return false
 	}
 }
 
-func chromeButton(action string) (revision *int64, switchMode, ok bool) {
-	if action == "connect:open" || action == "connect:chrome" {
-		return nil, false, true
-	}
-	name, value, found := strings.Cut(action, ":")
-	if !found || name != "connect" {
-		return nil, false, false
-	}
-	mode, number, found := strings.Cut(value, ":")
-	if !found || (mode != "chrome" && mode != "switch") {
-		return nil, false, false
-	}
-	rev, err := strconv.ParseInt(number, 10, 64)
-	if err != nil || rev < 0 {
-		return nil, false, false
-	}
-	return &rev, mode == "switch", true
+func credentialAction(mode string, revisions domain.CredentialRevisions) string {
+	return "connect:" + mode + ":" + strconv.FormatInt(revisions.CredentialRevision, 10) +
+		":" + strconv.FormatInt(revisions.CredentialSaveRevision, 10)
 }
 
-func forgetButton(action string) (int64, bool) {
-	raw, found := strings.CutPrefix(action, "connect:forget:")
-	if !found {
-		return 0, false
+func credentialButton(action string) (mode string, revisions *domain.CredentialRevisions) {
+	tail, valid := strings.CutPrefix(action, "connect:")
+	if !valid {
+		return "", nil
 	}
-	revision, err := strconv.ParseInt(raw, 10, 64)
-	return revision, err == nil && revision >= 0
+	mode, raw, _ := strings.Cut(tail, ":")
+	switch mode {
+	case "chrome", "open", "switch", "forget":
+	default:
+		return "", nil
+	}
+	modeRevision, saveRevision, _ := strings.Cut(raw, ":")
+	revision, modeErr := strconv.ParseInt(modeRevision, 10, 64)
+	save, saveErr := strconv.ParseInt(saveRevision, 10, 64)
+	if modeErr != nil || saveErr != nil || revision < 0 || save < 0 {
+		return mode, nil
+	}
+	return mode, &domain.CredentialRevisions{CredentialRevision: revision, CredentialSaveRevision: save}
 }
 
 // Capture the choice before reading the database or acknowledging the callback.
 func (b *Bot) selectChrome(telegramID int64, action string) *storage.ChromeChoice {
-	revision, switchMode, ok := chromeButton(action)
-	if !ok || b.cfg.Browsers[telegramID] == nil {
+	mode, revisions := credentialButton(action)
+	if revisions == nil || (mode != "chrome" && mode != "switch") || b.cfg.Browsers[telegramID] == nil {
 		return nil
 	}
-	return b.db.SelectBrowserLoginAtRevision(telegramID, revision, switchMode)
+	return b.db.SelectBrowserLogin(telegramID, "", *revisions, mode == "switch")
 }
 
 func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed.Credentials) {

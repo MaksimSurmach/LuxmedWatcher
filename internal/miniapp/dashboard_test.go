@@ -228,7 +228,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	chatAttempt, err := db.StartCredentialAttempt(ctx, current, "")
+	chatAttempt, err := db.StartCredentialAttempt(ctx, current, "new-chat-attempt")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -237,6 +237,12 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		chatAttempt.Context(), cryptor, current, luxmed.Credentials{Login: "chat", Password: "fixture"}, chatAttempt,
 	); err != nil {
 		t.Fatal(err)
+	}
+	request("connect", beforeClick, origin, token, http.StatusPreconditionFailed)
+	request("connect", beforeClick, origin, token, http.StatusPreconditionFailed, "new-chat-attempt")
+	request("connect", fmt.Sprintf(`{"CredentialRevision":%d}`, current.CredentialRevision), origin, token, http.StatusPreconditionFailed)
+	if err := chatAttempt.Context().Err(); err != nil {
+		t.Fatalf("stale Chrome button canceled a newer save at the same mode revision: %v", err)
 	}
 	request("connect", revisions(token), origin, token, http.StatusOK)
 	if !errors.Is(chatAttempt.Context().Err(), context.Canceled) {

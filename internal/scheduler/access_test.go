@@ -394,7 +394,7 @@ func TestRejectedPasswordSubmissionKeepsAcceptedChromeChoice(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			choice := db.SelectBrowserLoginAtRevision(user.TelegramUserID, &user.CredentialRevision, false)
+			choice := db.SelectBrowserLogin(user.TelegramUserID, "", user.CredentialRevisions(), false)
 			submitted := user
 			expected := storage.ErrCredentialsChanged
 			if busy {
@@ -418,7 +418,11 @@ func TestRejectedPasswordSubmissionKeepsAcceptedChromeChoice(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			retry := db.SelectBrowserLogin(user.TelegramUserID, "rejected", &user.CredentialRevision, false)
+			stale := db.SelectBrowserLogin(user.TelegramUserID, "rejected", user.CredentialRevisions(), false)
+			if err := db.ChooseBrowserLogin(ctx, current, stale); !errors.Is(err, storage.ErrCredentialsChanged) {
+				t.Fatalf("old choice reused the previous save revision: %v", err)
+			}
+			retry := db.SelectBrowserLogin(user.TelegramUserID, "", current.CredentialRevisions(), false)
 			if err := db.ChooseBrowserLogin(ctx, current, retry); err != nil {
 				t.Fatalf("a rejected submission blocked reopening the current Chrome mode: %v", err)
 			}

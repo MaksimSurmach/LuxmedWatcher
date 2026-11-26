@@ -53,21 +53,17 @@ func (b *Bot) handleWidgetQuery(ctx context.Context, query *widgetQuery) {
 	attempt := b.selectChrome(query.From.ID, query.Data)
 	if _, err := b.api.MakeRequest("answerWidgetQuery", tgbotapi.Params{"widget_query_id": query.ID}); err != nil {
 		b.logger.Warn("answer Telegram widget query failed")
-		return
 	}
 	b.handleAction(ctx, query.From.ID, query.Data, attempt)
 }
 
 func validWidgetAction(action string) bool {
-	if _, _, ok := chromeButton(action); ok {
-		return true
-	}
-	if _, ok := forgetButton(action); ok {
+	if mode, _ := credentialButton(action); mode != "" {
 		return true
 	}
 
 	switch action {
-	case "account", "app", "app:history", "connect:chrome", "connect:forget", "connect:open", "connect:password", "history", "menu", "new", "settings", "settings:language", "watches":
+	case "account", "app", "app:history", "connect:password", "history", "menu", "new", "settings", "settings:language", "watches":
 		return true
 	}
 	if locale, ok := strings.CutPrefix(action, "lang:"); ok {

@@ -729,6 +729,9 @@ func TestCredentialMigrationAndModeSwitch(t *testing.T) {
 		watchBeforeOpen, err := db.Watch(ctx, id)
 		must(err)
 		must(db.ConfirmBrowserLogin(ctx, user))
+		if err := db.ConfirmBrowserLogin(ctx, user); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("replayed Chrome choice reused the save revision: %v", err)
+		}
 		must(db.MarkWatchCheckedForMode(ctx, user, watchBeforeOpen, true, ""))
 		legacyAfterOpen, err := db.LuxMedAccount(ctx, user.ID)
 		must(err)
@@ -757,8 +760,7 @@ func TestCredentialMigrationAndModeSwitch(t *testing.T) {
 		if len(ids) != 0 {
 			t.Fatal("password mode scheduled browser renewal")
 		}
-		revision := current.CredentialRevision
-		choice := db.SelectBrowserLoginAtRevision(user.TelegramUserID, &revision, true)
+		choice := db.SelectBrowserLogin(user.TelegramUserID, "", current.CredentialRevisions(), true)
 		must(db.ChooseBrowserLogin(ctx, current, choice))
 		if _, err := db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 			t.Fatalf("switching to Chrome did not delete the account: %v", err)
@@ -1256,10 +1258,10 @@ func TestChromeSelectionRestoresMigratedLoginAfterOverlappingSave(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := db.ChooseBrowserLogin(ctx, current, db.SelectBrowserLogin(user.TelegramUserID, "other", &user.CredentialRevision, false)); !errors.Is(err, ErrCredentialsChanged) {
+		if err := db.ChooseBrowserLogin(ctx, current, db.SelectBrowserLogin(user.TelegramUserID, "other", user.CredentialRevisions(), false)); !errors.Is(err, ErrCredentialsChanged) {
 			t.Fatalf("unrelated or stale tab undid the login: %v", err)
 		}
-		if err := db.ChooseBrowserLogin(ctx, current, db.SelectBrowserLogin(user.TelegramUserID, "first", &user.CredentialRevision, false)); err != nil {
+		if err := db.ChooseBrowserLogin(ctx, current, db.SelectBrowserLogin(user.TelegramUserID, "first", user.CredentialRevisions(), false)); err != nil {
 			t.Fatal(err)
 		}
 		a, err := db.LuxMedAccount(ctx, user.ID)
@@ -1298,7 +1300,7 @@ func TestCredentialTransitionsKeepModeAccessAndWatchesTogether(t *testing.T) {
 		pending, _, err := beginCredentialAttempt(db, ctx, key, user, creds, "pending")
 		must(err)
 		defer pending.Finish()
-		must(db.ChooseBrowserLogin(ctx, user, db.SelectBrowserLogin(user.TelegramUserID, "pending", &user.CredentialRevision, false)))
+		must(db.ChooseBrowserLogin(ctx, user, db.SelectBrowserLogin(user.TelegramUserID, "pending", user.CredentialRevisions(), false)))
 		if _, err := db.SaveCredentialAttempt(ctx, pending); !errors.Is(err, ErrCredentialsChanged) {
 			t.Fatalf("late completion crossed a Chrome choice: %v", err)
 		}
@@ -1322,7 +1324,7 @@ func TestCredentialTransitionsKeepModeAccessAndWatchesTogether(t *testing.T) {
 		must(err)
 		user, err = db.UserByID(ctx, user.ID)
 		must(err)
-		if err := db.ChooseBrowserLogin(ctx, user, db.SelectBrowserLogin(user.TelegramUserID, "other", &user.CredentialRevision, false)); !errors.Is(err, ErrCredentialsChanged) {
+		if err := db.ChooseBrowserLogin(ctx, user, db.SelectBrowserLogin(user.TelegramUserID, "other", user.CredentialRevisions(), false)); !errors.Is(err, ErrCredentialsChanged) {
 			t.Fatalf("wrong candidate undid the current login: %v", err)
 		}
 		_, access, err = db.WatchesWithReconnectState(ctx, user.ID)
@@ -1374,13 +1376,13 @@ func TestEarlierChromeChoiceCannotOverrideNewerPasswordIntent(t *testing.T) {
 			t.Fatal(err)
 		}
 		defer old.Finish()
-		firstChoice := db.SelectBrowserLogin(user.TelegramUserID, "", &user.CredentialRevision, false)
+		firstChoice := db.SelectBrowserLogin(user.TelegramUserID, "", user.CredentialRevisions(), false)
 		newer, probe, err := beginCredentialAttempt(db, ctx, key, user, creds, "new")
 		if err != nil {
 			t.Fatal(err)
 		}
 		defer newer.Finish()
-		for _, choice := range []*ChromeChoice{firstChoice, db.SelectBrowserLogin(user.TelegramUserID, "old", &user.CredentialRevision, false)} {
+		for _, choice := range []*ChromeChoice{firstChoice, db.SelectBrowserLogin(user.TelegramUserID, "old", user.CredentialRevisions(), false)} {
 			if err := db.ChooseBrowserLogin(ctx, user, choice); !errors.Is(err, ErrCredentialsChanged) {
 				t.Fatalf("earlier Chrome intent overrode the later save: %v", err)
 			}
@@ -1393,7 +1395,7 @@ func TestEarlierChromeChoiceCannotOverrideNewerPasswordIntent(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := db.ChooseBrowserLogin(ctx, current, db.SelectBrowserLogin(user.TelegramUserID, "", &user.CredentialRevision, false)); !errors.Is(err, ErrCredentialsChanged) {
+		if err := db.ChooseBrowserLogin(ctx, current, db.SelectBrowserLogin(user.TelegramUserID, "", user.CredentialRevisions(), false)); !errors.Is(err, ErrCredentialsChanged) {
 			t.Fatalf("stale third window could roll back a completed login: %v", err)
 		}
 	})
@@ -1443,7 +1445,7 @@ func TestExplicitChromeSwitchOrdersAgainstPasswordReplacement(t *testing.T) {
 				if scenario == "linked commit" || scenario == "different commit" {
 					id = "replacement"
 				}
-				choice := db.SelectBrowserLogin(owner.TelegramUserID, id, &owner.CredentialRevision, true)
+				choice := db.SelectBrowserLogin(owner.TelegramUserID, id, owner.CredentialRevisions(), true)
 				err = db.ChooseBrowserLogin(ctx, current, choice)
 				if scenario == "unlinked commit" || scenario == "different commit" {
 					if !errors.Is(err, ErrCredentialsChanged) {

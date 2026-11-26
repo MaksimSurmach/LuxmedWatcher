@@ -152,8 +152,8 @@ function accountSection(compact = false) {
   </section>`;
 }
 
-async function signIn(revision, attemptID) {
-  const { url } = await api('connect', { CredentialRevision: revision }, attemptID);
+async function signIn(revisions, attemptID) {
+  const { url } = await api('connect', revisions, attemptID);
   let target;
   try {
     target = new URL(url);
@@ -168,6 +168,7 @@ async function signIn(revision, attemptID) {
 
 function bindAccount() {
   const { SavedLogin, CredentialRevision, CredentialSaveRevision } = state;
+  const revisions = { CredentialRevision, CredentialSaveRevision };
   async function refreshStaleAction(error) {
     if (error.key !== 'error.stale') throw error;
     await switchTab(tab, { reload: true });
@@ -198,7 +199,7 @@ function bindAccount() {
   const failure = main.querySelector('[data-account-error]');
   const connect = main.querySelector('#connect');
   if (connect) connect.onclick = () => void run(connect, () =>
-    chooseChrome((id) => signIn(CredentialRevision, id), displayedAttempt()), failure);
+    chooseChrome((id) => signIn(revisions, id), displayedAttempt()), failure);
 
   const form = main.querySelector('#credentials');
   form.onsubmit = (event) => {
@@ -230,7 +231,7 @@ function bindAccount() {
   };
   const forget = main.querySelector('#forget-credentials');
   if (forget) forget.onclick = () => void run(forget, () => chooseChrome(async (id) => {
-    await api('forget-credentials', { CredentialRevision }, id);
+    await api('forget-credentials', revisions, id);
     await switchTab(tab);
   }, SavedLogin ? displayedAttempt() : null), failure);
   const check = main.querySelector('#account-check');
