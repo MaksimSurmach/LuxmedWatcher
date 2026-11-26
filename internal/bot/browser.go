@@ -124,19 +124,19 @@ func (c *reconnectHTTP) Do(req *http.Request) (*http.Response, error) {
 }
 
 func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
+	if b.cfg.Browsers == nil {
+		_, err := b.db.LuxMedAccount(ctx, user.ID)
+		return err
+	}
 	if b.runner != nil {
 		_, err := b.runner.CheckBrowserSession(ctx, user)
 		return err
 	}
-	if b.cfg.Browsers != nil {
-		browser := b.cfg.Browsers[user.TelegramUserID]
-		if browser == nil {
-			return luxmed.ErrAuthentication
-		}
-		return browser.Check(ctx)
+	browser := b.cfg.Browsers[user.TelegramUserID]
+	if browser == nil {
+		return luxmed.ErrAuthentication
 	}
-	_, err := b.db.LuxMedAccount(ctx, user.ID)
-	return err
+	return browser.Check(ctx)
 }
 
 func accountCheckMessage(err error) string {
@@ -174,7 +174,7 @@ func (b *Bot) withAccountRecovery(
 
 func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if b.cfg.Browsers == nil {
-		b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
+		b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountLogin})
 		b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
 		return
 	}
@@ -182,7 +182,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if !user.IsActive() || browser == nil {
 		return
 	}
-	b.clearFlow(user.ID)
+	b.clearFlow(user.TelegramUserID)
 	if b.cfg.MiniApp != nil {
 		b.showMiniApp(ctx, user)
 		return

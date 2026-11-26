@@ -138,6 +138,16 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	}
 	token := session(signed)
 	otherToken := session(signTelegram(other.TelegramUserID, 12, time.Now(), priv))
+	revision := func(identity string) string {
+		t.Helper()
+		view := request("load", "{}", origin, identity, http.StatusOK)
+		var snapshot struct{ CredentialRevision *int64 }
+		if err := json.Unmarshal(view.Body.Bytes(), &snapshot); err != nil || snapshot.CredentialRevision == nil {
+			t.Fatalf("invalid account revision: %s", view.Body)
+		}
+		return fmt.Sprintf(`{"CredentialRevision":%d}`, *snapshot.CredentialRevision)
+	}
+	legacyRevision := revision(token)
 	cryptor, err := security.NewCryptor(make([]byte, 32))
 	if err != nil {
 		t.Fatal(err)
@@ -154,14 +164,14 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err := db.EncryptLegacyLogins(ctx, cryptor); err != nil {
 		t.Fatal(err)
 	}
-	if res := request("connect", "{}", origin, token, http.StatusOK); !strings.Contains(res.Body.String(), "viewer?ticket=fixture") {
+	if res := request("connect", legacyRevision, origin, token, http.StatusOK); !strings.Contains(res.Body.String(), "viewer?ticket=fixture") {
 		t.Fatalf("Chrome viewer link is missing: %s", res.Body)
 	}
 	legacy, err := db.LuxMedAccount(ctx, owner.ID)
 	if err != nil || legacy.UseSavedLogin || legacy.EncryptedPassword == "" {
 		t.Fatalf("Chrome opening changed the migrated account: %v", err)
 	}
-	request("forget-credentials", "{}", origin, token, http.StatusNoContent)
+	request("forget-credentials", revision(token), origin, token, http.StatusNoContent)
 	if _, err := db.LuxMedAccount(ctx, owner.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("explicit Mini App removal retained migrated credentials: %v", err)
 	}
@@ -192,10 +202,11 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	request("credentials", validLogin, origin, "", http.StatusUnauthorized)
 	request("credentials", validLogin, "https://other.example", token, http.StatusUnauthorized)
 	request("credentials", `{"Login":"  ","Password":"x"}`, origin, token, http.StatusBadRequest)
+	beforeCommit := revision(token)
 	request("credentials", validLogin, origin, token, http.StatusNoContent, "commit-first")
-	request("connect", "{}", origin, token, http.StatusPreconditionFailed, "different-attempt")
-	request("connect", "{}", origin, token, http.StatusOK, "commit-first")
-	request("connect", "{}", origin, token, http.StatusOK, "click-first")
+	request("connect", beforeCommit, origin, token, http.StatusPreconditionFailed, "different-attempt")
+	request("connect", beforeCommit, origin, token, http.StatusOK, "commit-first")
+	request("connect", revision(token), origin, token, http.StatusOK, "click-first")
 	request("credentials", validLogin, origin, token, http.StatusPreconditionFailed, "click-first")
 	current, err := db.UserByID(ctx, owner.ID)
 	if err != nil {
@@ -211,7 +222,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	request("connect", "{}", origin, token, http.StatusOK)
+	request("connect", revision(token), origin, token, http.StatusOK)
 	if !errors.Is(chatAttempt.Context().Err(), context.Canceled) {
 		t.Fatal("Mini App did not cancel the active chat request")
 	}
@@ -219,10 +230,33 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		t.Fatalf("late chat login crossed the Mini App Chrome choice: %v", err)
 	}
 	chatAttempt.Finish()
+	staleRevision := revision(token)
 	request("credentials", validLogin, origin, token, http.StatusNoContent)
-	request("connect", "{}", origin, token, http.StatusPreconditionFailed)
+	request("connect", revision(token), origin, token, http.StatusPreconditionFailed)
+	current, err = db.UserByID(ctx, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := db.StartCredentialAttempt(ctx, current, "replacement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Finish()
+	if err := db.PrepareCredentialAttempt(replacement.Context(), cryptor, current,
+		luxmed.Credentials{Login: "patient", Password: secret}, replacement); err != nil {
+		t.Fatal(err)
+	}
+	request("connect", staleRevision, origin, token, http.StatusPreconditionFailed)
+	request("forget-credentials", legacyRevision, origin, token, http.StatusPreconditionFailed)
+	if err := replacement.Context().Err(); err != nil {
+		t.Fatalf("outdated tab canceled the replacement: %v", err)
+	}
+	if _, err := db.SaveCredentialAttempt(replacement.Context(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	replacement.Finish()
 	request("credentials", `{"Login":"patient","Password":"wrong"}`, origin, token, http.StatusConflict)
-	request("forget-credentials", "{}", origin, otherToken, http.StatusNoContent)
+	request("forget-credentials", revision(otherToken), origin, otherToken, http.StatusNoContent)
 	saved, err := db.LoginAccount(ctx, owner.ID, true)
 	if err != nil || saved.Login != "" || saved.EncryptedPassword == "" {
 		t.Fatal("expected encrypted credentials only", err)
@@ -243,10 +277,11 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 			t.Fatal("incorrect or unsafe account view")
 		}
 	}
-	request("forget-credentials", "{}", origin, token, http.StatusNoContent)
+	request("forget-credentials", revision(token), origin, token, http.StatusNoContent)
 	if _, err := db.LuxMedAccount(ctx, owner.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatal("credentials retained", err)
 	}
+	request("connect", revision(token), origin, token, http.StatusOK)
 	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), "Other") {
 		t.Fatalf("other user's search missing: %s", res.Body)
 	}

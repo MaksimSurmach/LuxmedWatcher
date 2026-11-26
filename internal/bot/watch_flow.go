@@ -105,7 +105,7 @@ func (b *Bot) showDoctorResults(user domain.User, state *flow, query string) {
 
 func (b *Bot) showDateStep(user domain.User, state *flow) {
 	state.Kind = flowWatchDate
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 	var choices []tgbotapi.InlineKeyboardButton
 	for _, days := range []int{7, 14, 30} {
 		choices = append(choices, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.next_days", days), fmt.Sprintf("date:%d", days)))
@@ -260,7 +260,7 @@ func (b *Bot) watchSummary(user domain.User, watch domain.Watch) string {
 }
 
 func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {
-	state := b.getFlow(user.ID)
+	state := b.getFlow(user.TelegramUserID)
 	if state == nil || state.Kind != flowWatchConfirm || token == "" || token != state.Confirmation {
 		return
 	}
@@ -287,18 +287,18 @@ func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
-	b.clearFlow(user.ID)
+	b.clearFlow(user.TelegramUserID)
 	b.sendWatchStep(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
 }
 
 func (b *Bot) editWatch(ctx context.Context, user domain.User, watch domain.Watch) {
 	state := &flow{Kind: flowWatchCity, Watch: watch}
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 	b.showCityPicker(ctx, user, false, 0)
 }
 
 func (b *Bot) sendWatchStep(user domain.User, text string, markup tgbotapi.InlineKeyboardMarkup) {
-	state := b.getFlow(user.ID)
+	state := b.getFlow(user.TelegramUserID)
 	if state != nil {
 		var step int
 		switch state.Kind {
@@ -334,7 +334,7 @@ func (b *Bot) sendWatchStep(user domain.User, text string, markup tgbotapi.Inlin
 }
 
 func (b *Bot) backWatch(ctx context.Context, user domain.User, from string) {
-	state := b.getFlow(user.ID)
+	state := b.getFlow(user.TelegramUserID)
 	if state == nil || string(state.Kind) != from {
 		return
 	}

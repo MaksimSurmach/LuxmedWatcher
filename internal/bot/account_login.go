@@ -47,6 +47,15 @@ func chromeButton(action string) (revision *int64, switchMode, ok bool) {
 	return &rev, mode == "switch", true
 }
 
+func forgetButton(action string) (int64, bool) {
+	raw, found := strings.CutPrefix(action, "connect:forget:")
+	if !found {
+		return 0, false
+	}
+	revision, err := strconv.ParseInt(raw, 10, 64)
+	return revision, err == nil && revision >= 0
+}
+
 // Capture the choice before reading the database or acknowledging the callback.
 func (b *Bot) selectChrome(telegramID int64, action string) *storage.ChromeChoice {
 	revision, switchMode, ok := chromeButton(action)
@@ -69,7 +78,7 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 		return
 	}
 	pending := &flow{Kind: flowAccountCheck, cancel: cancel}
-	b.setFlow(user.ID, pending)
+	b.setFlow(user.TelegramUserID, pending)
 	b.workers.Go(func() {
 		defer cancel()
 		err := b.saveLogin(user, creds, attempt)
@@ -79,7 +88,7 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 		if err != nil && !canceled {
 			retry = &flow{Kind: flowAccountPass, Login: creds.Login}
 		}
-		if !b.completeLogin(user.ID, pending, retry) || canceled {
+		if !b.completeLogin(user.TelegramUserID, pending, retry) || canceled {
 			return
 		}
 		if err != nil {
@@ -104,16 +113,16 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 }
 
 // Completion changes the flow only if it still owns the verification slot.
-func (b *Bot) completeLogin(userID int64, pending, retry *flow) bool {
+func (b *Bot) completeLogin(telegramID int64, pending, retry *flow) bool {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	if b.flowState[userID] != pending {
+	if b.flowState[telegramID] != pending {
 		return false
 	}
 	if retry == nil {
-		delete(b.flowState, userID)
+		delete(b.flowState, telegramID)
 	} else {
-		b.flowState[userID] = retry
+		b.flowState[telegramID] = retry
 	}
 	return true
 }

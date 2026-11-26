@@ -35,7 +35,7 @@ func TestSearchWritesRequireCurrentCredentialRevision(t *testing.T) {
 		must(db.BeginLuxMedReconnectForMode(ctx, user))
 		episode, err := db.LuxMedReconnectEpisode(ctx, user.ID)
 		must(err)
-		must(db.ForgetCredentials(ctx, user.ID))
+		must(db.ForgetCredentials(ctx, user))
 
 		now := time.Now()
 		update := SearchHistoryUpdate{

@@ -135,7 +135,7 @@ func TestCredentialVerificationCannotCommitAfterDeadlineOrChromeChoice(t *testin
 					// A transport can return a result while cancellation propagates.
 					return nil
 				}
-				return db.ForgetCredentials(ctx, user.ID)
+				return db.ForgetCredentials(ctx, user)
 			}}
 			runner.newClient = func(bool) luxmed.Client { return client }
 			want := storage.ErrCredentialsChanged
@@ -178,6 +178,10 @@ func TestPasswordSearchResultCannotCrossChromeSwitch(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
+			user, err = db.UserByID(ctx, user.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
 			runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: {}})
 			if err := db.BeginLuxMedReconnect(ctx, user.ID); err != nil {
 				t.Fatal(err)
@@ -188,7 +192,7 @@ func TestPasswordSearchResultCannotCrossChromeSwitch(t *testing.T) {
 			}
 			runner.newClient = func(bool) luxmed.Client {
 				return &fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) {
-					if err := db.ForgetCredentials(ctx, user.ID); err != nil {
+					if err := db.ForgetCredentials(ctx, user); err != nil {
 						t.Fatal(err)
 					}
 					if rejection {
@@ -414,7 +418,7 @@ func TestRejectedPasswordSubmissionKeepsAcceptedChromeChoice(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			retry := db.SelectBrowserLogin(user.TelegramUserID, "rejected")
+			retry := db.SelectBrowserLogin(user.TelegramUserID, "rejected", &user.CredentialRevision)
 			if err := db.ChooseBrowserLogin(ctx, current, retry); err != nil {
 				t.Fatalf("a rejected submission blocked reopening the current Chrome mode: %v", err)
 			}

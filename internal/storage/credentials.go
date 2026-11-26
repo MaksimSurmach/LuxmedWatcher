@@ -126,16 +126,10 @@ func (db *DB) ChooseBrowserLogin(ctx context.Context, user domain.User, choice *
 	if choice.generation != choice.state.generation {
 		return ErrCredentialsChanged
 	}
-	if choice.switchMode {
-		if choice.shownRevision == nil || user.CredentialRevision != *choice.shownRevision {
-			return ErrCredentialsChanged
-		}
-		return db.switchToBrowserLogin(ctx, user)
-	}
 	if choice.attempt != nil && choice.attempt.candidate != nil {
 		candidate := choice.attempt.candidate
-		if candidate.owner.ID == user.ID && !candidate.previous.UseSavedLogin {
-			err := db.chooseChromeDuringSave(ctx, candidate)
+		if candidate.owner.ID == user.ID && candidate.previous.UseSavedLogin == choice.switchMode {
+			err := db.chooseChromeDuringSave(ctx, candidate, choice.switchMode)
 			if !errors.Is(err, ErrCredentialsChanged) {
 				return err
 			}
@@ -143,6 +137,9 @@ func (db *DB) ChooseBrowserLogin(ctx context.Context, user domain.User, choice *
 	}
 	if choice.shownRevision != nil && user.CredentialRevision != *choice.shownRevision {
 		return ErrCredentialsChanged
+	}
+	if choice.switchMode {
+		return db.switchToBrowserLogin(ctx, user)
 	}
 	return db.ConfirmBrowserLogin(ctx, user)
 }
@@ -182,7 +179,7 @@ func (db *DB) switchToBrowserLogin(ctx context.Context, owner domain.User) error
 	})
 }
 
-func (db *DB) chooseChromeDuringSave(ctx context.Context, candidate *credentialCandidate) error {
+func (db *DB) chooseChromeDuringSave(ctx context.Context, candidate *credentialCandidate, switchMode bool) error {
 	owner, previous := candidate.owner, candidate.previous
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -213,16 +210,17 @@ func (db *DB) chooseChromeDuringSave(ctx context.Context, candidate *credentialC
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	if savedMode != (revision == owner.CredentialRevision+1) {
+	committed := revision == owner.CredentialRevision+1
+	if savedMode != (switchMode || committed) {
 		return ErrCredentialsChanged
 	}
-	if revision == owner.CredentialRevision {
+	if !committed && !switchMode {
 		return tx.Commit()
 	}
-	if sealed != candidate.sealed {
+	if committed && sealed != candidate.sealed || !committed && sealed != previous.EncryptedPassword {
 		return ErrCredentialsChanged
 	}
-	if previous.UserID == owner.ID {
+	if !switchMode && previous.UserID == owner.ID {
 		if err := upsertLuxMedAccount(ctx, tx, previous); err != nil {
 			return err
 		}

@@ -120,7 +120,7 @@ func TestFirstPasswordLoginSavesCredentialsWhenHistoryIsUnavailable(t *testing.T
 	b := testBot(t)
 	user := createUser(t, b, 10, domain.UserStatusActive)
 	b.newClient = func(bool) luxmed.Client { return authClient{historyErr: luxmed.ErrUnavailable} }
-	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "example"})
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountPass, Login: "example"})
 	b.handleText(ctx, user, "example password")
 	b.workers.Wait()
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
@@ -164,7 +164,7 @@ func TestPasswordLoginDuringCooldownSavesCredentialsAndQueuesOnlyActiveSearches(
 		t.Fatalf("reserve search before login: reserved=%v, err=%v", reserved, err)
 	}
 
-	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "example"})
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountPass, Login: "example"})
 	b.newClient = func(bool) luxmed.Client { return authClient{err: errors.New("login failed")} }
 	b.handleText(ctx, user, "example password")
 	b.workers.Wait()
@@ -215,11 +215,65 @@ func TestFailedCredentialMessageDeletionStopsSignIn(t *testing.T) {
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
 	})
 	user := createUser(t, b, 42, domain.UserStatusActive)
-	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "fixture"})
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountPass, Login: "fixture"})
 	b.newClient = func(bool) luxmed.Client { t.Fatal("unexpected authentication"); return nil }
+	if err := b.db.Close(); err != nil {
+		t.Fatal(err)
+	}
 	b.handleUpdate(t.Context(), tgbotapi.Update{Message: &tgbotapi.Message{MessageID: 1, Text: "test password", From: &tgbotapi.User{ID: 42}, Chat: &tgbotapi.Chat{ID: 42, Type: "private"}}})
-	if !explained || b.getFlow(user.ID) != nil {
+	if !explained || b.getFlow(user.TelegramUserID) != nil {
 		t.Fatal("failed deletion did not stop and explain sign-in")
+	}
+}
+
+func TestCredentialMessagesAreDeletedWhenUserStoreIsUnavailable(t *testing.T) {
+	var deletions atomic.Int32
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/deleteMessage") && r.FormValue("chat_id") == "42" {
+			deletions.Add(1)
+		}
+		fmt.Fprint(w, `{"ok":true,"result":true}`)
+	})
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	if err := b.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []flowKind{flowAccountLogin, flowAccountPass} {
+		b.setFlow(user.TelegramUserID, &flow{Kind: kind})
+		b.handleUpdate(t.Context(), tgbotapi.Update{Message: &tgbotapi.Message{
+			MessageID: 1, Text: "fixture", From: &tgbotapi.User{ID: 42},
+			Chat: &tgbotapi.Chat{ID: 42, Type: "private"},
+		}})
+	}
+	if got := deletions.Load(); got != 2 {
+		t.Fatalf("deleted %d sign-in messages, want 2", got)
+	}
+}
+
+func TestWatchConfirmationAndResumeUseLocalAccountWithoutChrome(t *testing.T) {
+	ctx := t.Context()
+	b := testBot(t)
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	b.SetRunner(scheduler.NewRunner(b.db, b.cryptor, nil, time.Minute, time.Hour, false))
+	if err := b.db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
+		UserID: user.ID, EncryptedPassword: "unreadable portal fixture", Status: domain.AccountStatusActive,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b.setFlow(user.TelegramUserID, &flow{
+		Kind: flowWatchConfirm, Confirmation: "confirm",
+		Watch: domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 2},
+	})
+	b.finishWatch(ctx, user, "confirm")
+	watches, err := b.db.WatchesByUser(ctx, user.ID)
+	if err != nil || len(watches) != 1 {
+		t.Fatalf("confirmation failed with an existing local account: %v", err)
+	}
+	b.handleWatchAction(ctx, user, fmt.Sprintf("watch:pause:%d", watches[0].ID))
+	b.handleWatchAction(ctx, user, fmt.Sprintf("watch:resume:%d", watches[0].ID))
+	watch, err := b.db.Watch(ctx, watches[0].ID)
+	if err != nil || watch.Status != domain.WatchStatusActive {
+		t.Fatalf("search did not resume: status=%s err=%v", watch.Status, err)
 	}
 }
 
@@ -263,7 +317,7 @@ func TestCreateWatchThroughTelegramCallbacks(t *testing.T) {
 	}
 
 	callback("account") // Pending users may not connect an account.
-	if b.getFlow(pending.ID) != nil {
+	if b.getFlow(pending.TelegramUserID) != nil {
 		t.Fatal("pending user entered an authenticated flow")
 	}
 	message("example")
@@ -288,13 +342,13 @@ func TestCreateWatchThroughTelegramCallbacks(t *testing.T) {
 	message("09:00-13:00")
 	callback("days:weekend")
 	callback("back:watch_days") // Stale back button must not skip a step.
-	if b.getFlow(pending.ID).Kind != flowWatchInterval {
+	if b.getFlow(pending.TelegramUserID).Kind != flowWatchInterval {
 		t.Fatal("stale back button changed the current step")
 	}
 	callback("back:watch_interval")
 	message("1,2,3,4,5,6,7")
 	callback("interval:default")
-	state := b.getFlow(pending.ID)
+	state := b.getFlow(pending.TelegramUserID)
 	if state == nil || state.Kind != flowWatchConfirm {
 		t.Fatalf("did not reach review step: %+v", state)
 	}
@@ -597,7 +651,8 @@ func TestTelegramChromeOpeningKeepsMigratedCredentialsUntilExplicitRemoval(t *te
 	if err != nil || account.EncryptedPassword != sealed || opened.Load() != 1 {
 		t.Fatalf("Chrome did not open with the legacy record intact: opened=%d error=%v", opened.Load(), err)
 	}
-	b.handleAction(ctx, user.TelegramUserID, "connect:forget", nil)
+	forgetAction := fmt.Sprintf("connect:forget:%d", user.CredentialRevision)
+	b.handleAction(ctx, user.TelegramUserID, forgetAction, nil)
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("explicit removal did not delete the record: %v", err)
 	}
@@ -609,8 +664,10 @@ func TestTelegramChromeOpeningKeepsMigratedCredentialsUntilExplicitRemoval(t *te
 		t.Fatal(err)
 	}
 	b.handleAction(ctx, user.TelegramUserID, "connect:open", nil)
+	b.handleAction(ctx, user.TelegramUserID, "connect:forget", nil)
+	b.handleAction(ctx, user.TelegramUserID, forgetAction, nil)
 	if _, err := b.db.LoginAccount(ctx, user.ID, true); err != nil || opened.Load() != 1 {
-		t.Fatalf("old Chrome action switched away from saved login: opened=%d error=%v", opened.Load(), err)
+		t.Fatalf("old account actions switched away from saved login: opened=%d error=%v", opened.Load(), err)
 	}
 	revision, _, _, err := b.db.BrowserLoginMode(ctx, user.ID)
 	if err != nil {
@@ -707,7 +764,7 @@ func TestTelegramChromeCancelsInFlightPasswordVerification(t *testing.T) {
 		b.workers.Wait()
 	}()
 	b.newClient = func(bool) luxmed.Client { return blockedLoginClient{started: started, release: release} }
-	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "fixture"})
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountPass, Login: "fixture"})
 	from := &tgbotapi.User{ID: user.TelegramUserID}
 	chat := &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"}
 	done := make(chan error, 1)
@@ -745,7 +802,7 @@ func TestTelegramChromeCancelsInFlightPasswordVerification(t *testing.T) {
 	b.workers.Wait()
 	fresh, err := b.db.UserByID(ctx, user.ID)
 	if err != nil || fresh.CredentialSaveRevision != user.CredentialSaveRevision+1 ||
-		fresh.CredentialRevision != user.CredentialRevision || b.getFlow(user.ID) != nil {
+		fresh.CredentialRevision != user.CredentialRevision || b.getFlow(user.TelegramUserID) != nil {
 		t.Fatalf("Chrome did not cancel the verification: user=%+v, err=%v", fresh, err)
 	}
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
@@ -774,7 +831,7 @@ func TestTelegramLogoutCancelsPasswordVerificationAndPausesSearches(t *testing.T
 		b.workers.Wait()
 	}()
 	b.newClient = func(bool) luxmed.Client { return blockedLoginClient{started: started, release: release} }
-	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "fixture"})
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountPass, Login: "fixture"})
 	b.handleText(ctx, user, "fixture")
 	select {
 	case <-started:
@@ -901,7 +958,7 @@ func TestTelegramConnectDuringPasswordVerificationShowsChoice(t *testing.T) {
 		b.workers.Wait()
 	}()
 	b.newClient = func(bool) luxmed.Client { return blockedLoginClient{started: started, release: release} }
-	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "fixture"})
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountPass, Login: "fixture"})
 	b.handleText(ctx, user, "fixture")
 	select {
 	case <-started:

@@ -165,50 +165,44 @@ func (db *DB) CancelActiveCredentialAttempt(telegramID int64) {
 	}
 }
 
-func (db *DB) SelectBrowserLogin(telegramID int64, id string) *ChromeChoice {
+func (db *DB) SelectBrowserLogin(telegramID int64, id string, revision *int64) *ChromeChoice {
+	if id == "" {
+		return db.selectBrowserLoginAtRevision(telegramID, revision, false, false)
+	}
 	state := db.credentialOwner(telegramID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
 
-	attempt := state.active
-	if id == "" && state.pending != nil {
-		state.pending.cancel()
-		if attempt == nil {
-			attempt = state.pending
-		}
+	choice := &ChromeChoice{telegramID: telegramID, state: state, generation: state.generation, shownRevision: revision}
+	lookup := credentialAttemptKey{telegramID: telegramID, id: id}
+	canceled := &CredentialAttempt{}
+	value, exists := db.credentialAttempts.LoadOrStore(lookup, canceled)
+	if !exists {
+		db.expireCredentialAttempt(lookup, canceled)
 	}
-	generation := state.generation
-	var stale bool
-	if id != "" {
-		lookup := credentialAttemptKey{telegramID: telegramID, id: id}
-		canceled := &CredentialAttempt{}
-		value, exists := db.credentialAttempts.LoadOrStore(lookup, canceled)
-		attempt = value.(*CredentialAttempt)
-		if !exists {
-			db.expireCredentialAttempt(lookup, canceled)
-		}
-		if attempt.cancel != nil {
-			if attempt.candidate != nil {
-				generation = attempt.generation
-			} else {
-				stale = state.active != nil || (state.pending != nil && state.pending != attempt)
-			}
-		} else {
-			// A click may arrive before its password request. Its tombstone
-			// blocks that ID, while a different active save keeps its priority.
-			attempt = nil
-			stale = state.pending != nil || state.active != nil
-		}
+	attempt := value.(*CredentialAttempt)
+	if attempt.cancel == nil {
+		// The click can arrive before its own password request.
+		choice.stale = state.pending != nil || state.active != nil
+		return choice
 	}
-	if attempt != nil {
-		attempt.cancel()
+	if revision == nil || attempt.originRevision != *revision ||
+		state.pending != nil && state.pending != attempt || state.active != nil && state.active != attempt ||
+		attempt.candidate != nil && attempt.generation != state.generation {
+		choice.stale = true
+		return choice
 	}
-	return &ChromeChoice{telegramID: telegramID, state: state, generation: generation, attempt: attempt, stale: stale}
+	attempt.cancel()
+	choice.attempt = attempt
+	return choice
 }
 
 // SelectBrowserLoginAtRevision applies a Telegram button to the mode it showed.
-// An unversioned legacy button has no authority over an overlapping save.
 func (db *DB) SelectBrowserLoginAtRevision(telegramID int64, revision *int64, switchMode bool) *ChromeChoice {
+	return db.selectBrowserLoginAtRevision(telegramID, revision, switchMode, true)
+}
+
+func (db *DB) selectBrowserLoginAtRevision(telegramID int64, revision *int64, switchMode, matchCompleted bool) *ChromeChoice {
 	state := db.credentialOwner(telegramID)
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -217,23 +211,27 @@ func (db *DB) SelectBrowserLoginAtRevision(telegramID int64, revision *int64, sw
 		shownRevision: revision, switchMode: switchMode,
 	}
 	if revision == nil {
-		choice.stale = state.pending != nil || state.active != nil
+		choice.stale = switchMode || state.pending != nil || state.active != nil
 		return choice
 	}
-	if state.pending != nil && state.pending.originRevision == *revision {
-		state.pending.cancel()
-		choice.attempt = state.pending
+	if pending := state.pending; pending != nil {
+		if pending.originRevision != *revision {
+			choice.stale = true
+			return choice
+		}
+		pending.cancel()
+		choice.attempt = pending
 	}
-	for _, attempt := range []*CredentialAttempt{state.active, state.completed} {
-		if attempt == nil || attempt.originRevision != *revision {
-			continue
-		}
-		if attempt.candidate != nil && attempt.generation != state.generation {
-			continue
-		}
+	// An unadmitted request cannot hide a receipt from the same revision.
+	attempt := state.active
+	if attempt == nil && matchCompleted {
+		attempt = state.completed
+	}
+	if attempt != nil && attempt.originRevision == *revision && attempt.generation == state.generation {
 		attempt.cancel()
 		choice.attempt = attempt
-		break
+	} else if choice.attempt == nil {
+		choice.stale = state.active != nil
 	}
 	return choice
 }

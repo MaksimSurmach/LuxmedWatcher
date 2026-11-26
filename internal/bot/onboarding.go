@@ -119,7 +119,7 @@ func (b *Bot) showApp(ctx context.Context, user domain.User, tab string) {
 func (b *Bot) showStart(ctx context.Context, user domain.User, invited bool) {
 	const title = "Luxmed Watcher"
 	if !user.IsActive() {
-		b.setFlow(user.ID, &flow{Kind: flowInvite})
+		b.setFlow(user.TelegramUserID, &flow{Kind: flowInvite})
 		b.sendOnboarding(user, title, b.catalog.T(user.Locale, "flow.invite.enter"), widgetKeyboard(languageKeyboard()))
 		return
 	}
@@ -174,13 +174,14 @@ func (b *Bot) showConnect(ctx context.Context, user domain.User) {
 	if saved {
 		mode, label = "switch", "button.chrome_switch"
 	}
-	action := "connect:" + mode + ":" + strconv.FormatInt(revision, 10)
+	shownRevision := strconv.FormatInt(revision, 10)
+	action := "connect:" + mode + ":" + shownRevision
 	actions := [][]miniAppButton{
 		{b.actionButton(user, label, action)},
 		{b.actionButton(user, "button.saved_login", "connect:password")},
 	}
 	if stored {
-		actions = append(actions, []miniAppButton{b.actionButton(user, "button.delete_credentials", "connect:forget")})
+		actions = append(actions, []miniAppButton{b.actionButton(user, "button.delete_credentials", "connect:forget:"+shownRevision)})
 	}
 	actions = append(actions, []miniAppButton{b.actionButton(user, "button.menu", "menu")})
 	b.sendOnboarding(user, b.catalog.T(user.Locale, "button.connect"), b.catalog.T(user.Locale, "widget.login_method"), actions)

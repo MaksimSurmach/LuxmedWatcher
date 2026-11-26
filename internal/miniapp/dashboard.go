@@ -72,9 +72,7 @@ func (d *dashboard) handler() http.Handler {
 	mux.HandleFunc("POST "+dashboardPrefix+"watch", d.authorize(d.saveWatch))
 	mux.HandleFunc("POST "+dashboardPrefix+"status", d.authorize(d.status))
 	mux.HandleFunc("POST "+dashboardPrefix+"credentials", dashboardDeadline(d.authorize(d.saveCredentials)))
-	mux.HandleFunc("POST "+dashboardPrefix+"forget-credentials", d.authorize(func(w http.ResponseWriter, r *http.Request, user domain.User) {
-		dashboardResult(w, nil, d.db.ForgetCredentials(r.Context(), user.ID))
-	}))
+	mux.HandleFunc("POST "+dashboardPrefix+"forget-credentials", d.authorize(d.forgetCredentials))
 	mux.HandleFunc("POST "+dashboardPrefix+"account", dashboardDeadline(d.authorize(d.account)))
 	mux.HandleFunc("POST "+dashboardPrefix+"connect", d.browserLogin)
 	mux.HandleFunc("POST "+dashboardPrefix+"viewer-access", d.authorizeTelegram(func(w http.ResponseWriter, _ *http.Request, _ domain.User) {
@@ -159,6 +157,7 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 	reply(w, http.StatusOK, struct {
 		SavedLogin         bool
 		HasCredentials     bool
+		CredentialRevision int64
 		Watches            []domain.Watch
 		Locale             string
 		CityID             *int
@@ -168,7 +167,7 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		ReconnectRequired  bool
 		ReconnectEpisodeID string `json:",omitempty"`
 		AccountStatus      storage.LuxMedAccessStatus
-	}{access.SavedLogin, access.HasCredentials, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
+	}{access.SavedLogin, access.HasCredentials, access.CredentialRevision, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
 		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.Status})
 }
@@ -563,6 +562,30 @@ func credentialAttemptID(r *http.Request) (string, bool) {
 	return id, true
 }
 
+func dashboardCredentialRevision(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	var input struct{ CredentialRevision *int64 }
+	if !decodeDashboard(w, r, &input) {
+		return 0, false
+	}
+	if input.CredentialRevision == nil || *input.CredentialRevision < 0 {
+		dashboardResult(w, nil, storage.ErrCredentialsChanged)
+		return 0, false
+	}
+	return *input.CredentialRevision, true
+}
+
+func (d *dashboard) forgetCredentials(w http.ResponseWriter, r *http.Request, user domain.User) {
+	revision, ok := dashboardCredentialRevision(w, r)
+	if !ok {
+		return
+	}
+	if revision != user.CredentialRevision {
+		dashboardResult(w, nil, storage.ErrCredentialsChanged)
+		return
+	}
+	dashboardResult(w, nil, d.db.ForgetCredentials(r.Context(), user))
+}
+
 func (d *dashboard) browserLogin(w http.ResponseWriter, r *http.Request) {
 	id, ok := d.sessions.verify(r.Header.Get("Authorization"), time.Now())
 	if !ok || r.Header.Get("Origin") != d.cfg.Origin ||
@@ -579,7 +602,11 @@ func (d *dashboard) browserLogin(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusForbidden, nil)
 		return
 	}
-	attempt := d.db.SelectBrowserLogin(id, token)
+	revision, ok := dashboardCredentialRevision(w, r)
+	if !ok {
+		return
+	}
+	attempt := d.db.SelectBrowserLogin(id, token, &revision)
 	d.withUser(func(w http.ResponseWriter, r *http.Request, user domain.User) {
 		d.openBrowser(w, r, user, attempt)
 	}, func(*http.Request) (int64, bool) { return id, true })(w, r)

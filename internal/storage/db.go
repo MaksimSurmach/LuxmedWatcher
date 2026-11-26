@@ -270,21 +270,33 @@ func updateLuxMedAccountAuth(ctx context.Context, exec interface {
 	return requireOneRow(res, err)
 }
 
-func (db *DB) ForgetCredentials(ctx context.Context, userID int64) error {
-	return db.removeCredentials(ctx, userID, false)
+func (db *DB) ForgetCredentials(ctx context.Context, owner domain.User) error {
+	return db.removeCredentials(ctx, owner.ID, &owner.CredentialRevision)
 }
 
 func (db *DB) DeleteLuxMedAccount(ctx context.Context, userID int64) error {
-	return db.removeCredentials(ctx, userID, true)
+	return db.removeCredentials(ctx, userID, nil)
 }
 
-func (db *DB) removeCredentials(ctx context.Context, userID int64, pauseWatches bool) error {
+func (db *DB) removeCredentials(ctx context.Context, userID int64, revision *int64) error {
+	pauseWatches := revision == nil
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, "UPDATE users SET credential_save_revision=credential_save_revision+1 WHERE id=$1", userID); err != nil {
+	const invalidate = "UPDATE users SET credential_save_revision=credential_save_revision+1 WHERE id=$1"
+	if revision == nil {
+		_, err = tx.ExecContext(ctx, invalidate, userID)
+	} else {
+		err = requireOneRow(tx.ExecContext(ctx, invalidate+`
+			AND credential_revision=$2 AND status=$3 AND role <> ''
+		`, userID, *revision, domain.UserStatusActive))
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrCredentialsChanged
+	}
+	if err != nil {
 		return err
 	}
 	var usedSavedLogin bool
