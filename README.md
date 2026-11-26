@@ -25,9 +25,11 @@ Set `DATABASE_URL` to a PostgreSQL URL to select PostgreSQL. If the URL is empty
 
 Selecting another database starts from the data already in that database. Keep the SQLite volume if it contains accounts or watches you want to retain. Back up the database and keep `APP_MASTER_KEY` separately.
 
-Set `RECONNECT_JOURNAL_DIR` to an application-owned, writable directory on a persistent volume. It holds confirmed Telegram refusals and queued unblock events across a restart. The app first uses `<DATABASE_PATH>.reconnect` by default. If that path is unavailable with PostgreSQL, it uses a database-specific directory under `$XDG_STATE_HOME/luxmed-watcher` or `~/.local/state/luxmed-watcher`. In containers, mount a persistent volume at the configured directory to preserve it across replacement.
+Set `RECONNECT_JOURNAL_DIR` to an application-owned, writable directory on a persistent volume. It preserves known unsent outcomes across a restart. The app first uses `<DATABASE_PATH>.reconnect` by default. If that path is unavailable with PostgreSQL, it uses a database-specific directory under `$XDG_STATE_HOME/luxmed-watcher` or `~/.local/state/luxmed-watcher`. In containers, mount a persistent volume at the configured directory to preserve it across replacement.
 
-PostgreSQL can still start if both default paths are unavailable, or with `RECONNECT_JOURNAL_DIR=-` to disable the local journal. The bot advances its Telegram offset after saving an unblock event in the database or journal. If both are unavailable, Telegram can redeliver the unacknowledged event while it remains in Telegram's queue. The process holds known unsent outcomes in memory when both stores are unavailable. If it crashes before recording an outcome durably, an outstanding send claim stays paused after restart because Telegram may already have accepted it.
+PostgreSQL can still start if both default paths are unavailable, or with `RECONNECT_JOURNAL_DIR=-` to disable the local journal. The process holds known unsent outcomes in memory when both stores are unavailable. If it crashes before recording an outcome durably, an outstanding send claim stays paused after restart because Telegram may already have accepted it.
+
+After four confirmed Telegram 403 responses, delivery retries at most weekly while LUX MED sign-in is still required. A Telegram unblock update can bring that retry forward. The persisted retry also works when the unblock update expires or is missed.
 
 ## Telegram workflow
 

@@ -822,31 +822,6 @@ func TestReconnectJournalReplayIsScopedToDeliveryClaim(t *testing.T) {
 	})
 }
 
-func TestTelegramUnblockSurvivesRestartWithoutDiskJournal(t *testing.T) {
-	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
-		db.reconnectDirectory = ""
-		event := TelegramUnblock{UserID: 42, UpdateID: 123}
-		unavailable, cancel := context.WithCancel(ctx)
-		cancel()
-		if err := db.QueueTelegramUnblock(unavailable, event); !errors.Is(err, context.Canceled) {
-			t.Fatalf("accepted an update without a durable store: %v", err)
-		}
-		for range 2 {
-			if err := db.QueueTelegramUnblock(ctx, event); err != nil {
-				t.Fatal(err)
-			}
-		}
-		restarted := &DB{sql: db.sql, postgres: db.postgres}
-		pending, err := restarted.PendingTelegramUnblocks(ctx)
-		if err != nil || len(pending) != 1 || pending[0] != event {
-			t.Fatalf("restart did not recover exactly one update: %v, %v", pending, err)
-		}
-		if err := restarted.FinishTelegramUnblock(ctx, event); err != nil {
-			t.Fatal(err)
-		}
-	})
-}
-
 func TestUnblockAcceleratesOnlyConfirmedForbiddenDelivery(t *testing.T) {
 	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
 		must := func(err error) {
@@ -883,6 +858,52 @@ func TestUnblockAcceleratesOnlyConfirmedForbiddenDelivery(t *testing.T) {
 		must(err)
 		if throttled.Attempt != 0 {
 			t.Fatalf("unblock bypassed Telegram rate limiting: %+v", throttled)
+		}
+	})
+}
+
+func TestUnsentReservationJournalWaitsForPostgresCommit(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		if !db.postgres {
+			t.Skip("requires concurrent PostgreSQL transactions")
+		}
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		journal := t.TempDir()
+		must(db.SetReconnectJournalDirectory(journal))
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.BeginLuxMedReconnect(ctx, user.ID))
+		tx, err := db.sql.BeginTx(ctx, nil)
+		must(err)
+		defer tx.Rollback()
+		claim := ReconnectDeliveryClaim{ID: "late-claim"}
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO luxmed_reconnect_delivery (user_id, attempts, claim_id) VALUES ($1, 1, $2)
+		`, user.ID, claim.ID)
+		must(err)
+		now := time.Now().UTC()
+		must(db.JournalUnsentReconnectReservation(ctx, user.ID, claim, now.Add(time.Minute)))
+		_, err = os.Stat(db.reconnectRejectionPath(user.ID))
+		must(err)
+		must(tx.Commit())
+
+		restarted := &DB{sql: db.sql, postgres: true}
+		must(restarted.SetReconnectJournalDirectory(journal))
+		must(restarted.ReplayReconnectRejection(ctx, user.ID))
+		if _, err := os.Stat(db.reconnectRejectionPath(user.ID)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("confirmed journal was not cleared: %v", err)
+		}
+		next, err := restarted.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(2*time.Minute))
+		must(err)
+		if next.Attempt != 2 || next.ID == claim.ID {
+			t.Fatalf("late committed claim remained blocked: %+v", next)
 		}
 	})
 }

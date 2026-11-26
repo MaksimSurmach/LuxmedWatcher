@@ -8,107 +8,17 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"time"
 )
 
 type reconnectRejection struct {
-	Claim          ReconnectDeliveryClaim
-	RetryAt        time.Time
-	ForbiddenLimit int
+	Claim            ReconnectDeliveryClaim
+	RetryAt          time.Time
+	ForbiddenLimit   int
+	UnconfirmedClaim bool
 }
 
 var ErrReconnectJournalUnreadable = errors.New("reconnect journal unreadable")
-
-type TelegramUnblock struct {
-	UserID   int64
-	UpdateID int
-}
-
-func (event TelegramUnblock) filename() string {
-	return fmt.Sprintf("unblock-%d-%d.json", event.UserID, event.UpdateID)
-}
-
-func (db *DB) QueueTelegramUnblock(ctx context.Context, event TelegramUnblock) error {
-	_, dbErr := db.sql.ExecContext(ctx, `
-		INSERT INTO telegram_unblocks (telegram_user_id, update_id) VALUES ($1, $2)
-		ON CONFLICT (telegram_user_id, update_id) DO NOTHING
-	`, event.UserID, event.UpdateID)
-	if dbErr == nil {
-		return nil
-	}
-	if db.reconnectDirectory != "" {
-		err := db.writeReconnectFile(event.filename(), event)
-		if err == nil {
-			return nil
-		}
-		return errors.Join(dbErr, err)
-	}
-	return dbErr
-}
-
-func (db *DB) PendingTelegramUnblocks(ctx context.Context) ([]TelegramUnblock, error) {
-	events := make(map[TelegramUnblock]struct{})
-	dbErr := db.readQueuedTelegramUnblocks(ctx, events)
-	var readErr error
-	if db.reconnectDirectory != "" {
-		var entries []os.DirEntry
-		entries, readErr = os.ReadDir(db.reconnectDirectory)
-		if errors.Is(readErr, os.ErrNotExist) {
-			readErr = nil
-		}
-		for _, entry := range entries {
-			name, isEvent := strings.CutPrefix(entry.Name(), "unblock-")
-			user, update, found := strings.Cut(strings.TrimSuffix(name, ".json"), "-")
-			if !isEvent || !found || entry.IsDir() {
-				continue
-			}
-			id, idErr := strconv.ParseInt(user, 10, 64)
-			seq, seqErr := strconv.Atoi(update)
-			event := TelegramUnblock{UserID: id, UpdateID: seq}
-			if idErr == nil && seqErr == nil && event.filename() == entry.Name() {
-				events[event] = struct{}{}
-			}
-		}
-	}
-	pending := make([]TelegramUnblock, 0, len(events))
-	for event := range events {
-		pending = append(pending, event)
-	}
-	return pending, errors.Join(dbErr, readErr)
-}
-
-func (db *DB) readQueuedTelegramUnblocks(ctx context.Context, events map[TelegramUnblock]struct{}) error {
-	rows, err := db.sql.QueryContext(ctx, `SELECT telegram_user_id, update_id FROM telegram_unblocks`)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var event TelegramUnblock
-		if err := rows.Scan(&event.UserID, &event.UpdateID); err != nil {
-			return err
-		}
-		events[event] = struct{}{}
-	}
-	return rows.Err()
-}
-
-func (db *DB) FinishTelegramUnblock(ctx context.Context, event TelegramUnblock) error {
-	_, err := db.sql.ExecContext(ctx, `
-		DELETE FROM telegram_unblocks WHERE telegram_user_id=$1 AND update_id=$2
-	`, event.UserID, event.UpdateID)
-	if err != nil {
-		return err
-	}
-	if db.reconnectDirectory != "" {
-		err := os.Remove(filepath.Join(db.reconnectDirectory, event.filename()))
-		if !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-	}
-	return nil
-}
 
 // SetReconnectJournalDirectory selects a persistent local directory before workers start.
 func (db *DB) SetReconnectJournalDirectory(directory string) error {
@@ -133,7 +43,14 @@ func (db *DB) JournalReconnectRejection(
 	retryAt time.Time,
 	forbiddenLimit int,
 ) error {
-	outcome := reconnectRejection{Claim: claim, RetryAt: retryAt, ForbiddenLimit: forbiddenLimit}
+	return db.journalReconnectOutcome(ctx, userID, reconnectRejection{Claim: claim, RetryAt: retryAt, ForbiddenLimit: forbiddenLimit})
+}
+
+func (db *DB) JournalUnsentReconnectReservation(ctx context.Context, userID int64, claim ReconnectDeliveryClaim, retryAt time.Time) error {
+	return db.journalReconnectOutcome(ctx, userID, reconnectRejection{Claim: claim, RetryAt: retryAt, UnconfirmedClaim: true})
+}
+
+func (db *DB) journalReconnectOutcome(ctx context.Context, userID int64, outcome reconnectRejection) error {
 	var journalErr error
 	if db.reconnectDirectory != "" {
 		journalErr = db.writeReconnectFile(strconv.FormatInt(userID, 10)+".json", outcome)
@@ -142,7 +59,8 @@ func (db *DB) JournalReconnectRejection(
 		}
 		journalErr = fmt.Errorf("write reconnect journal: %w", journalErr)
 	}
-	if err := db.persistReconnectRejection(ctx, userID, outcome); err != nil {
+	applied, err := db.persistReconnectRejection(ctx, userID, outcome)
+	if err != nil || !applied {
 		db.pendingRejections.Store(userID, outcome)
 		return errors.Join(journalErr, err)
 	}
@@ -151,10 +69,13 @@ func (db *DB) JournalReconnectRejection(
 
 func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error {
 	if pending, ok := db.pendingRejections.Load(userID); ok {
-		if err := db.persistReconnectRejection(ctx, userID, pending.(reconnectRejection)); err != nil {
+		applied, err := db.persistReconnectRejection(ctx, userID, pending.(reconnectRejection))
+		if err != nil {
 			return fmt.Errorf("persist pending reconnect rejection: %w", err)
 		}
-		db.pendingRejections.CompareAndDelete(userID, pending)
+		if applied {
+			db.pendingRejections.CompareAndDelete(userID, pending)
+		}
 	}
 	if db.reconnectDirectory == "" {
 		return nil
@@ -184,8 +105,12 @@ func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error 
 	if outcome.Claim.ID == "" || outcome.RetryAt.IsZero() {
 		return fmt.Errorf("%w: missing claim ID or retry time", ErrReconnectJournalUnreadable)
 	}
-	if err := db.persistReconnectRejection(ctx, userID, outcome); err != nil {
+	applied, err := db.persistReconnectRejection(ctx, userID, outcome)
+	if err != nil {
 		return fmt.Errorf("persist reconnect journal: %w", err)
+	}
+	if !applied {
+		return nil
 	}
 	// The SQL update is idempotent and scoped to the original delivery claim.
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -194,8 +119,16 @@ func (db *DB) ReplayReconnectRejection(ctx context.Context, userID int64) error 
 	return nil
 }
 
-func (db *DB) persistReconnectRejection(ctx context.Context, userID int64, outcome reconnectRejection) error {
-	return db.RecordLuxMedReconnectRejection(ctx, userID, outcome.Claim, outcome.RetryAt, outcome.ForbiddenLimit)
+func (db *DB) persistReconnectRejection(ctx context.Context, userID int64, outcome reconnectRejection) (bool, error) {
+	applied, err := db.recordLuxMedReconnectRejection(ctx, userID, outcome.Claim, outcome.RetryAt, outcome.ForbiddenLimit)
+	if err != nil || applied || !outcome.UnconfirmedClaim {
+		return !outcome.UnconfirmedClaim || applied, err
+	}
+	// A missing row is inconclusive while the original reservation may still commit.
+	err = db.sql.QueryRowContext(ctx, `
+		SELECT EXISTS (SELECT 1 FROM luxmed_reconnect_delivery WHERE user_id=$1 AND claim_id=$2 AND retry_at IS NOT NULL)
+	`, userID, outcome.Claim.ID).Scan(&applied)
+	return applied, err
 }
 
 func (db *DB) reconnectRejectionPath(userID int64) string {

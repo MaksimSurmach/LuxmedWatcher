@@ -144,6 +144,12 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM luxmed_procedures WHERE is_recent = TRUE`); err != nil {
 		return fmt.Errorf("remove private procedures from shared cache: %w", err)
 	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE luxmed_reconnect_delivery SET retry_at=$1
+		WHERE last_failure_forbidden AND retry_at IS NULL
+	`, time.Now().UTC().Add(blockedReconnectRetry)); err != nil {
+		return fmt.Errorf("schedule previously blocked reconnect deliveries: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit storage migration: %w", err)
 	}

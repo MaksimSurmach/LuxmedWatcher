@@ -12,11 +12,16 @@ export const allowedPortalResources = new Set([
 export async function fetchCatalog(page, path) {
   return page.evaluate(async (target) => {
     const response = await fetch(target, {
-      credentials: 'same-origin', redirect: 'manual',
+      credentials: 'same-origin', redirect: 'follow',
       headers: { Accept: 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
       signal: AbortSignal.timeout(8_000),
     });
-    if ([0, 401].includes(response.status)) return { status: 401 };
+    if (response.redirected) {
+      const final = new URL(response.url);
+      const loginPath = /^\/PatientPortal\/(?:NewPortal\/Page\/)?Account\/Login\/?$/i;
+      return { status: final.origin === location.origin && loginPath.test(final.pathname) ? 401 : 502 };
+    }
+    if (response.status === 0) return { status: 502 };
     if (!response.ok) return { status: response.status };
     if (!response.headers.get('Content-Type')?.toLowerCase().includes('json')) return { status: 502 };
     const reader = response.body.getReader();

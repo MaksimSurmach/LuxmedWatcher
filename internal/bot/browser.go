@@ -17,58 +17,20 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
-	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
 const reconnectForbiddenLimit = 4
 
-func (b *Bot) queueBotMembership(ctx context.Context, updateID int, update *tgbotapi.ChatMemberUpdated) error {
+func (b *Bot) handleTelegramUnblock(ctx context.Context, update *tgbotapi.ChatMemberUpdated) {
 	if b.runner == nil || !privateChat(&update.Chat, &update.From) ||
 		update.OldChatMember.Status != "kicked" || update.NewChatMember.Status != "member" ||
 		update.NewChatMember.User == nil || update.NewChatMember.User.ID != b.api.Self.ID {
-		return nil
+		return
 	}
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	return b.db.QueueTelegramUnblock(ctx, storage.TelegramUnblock{UserID: update.From.ID, UpdateID: updateID})
-}
-
-func (b *Bot) retryTelegramUnblocks(ctx context.Context) {
-	timer := time.NewTicker(5 * time.Second)
-	defer timer.Stop()
-	for ctx.Err() == nil {
-		b.processTelegramUnblocks(ctx)
-		select {
-		case <-ctx.Done():
-			return
-		case <-timer.C:
-		}
-	}
-}
-
-func (b *Bot) processTelegramUnblocks(ctx context.Context) {
-	if b.runner == nil {
-		return
-	}
-	readCtx, stop := context.WithTimeout(ctx, 2*time.Second)
-	events, err := b.db.PendingTelegramUnblocks(readCtx)
-	stop()
-	if err != nil {
-		b.logger.Warn("read Telegram unblock queue", "err", err)
-	}
-	for _, event := range events {
-		if ctx.Err() != nil {
-			return
-		}
-		attempt, cancel := context.WithTimeout(ctx, 2*time.Second)
-		err := b.resumeAfterTelegramUnblock(attempt, event.UserID)
-		if err == nil {
-			err = b.db.FinishTelegramUnblock(attempt, event)
-		}
-		cancel()
-		if err != nil && !errors.Is(err, luxmed.ErrBrowserBusy) {
-			b.logger.Warn("retry Telegram unblock", "err", err)
-		}
+	if err := b.resumeAfterTelegramUnblock(ctx, update.From.ID); err != nil && !errors.Is(err, luxmed.ErrBrowserBusy) {
+		b.logger.Warn("accelerate reconnect warning after Telegram unblock", "err", err)
 	}
 }
 
@@ -117,6 +79,8 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 	switch {
 	case code == http.StatusTooManyRequests:
 		return &scheduler.ReconnectDeliveryRejected{RetryAfter: delay}
+	case code == http.StatusUnauthorized:
+		return &scheduler.ReconnectDeliveryRejected{RetryAfter: max(time.Hour, delay)}
 	case code == http.StatusForbidden:
 		// The user may unblock the bot while the reconnect episode is still open.
 		return &scheduler.ReconnectDeliveryRejected{RetryAfter: max(6*time.Hour, delay), ForbiddenLimit: reconnectForbiddenLimit}

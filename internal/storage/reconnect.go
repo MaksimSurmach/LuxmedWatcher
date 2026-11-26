@@ -54,6 +54,8 @@ type ReconnectDeliveryClaim struct {
 	Attempt int
 }
 
+const blockedReconnectRetry = 7 * 24 * time.Hour
+
 // On a database error the returned ID identifies the attempted reservation, even if it committed.
 func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time) (ReconnectDeliveryClaim, error) {
 	claim := ReconnectDeliveryClaim{ID: rand.Text()}
@@ -86,7 +88,7 @@ func (db *DB) LuxMedReconnectDeliveryDue(ctx context.Context, userID int64, now 
 	return due, err
 }
 
-// A nonzero forbidden limit records a 403 and suppresses further retries when the episode reaches the limit.
+// A nonzero forbidden limit records a 403 and switches to weekly retries at the limit.
 func (db *DB) RecordLuxMedReconnectRejection(
 	ctx context.Context,
 	userID int64,
@@ -94,19 +96,31 @@ func (db *DB) RecordLuxMedReconnectRejection(
 	retryAt time.Time,
 	forbiddenLimit int,
 ) error {
+	_, err := db.recordLuxMedReconnectRejection(ctx, userID, claim, retryAt, forbiddenLimit)
+	return err
+}
+
+func (db *DB) recordLuxMedReconnectRejection(ctx context.Context, userID int64, claim ReconnectDeliveryClaim, retryAt time.Time, forbiddenLimit int) (bool, error) {
 	if claim.ID == "" {
-		return errors.New("missing reconnect delivery claim ID")
+		return false, errors.New("missing reconnect delivery claim ID")
 	}
-	_, err := db.sql.ExecContext(ctx, `
+	blockedRetryAt := time.Now().UTC().Add(blockedReconnectRetry)
+	if retryAt.After(blockedRetryAt) {
+		blockedRetryAt = retryAt.UTC()
+	}
+	res, err := db.sql.ExecContext(ctx, `
 		UPDATE luxmed_reconnect_delivery
-		SET forbidden_failures=forbidden_failures + CASE WHEN $3 > 0 THEN 1 ELSE 0 END,
+		SET forbidden_failures=forbidden_failures + CASE WHEN $3 > 0 AND forbidden_failures < $3 THEN 1 ELSE 0 END,
 		    last_failure_forbidden=($3 > 0),
 		    retry_at=CASE WHEN $3 > 0 AND forbidden_failures + 1 >= $3
-		                  THEN NULL ELSE COALESCE($2, retry_at) END
+		                  THEN COALESCE($5, retry_at) ELSE COALESCE($2, retry_at) END
 		WHERE user_id=$1 AND claim_id=$4 AND retry_at IS NULL
-		    AND ($3 = 0 OR forbidden_failures < $3)
-	`, userID, retryAt.UTC(), forbiddenLimit, claim.ID)
-	return err
+	`, userID, retryAt.UTC(), forbiddenLimit, claim.ID, blockedRetryAt)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n != 0, err
 }
 
 // ResumeLuxMedReconnectDelivery accelerates confirmed 403s, including legacy capped attempts.

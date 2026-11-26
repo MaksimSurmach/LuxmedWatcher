@@ -47,6 +47,11 @@ func loadLocation() *time.Location {
 // Location is the time zone used by the LuxMed Polish patient portal.
 func Location() *time.Location { return warsaw }
 
+func SearchWindowOpen(watch domain.Watch, now time.Time) bool {
+	from, to := searchRange(watch, now)
+	return !from.After(to)
+}
+
 func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch) (result SearchResult, err error) {
 	authVersion := c.authVersion
 	defer func() { result.Authenticated = c.authVersion != authVersion }()

@@ -163,7 +163,10 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 		return 0, ErrRateLimited
 	}
 	defer r.releaseAccount(state)
+	return r.checkWithAccount(ctx, requested, manual, state)
+}
 
+func (r *Runner) checkWithAccount(ctx context.Context, requested domain.Watch, manual bool, state *accountCheck) (count int, err error) {
 	select {
 	case r.capacity <- struct{}{}:
 		defer func() { <-r.capacity }()
@@ -278,7 +281,6 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 
 func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, state *accountCheck, started time.Time) (int, error) {
 	var client luxmed.Client
-	var freshlyAuthenticated bool
 	if r.browsers != nil {
 		browser := r.browsers[user.TelegramUserID]
 		if browser == nil {
@@ -287,7 +289,7 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		client = browser.Client()
 	} else {
 		var err error
-		client, freshlyAuthenticated, err = r.passwordClient(ctx, user.ID, state)
+		client, err = r.passwordClient(ctx, user.ID, state)
 		if err != nil {
 			return 0, err
 		}
@@ -299,7 +301,7 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		state.recoveryPending = false
 		return 0, searchErr
 	}
-	if result.Checked || result.Authenticated || freshlyAuthenticated {
+	if result.Checked {
 		if err := r.confirmReconnectRecovery(ctx, user.ID, state); err != nil {
 			return 0, errors.Join(searchErr, err)
 		}
@@ -402,7 +404,9 @@ func (r *Runner) deliverReconnectAfterReplay(ctx context.Context, user domain.Us
 		// The database may have committed this ID before its response was lost.
 		// Telegram has not been called, so this particular claim can be retried.
 		if claim.ID != "" {
-			err = errors.Join(err, r.recordReconnectRejection(ctx, user.ID, claim, time.Now().Add(time.Minute), 0))
+			recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+			err = errors.Join(err, r.db.JournalUnsentReconnectReservation(recordCtx, user.ID, claim, time.Now().Add(time.Minute)))
+			cancel()
 		}
 		return errors.Join(replayErr, fmt.Errorf("claim LuxMed reconnect delivery: %w", err))
 	}
@@ -521,7 +525,7 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	if state.recoveryPending {
 		return false, errors.Join(err, r.confirmReconnectRecovery(ctx, user.ID, state))
 	}
-	return false, errors.Join(err, r.deliverReconnect(ctx, user, time.Now()))
+	return false, err
 }
 
 func (r *Runner) recheckPasswordBeforeWarning(ctx context.Context, user domain.User, state *accountCheck) error {
@@ -531,63 +535,68 @@ func (r *Runner) recheckPasswordBeforeWarning(ctx context.Context, user domain.U
 	if err != nil || !due {
 		return errors.Join(replayErr, err)
 	}
-	probeCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
-	defer cancel()
-	_, _, err = r.passwordClient(probeCtx, user.ID, state)
-	switch {
-	case err == nil:
-		return r.confirmReconnectRecovery(ctx, user.ID, state)
-	case errors.Is(err, luxmed.ErrAuthentication):
-		return r.deliverReconnectAfterReplay(ctx, user, now, replayErr)
-	case errors.Is(err, ErrNoAccount):
-		return nil
-	default:
+	r.mu.Lock()
+	ready := !now.Before(state.next)
+	r.mu.Unlock()
+	if !ready {
+		return replayErr
+	}
+	watches, err := r.db.WatchesByUser(ctx, user.ID)
+	if err != nil {
 		return errors.Join(replayErr, err)
 	}
+	for _, watch := range watches {
+		if watch.Status == domain.WatchStatusActive && luxmed.SearchWindowOpen(watch, now) {
+			// Use the same authenticated search and persisted cooldown as a normal check.
+			_, err := r.checkWithAccount(ctx, watch, true, state)
+			if errors.Is(err, ErrRateLimited) || errors.Is(err, ErrInactive) {
+				continue
+			}
+			return errors.Join(replayErr, err)
+		}
+	}
+	return replayErr
 }
 
-func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accountCheck) (luxmed.Client, bool, error) {
+func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accountCheck) (luxmed.Client, error) {
 	account, err := r.db.LuxMedAccount(ctx, userID)
 	if errors.Is(err, sql.ErrNoRows) {
 		state.client = nil
 		state.login, state.encryptedPassword = "", ""
-		return nil, false, ErrNoAccount
+		return nil, ErrNoAccount
 	}
 	if err != nil {
-		return nil, false, fmt.Errorf("load LuxMed account: %w", err)
+		return nil, fmt.Errorf("load LuxMed account: %w", err)
 	}
 	if account.Status == domain.AccountStatusAuthFailed {
-		return nil, false, luxmed.ErrAuthentication
+		return nil, luxmed.ErrAuthentication
 	}
 	if state.client == nil || state.login != account.Login || state.encryptedPassword != account.EncryptedPassword || time.Since(state.authenticatedAt) > 15*time.Minute {
 		state.client = nil
 		password, err := r.cryptor.Decrypt(account.EncryptedPassword)
 		if err != nil {
-			return nil, false, fmt.Errorf("decrypt LuxMed credentials: %w", err)
+			return nil, fmt.Errorf("decrypt LuxMed credentials: %w", err)
 		}
 		client := r.newClient(r.rawPayloads)
 		if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
 			if errors.Is(err, luxmed.ErrAuthentication) {
 				state.recoveryPending = false
-				return nil, false, errors.Join(err, r.recordAuthFailure(ctx, account))
+				return nil, errors.Join(err, r.recordAuthFailure(ctx, account))
 			}
-			return nil, false, err
+			return nil, err
 		}
 
 		now := time.Now().UTC()
 		account.Status, account.LastLoginAt, account.LastLoginError = domain.AccountStatusActive, &now, ""
 		if err := r.db.UpdateLuxMedAccountAuth(ctx, account); err != nil {
-			if !errors.Is(err, sql.ErrNoRows) {
-				state.recoveryPending = true
-			}
-			return nil, false, fmt.Errorf("save LuxMed account status: %w", err)
+			return nil, fmt.Errorf("save LuxMed account status: %w", err)
 		}
 		state.client, state.authenticatedAt = client, now
 		state.login, state.encryptedPassword = account.Login, account.EncryptedPassword
-		return client, true, nil
+		return client, nil
 	}
 
-	return state.client, false, nil
+	return state.client, nil
 }
 
 func (r *Runner) checkWatchUnchanged(ctx context.Context, watch domain.Watch) error {
