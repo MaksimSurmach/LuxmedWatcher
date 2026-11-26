@@ -64,7 +64,9 @@ func (r *Runner) SaveCredentials(ctx context.Context, user domain.User, creds lu
 	if err != nil {
 		return fmt.Errorf("load LuxMed credential owner: %w", err)
 	}
-	if current.CredentialRevision != user.CredentialRevision || !current.IsActive() {
+	modeChanged := current.CredentialRevision != user.CredentialRevision
+	saveCanceled := current.CredentialSaveRevision != user.CredentialSaveRevision
+	if modeChanged || saveCanceled || !current.IsActive() {
 		return storage.ErrCredentialsChanged
 	}
 	client := r.newClient(r.rawPayloads)

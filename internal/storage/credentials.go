@@ -24,8 +24,10 @@ func (db *DB) SaveCredentials(ctx context.Context, key *security.Cryptor, owner 
 		return "", err
 	}
 	defer tx.Rollback()
-	err = requireOneRow(tx.ExecContext(ctx, `UPDATE users SET credential_revision=credential_revision+1
-        WHERE id=$1 AND credential_revision=$2 AND status=$3 AND role <> ''`, owner.ID, owner.CredentialRevision, domain.UserStatusActive))
+	err = requireOneRow(tx.ExecContext(ctx, `
+		UPDATE users SET credential_revision=credential_revision+1
+		WHERE id=$1 AND credential_revision=$2 AND credential_save_revision=$3 AND status=$4 AND role <> ''
+	`, owner.ID, owner.CredentialRevision, owner.CredentialSaveRevision, domain.UserStatusActive))
 	if errors.Is(err, sql.ErrNoRows) {
 		return "", ErrCredentialsChanged
 	}
@@ -91,11 +93,13 @@ func (db *DB) setModeAccessStatus(ctx context.Context, tx *sql.Tx, userID int64,
 	return setLuxMedAccessStatus(ctx, tx, userID, status, requiresTerms)
 }
 
-// A viewer link from an older tab cannot remove a saved login. Choosing Chrome
-// while a first-time password verification is running cancels that pending save.
+// Opening Chrome cancels a pending password save while preserving in-flight Chrome searches.
 func (db *DB) ConfirmBrowserLogin(ctx context.Context, owner domain.User) error {
-	err := requireOneRow(db.sql.ExecContext(ctx, `UPDATE users SET credential_revision=credential_revision+1
-        WHERE id=$1 AND credential_revision=$2 AND NOT EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1)`, owner.ID, owner.CredentialRevision))
+	err := requireOneRow(db.sql.ExecContext(ctx, `
+		UPDATE users SET credential_save_revision=credential_save_revision+1
+		WHERE id=$1 AND credential_revision=$2 AND status=$3 AND role <> ''
+			AND NOT EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login)
+	`, owner.ID, owner.CredentialRevision, domain.UserStatusActive))
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrCredentialsChanged
 	}

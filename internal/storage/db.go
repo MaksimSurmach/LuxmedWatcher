@@ -44,7 +44,7 @@ func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.
 
 func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at, credential_revision
+		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at, credential_revision, credential_save_revision
 		FROM users WHERE telegram_user_id=$1
 	`, telegramID)
 	return scanUser(row)
@@ -52,7 +52,7 @@ func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.Us
 
 func (db *DB) UserByID(ctx context.Context, id int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at, credential_revision
+		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at, credential_revision, credential_save_revision
 		FROM users WHERE id=$1
 	`, id)
 	return scanUser(row)
@@ -284,10 +284,20 @@ func (db *DB) removeCredentials(ctx context.Context, userID int64, pauseWatches 
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, "UPDATE users SET credential_revision=credential_revision+1 WHERE id=$1", userID); err != nil {
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET credential_save_revision=credential_save_revision+1 WHERE id=$1", userID); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "DELETE FROM luxmed_accounts WHERE user_id=$1", userID); err != nil {
+	var usedSavedLogin bool
+	err = tx.QueryRowContext(ctx, `
+		DELETE FROM luxmed_accounts WHERE user_id=$1 RETURNING use_saved_login
+	`, userID).Scan(&usedSavedLogin)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if !pauseWatches && !usedSavedLogin {
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET credential_revision=credential_revision+1 WHERE id=$1", userID); err != nil {
 		return err
 	}
 	if !pauseWatches {
@@ -993,6 +1003,18 @@ func (db *DB) Procedure(ctx context.Context, cityID int, procedureID int) (domai
 	return proc, err
 }
 
+// SavedWatchServiceName resolves a service using only this user's non-deleted searches.
+func (db *DB) SavedWatchServiceName(ctx context.Context, userID int64, cityID, serviceID int) (string, error) {
+	var name string
+	err := db.sql.QueryRowContext(ctx, `
+		SELECT TRIM(service_name)
+		FROM watches
+		WHERE user_id=$1 AND city_id=$2 AND service_id=$3 AND status<>$4 AND TRIM(service_name)<>''
+		ORDER BY created_at DESC, id DESC LIMIT 1
+	`, userID, cityID, serviceID, domain.WatchStatusDeleted).Scan(&name)
+	return name, err
+}
+
 func (db *DB) UpsertFacilities(ctx context.Context, city domain.City, procedureID int, facilities []domain.Facility) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -1167,7 +1189,7 @@ type scanner interface {
 func scanUser(row scanner) (domain.User, error) {
 	var u domain.User
 	var preferredCityID sql.NullInt64
-	err := row.Scan(&u.ID, &u.TelegramUserID, &u.TelegramChatID, &u.Username, &u.DisplayName, &u.Locale, &preferredCityID, &u.PreferredCityName, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastSeenAt, &u.CredentialRevision)
+	err := row.Scan(&u.ID, &u.TelegramUserID, &u.TelegramChatID, &u.Username, &u.DisplayName, &u.Locale, &preferredCityID, &u.PreferredCityName, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastSeenAt, &u.CredentialRevision, &u.CredentialSaveRevision)
 	if preferredCityID.Valid {
 		id := int(preferredCityID.Int64)
 		u.PreferredCityID = &id

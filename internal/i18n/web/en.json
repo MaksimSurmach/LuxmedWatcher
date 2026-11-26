@@ -3,6 +3,7 @@
   "account.chrome": "Sign in with Chrome",
   "account.save_credentials": "Save login and password",
   "account.change_credentials": "Change saved login and password",
+  "account.delete_credentials": "Delete saved credentials",
   "account.forget": "Delete saved credentials and use Chrome",
   "account.login": "LUX MED login",
   "account.password": "Password",

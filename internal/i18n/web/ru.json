@@ -3,6 +3,7 @@
   "account.chrome": "Войти через Chrome",
   "account.save_credentials": "Сохранить логин и пароль",
   "account.change_credentials": "Изменить сохранённые данные",
+  "account.delete_credentials": "Удалить сохранённые данные входа",
   "account.forget": "Удалить данные входа и перейти на Chrome",
   "account.login": "Логин LUX MED",
   "account.password": "Пароль",

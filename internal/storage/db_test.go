@@ -726,6 +726,20 @@ func TestCredentialMigrationAndModeSwitch(t *testing.T) {
 		}
 		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
 		must(err)
+		watchBeforeOpen, err := db.Watch(ctx, id)
+		must(err)
+		must(db.ConfirmBrowserLogin(ctx, user))
+		must(db.MarkWatchCheckedForMode(ctx, user, watchBeforeOpen, true, ""))
+		legacyAfterOpen, err := db.LuxMedAccount(ctx, user.ID)
+		must(err)
+		if legacyAfterOpen.EncryptedPassword != a.EncryptedPassword {
+			t.Fatal("opening Chrome modified migrated credentials")
+		}
+		if _, err := db.SaveCredentials(ctx, key, user, creds); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("late save after opening Chrome: %v", err)
+		}
+		user, err = db.UserByID(ctx, user.ID)
+		must(err)
 		_, err = db.SaveCredentials(ctx, key, user, creds)
 		must(err)
 		current, err := db.UserByID(ctx, user.ID)

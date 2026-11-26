@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -250,5 +252,84 @@ func TestSearchAccessRejectionAllowsExplicitPasswordRetry(t *testing.T) {
 	if err != nil || access.Status != storage.LuxMedAccessConnected ||
 		access.EpisodeID != "" || watches[0].Status != domain.WatchStatusActive {
 		t.Fatalf("retry did not restore search access: %+v, %+v, %v", watches, access, err)
+	}
+}
+
+func TestPausedSearchLoginRejectionSharesRetryAfterWithSave(t *testing.T) {
+	ctx := t.Context()
+	runner, db, watch := testRunner(t, nil)
+	watch.CityID, watch.ServiceID = 1, 2
+	if err := db.UpdateWatch(ctx, watch); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SetWatchStatus(ctx, watch.ID, domain.WatchStatusPaused); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.MarkWatchChecked(ctx, watch.ID, false, "luxmed_authentication"); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &catalogClient{
+		fakeLuxMed: fakeLuxMed{authErr: errors.Join(luxmed.ErrCredentialsRejected, &luxmed.HTTPError{
+			StatusCode: http.StatusForbidden, RetryAfter: time.Minute,
+		})},
+		cities: func(context.Context) error { return nil },
+	}
+	runner.newClient = func(bool) luxmed.Client { return client }
+	if err := runner.renewBrowserSession(ctx, user.TelegramUserID, nil); !errors.Is(err, luxmed.ErrAuthentication) {
+		t.Fatalf("paused search login = %v", err)
+	}
+	client.authErr = nil
+	creds := luxmed.Credentials{Login: "fixture", Password: "synthetic"}
+	if err := runner.SaveCredentials(ctx, user, creds); !errors.Is(err, luxmed.ErrUnavailable) || client.logins != 1 {
+		t.Fatalf("save bypassed the rejected login's Retry-After: err=%v logins=%d", err, client.logins)
+	}
+}
+
+func TestOpeningChromeKeepsInFlightChromeSearch(t *testing.T) {
+	ctx := t.Context()
+	runner, db, watch := testRunner(t, nil)
+	// The legacy account exists but is not selected when a Chrome worker is assigned.
+	watch.CityID, watch.ServiceID = 1, 2
+	if err := db.UpdateWatch(ctx, watch); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != luxmed.TermsURL {
+			t.Errorf("unexpected Chrome request: %s", req.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if err := db.ConfirmBrowserLogin(req.Context(), user); err != nil {
+			t.Error(err)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		fmt.Fprint(w, `{"termsForService":{"termsForDays":[]}}`)
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: browser})
+	runner.minimumInterval = time.Minute
+
+	if _, err := runner.ManualCheck(ctx, watch); err != nil {
+		t.Fatalf("Chrome search was interrupted: %v", err)
+	}
+	current, err := db.Watch(ctx, watch.ID)
+	if err != nil || current.LastSuccessAt == nil {
+		t.Fatalf("Chrome search result was discarded: %+v, %v", current, err)
+	}
+	if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("Chrome search cooldown was lost: %v", err)
 	}
 }

@@ -325,8 +325,8 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 
 	var saved []domain.Procedure
 	for _, watch := range watches {
-		if watch.CityID == city.ID {
-			saved = append(saved, domain.Procedure{ID: watch.ServiceID, Name: watch.ServiceName})
+		if watch.CityID == city.ID && watch.ServiceID > 0 {
+			saved = append(saved, domain.Procedure{ID: watch.ServiceID, Name: strings.TrimSpace(watch.ServiceName)})
 		}
 	}
 
@@ -628,6 +628,10 @@ func (d *dashboard) saveWatch(w http.ResponseWriter, r *http.Request, user domai
 		return
 	}
 	service, err := d.db.Procedure(ctx, city.ID, input.ServiceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		service.ID = input.ServiceID
+		service.Name, err = d.db.SavedWatchServiceName(ctx, user.ID, city.ID, input.ServiceID)
+	}
 	if err != nil {
 		dashboardResult(w, nil, err)
 		return

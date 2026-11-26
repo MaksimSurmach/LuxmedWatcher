@@ -132,9 +132,8 @@ function accountSection(compact = false) {
       <p class="account-status" data-state="${account}" role="status">${text(accountStatusKey(account))}</p>
     </div>
     <div class="account-actions">
-      ${state.HasCredentials
-        ? `<button type="button" class="secondary" id="forget-credentials">${text('account.forget')}</button>`
-        : `<button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>`}
+      ${state.SavedLogin ? '' : `<button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>`}
+      ${state.HasCredentials ? `<button type="button" class="secondary" id="forget-credentials">${text(state.SavedLogin ? 'account.forget' : 'account.delete_credentials')}</button>` : ''}
       <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
     </div>
     ${compact || state.SavedLogin ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}

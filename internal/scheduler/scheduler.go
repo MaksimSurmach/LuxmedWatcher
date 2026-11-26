@@ -709,14 +709,12 @@ func (r *Runner) probeReconnectFilters(ctx context.Context, user domain.User, st
 		if err == nil {
 			client, err = r.passwordClient(ctx, account, state)
 		}
-		switch {
-		case errors.Is(err, luxmed.ErrAuthentication) && !errors.Is(err, luxmed.ErrUnavailable):
-			return r.recordAccessRejection(ctx, user, state, err)
-		}
 	}
 	if err == nil {
 		err = r.probeReconnectAccess(ctx, user, state, client, watches)
 		err = r.recordPasswordAccessFailure(ctx, state, account, err)
+	} else if errors.Is(err, luxmed.ErrAuthentication) && !errors.Is(err, luxmed.ErrUnavailable) {
+		err = r.recordAccessRejection(ctx, user, state, err)
 	}
 	r.mu.Lock()
 	if errors.Is(err, luxmed.ErrUnavailable) {

@@ -108,7 +108,10 @@ func (db *DB) Migrate(ctx context.Context) error {
 		return fmt.Errorf("apply storage schema: %w", err)
 	}
 	if db.postgres {
-		if _, err := tx.ExecContext(ctx, "ALTER TABLE users ADD COLUMN IF NOT EXISTS credential_revision BIGINT NOT NULL DEFAULT 0"); err != nil {
+		if _, err := tx.ExecContext(ctx, `
+			ALTER TABLE users ADD COLUMN IF NOT EXISTS credential_revision BIGINT NOT NULL DEFAULT 0,
+				ADD COLUMN IF NOT EXISTS credential_save_revision BIGINT NOT NULL DEFAULT 0
+		`); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, "ALTER TABLE luxmed_accounts ADD COLUMN IF NOT EXISTS use_saved_login BOOLEAN NOT NULL DEFAULT FALSE"); err != nil {
@@ -120,6 +123,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 			{"users", "preferred_city_id", "INTEGER"},
 			{"users", "preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
 			{"users", "credential_revision", "BIGINT NOT NULL DEFAULT 0"},
+			{"users", "credential_save_revision", "BIGINT NOT NULL DEFAULT 0"},
 			{"luxmed_accounts", "use_saved_login", "BOOLEAN NOT NULL DEFAULT FALSE"},
 		} {
 			var exists bool

@@ -83,6 +83,12 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	d := &dashboard{db: db, key: pub, sessions: newSessions(),
 		browsers: browsers, runner: runner, checkAccount: runner.CheckBrowserSession,
 		cfg: DashboardConfig{Origin: origin, BotID: 12, MinimumInterval: 2 * time.Minute}}
+	d.connect = func(_ context.Context, id int64) (string, error) {
+		if id != owner.TelegramUserID {
+			t.Errorf("unexpected viewer owner: %d", id)
+		}
+		return "https://app.example/viewer?ticket=fixture", nil
+	}
 	var syncedLocales []string
 	d.cfg.SyncAppMenu = func(ctx context.Context, userID int64) {
 		persisted, err := db.UserByID(ctx, userID)
@@ -101,6 +107,9 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 			req.Header.Set("X-Telegram-Init-Data", identity)
 		} else {
 			req.Header.Set("Authorization", "Bearer "+identity)
+		}
+		if action == "connect" {
+			req.Header.Set("X-Telegram-Init-Data", signTelegram(owner.TelegramUserID, 12, time.Now(), priv))
 		}
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
@@ -130,6 +139,25 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	legacyPassword, err := cryptor.Encrypt("legacy fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
+		UserID: owner.ID, Login: "legacy", EncryptedPassword: legacyPassword,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EncryptLegacyLogins(ctx, cryptor); err != nil {
+		t.Fatal(err)
+	}
+	if res := request("connect", "{}", origin, token, http.StatusOK); !strings.Contains(res.Body.String(), "viewer?ticket=fixture") {
+		t.Fatalf("Chrome viewer link is missing: %s", res.Body)
+	}
+	legacy, err := db.LuxMedAccount(ctx, owner.ID)
+	if err != nil || legacy.UseSavedLogin || legacy.EncryptedPassword == "" {
+		t.Fatalf("Chrome opening changed the migrated account: %v", err)
+	}
 	const secret = "  example password  "
 	d.saveLogin = func(ctx context.Context, user domain.User, creds luxmed.Credentials) error {
 		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 17*time.Second {
@@ -146,6 +174,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	request("credentials", validLogin, "https://other.example", token, http.StatusUnauthorized)
 	request("credentials", `{"Login":"  ","Password":"x"}`, origin, token, http.StatusBadRequest)
 	request("credentials", validLogin, origin, token, http.StatusNoContent)
+	request("connect", "{}", origin, token, http.StatusPreconditionFailed)
 	request("credentials", `{"Login":"patient","Password":"wrong"}`, origin, token, http.StatusConflict)
 	request("forget-credentials", "{}", origin, otherToken, http.StatusNoContent)
 	saved, err := db.LoginAccount(ctx, owner.ID, true)
@@ -670,6 +699,23 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatal(err)
+		}
+		for _, scenario := range []struct {
+			user domain.User
+			code int
+		}{
+			{user: other, code: http.StatusNotFound},
+			{user: owner, code: http.StatusNoContent},
+		} {
+			req := httptest.NewRequest(http.MethodPost, dashboardPrefix+"watch",
+				strings.NewReader(`{"CityID":4,"ServiceID":8,"NextDays":7,"CheckMinutes":30}`))
+			req.Header.Set("Origin", origin)
+			req.Header.Set("Authorization", "Bearer "+d.sessions.issue(scenario.user.TelegramUserID, time.Now()))
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != scenario.code {
+				t.Fatalf("save status for user %d = %d, want %d", scenario.user.ID, res.Code, scenario.code)
+			}
 		}
 	})
 	t.Run("late portal failure keeps successful groups and saved services", func(t *testing.T) {

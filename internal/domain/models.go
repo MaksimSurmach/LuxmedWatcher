@@ -49,20 +49,21 @@ const (
 )
 
 type User struct {
-	CredentialRevision int64 `json:"-"`
-	ID                 int64
-	TelegramUserID     int64
-	TelegramChatID     int64
-	Username           string
-	DisplayName        string
-	Locale             string
-	PreferredCityID    *int
-	PreferredCityName  string
-	Status             UserStatus
-	Role               UserRole
-	CreatedAt          time.Time
-	UpdatedAt          time.Time
-	LastSeenAt         time.Time
+	CredentialRevision     int64 `json:"-"`
+	CredentialSaveRevision int64 `json:"-"`
+	ID                     int64
+	TelegramUserID         int64
+	TelegramChatID         int64
+	Username               string
+	DisplayName            string
+	Locale                 string
+	PreferredCityID        *int
+	PreferredCityName      string
+	Status                 UserStatus
+	Role                   UserRole
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	LastSeenAt             time.Time
 }
 
 func (u User) IsActive() bool {
