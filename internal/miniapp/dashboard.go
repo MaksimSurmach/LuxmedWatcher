@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -15,12 +16,14 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/procedures"
+	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
 const dashboardPrefix = "/api/dashboard/"
 
 type DashboardConfig struct {
+	Cryptor         *security.Cryptor
 	Origin          string
 	BotID           int64
 	MinimumInterval time.Duration
@@ -29,17 +32,24 @@ type DashboardConfig struct {
 }
 
 type dashboard struct {
-	cfg          DashboardConfig
-	key          ed25519.PublicKey
-	sessions     sessions
-	historyViews historyViews
-	db           *storage.DB
-	browsers     map[int64]*luxmed.Browser
-	connect      func(context.Context, int64) (string, error)
+	verifyCredentials func(context.Context, luxmed.Credentials) error
+	cfg               DashboardConfig
+	key               ed25519.PublicKey
+	sessions          sessions
+	historyViews      historyViews
+	db                *storage.DB
+	browsers          map[int64]*luxmed.Browser
+	connect           func(context.Context, int64) (string, error)
 }
 
 func Dashboard(cfg DashboardConfig, db *storage.DB, browsers map[int64]*luxmed.Browser, app *luxmed.MiniApp) http.Handler {
-	d := &dashboard{cfg: cfg, key: productionKey(), sessions: newSessions(), db: db, browsers: browsers, connect: app.Link}
+	d := &dashboard{
+		cfg: cfg, key: productionKey(), sessions: newSessions(),
+		db: db, browsers: browsers, connect: app.Link,
+		verifyCredentials: func(ctx context.Context, creds luxmed.Credentials) error {
+			return luxmed.NewPasswordClient(creds).Check(ctx)
+		},
+	}
 	return d.handler()
 }
 
@@ -57,6 +67,10 @@ func (d *dashboard) handler() http.Handler {
 	mux.HandleFunc("POST "+dashboardPrefix+"settings", d.authorize(d.settings))
 	mux.HandleFunc("POST "+dashboardPrefix+"watch", d.authorize(d.saveWatch))
 	mux.HandleFunc("POST "+dashboardPrefix+"status", d.authorize(d.status))
+	mux.HandleFunc("POST "+dashboardPrefix+"credentials", d.authorize(d.saveCredentials))
+	mux.HandleFunc("POST "+dashboardPrefix+"forget-credentials", d.authorize(func(w http.ResponseWriter, r *http.Request, user domain.User) {
+		dashboardResult(w, nil, d.db.ForgetCredentials(r.Context(), user.ID))
+	}))
 	mux.HandleFunc("POST "+dashboardPrefix+"account", d.authorize(d.account))
 	mux.HandleFunc("POST "+dashboardPrefix+"connect", d.authorize(d.openBrowser))
 	mux.HandleFunc("POST "+dashboardPrefix+"viewer-access", d.authorizeTelegram(func(w http.ResponseWriter, _ *http.Request, _ domain.User) {
@@ -129,14 +143,20 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
+	_, err = d.db.LoginAccount(r.Context(), user.ID, true)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		dashboardResult(w, nil, err)
+		return
+	}
 	reply(w, http.StatusOK, struct {
+		SavedLogin     bool
 		Watches        []domain.Watch
 		Locale         string
 		CityID         *int
 		CityName       string
 		MinimumMinutes int
 		DefaultMinutes int
-	}{watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
+	}{err == nil, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
 		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute)})
 }
@@ -214,7 +234,12 @@ func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, user domain.U
 	ctx := r.Context()
 	items, err := d.db.Cities(ctx, 300)
 	if err == nil && len(items) == 0 {
-		items, err = d.browsers[user.TelegramUserID].Client().GetCities(ctx)
+		client, clientErr := d.client(ctx, user)
+		if clientErr != nil {
+			dashboardResult(w, nil, clientErr)
+			return
+		}
+		items, err = client.GetCities(ctx)
 		if err == nil {
 			err = d.db.UpsertCities(ctx, items)
 		}
@@ -241,7 +266,12 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 	ctx := r.Context()
 	city, err := d.db.City(ctx, input.CityID)
 	if err == nil {
-		err = d.ensureProcedureCatalog(ctx, city, d.browsers[user.TelegramUserID].Client())
+		client, clientErr := d.client(ctx, user)
+		if clientErr != nil {
+			dashboardResult(w, nil, clientErr)
+			return
+		}
+		err = d.ensureProcedureCatalog(ctx, city, client)
 	}
 	if err != nil {
 		dashboardResult(w, nil, err)
@@ -273,7 +303,11 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 		dashboardResult(w, nil, err)
 		return
 	}
-	client := d.browsers[user.TelegramUserID].Client()
+	client, err := d.client(ctx, user)
+	if err != nil {
+		dashboardResult(w, nil, err)
+		return
+	}
 	portalCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if err := d.ensureProcedureCatalog(portalCtx, city, client); err != nil {
@@ -361,7 +395,7 @@ func (d *dashboard) providers(w http.ResponseWriter, r *http.Request, user domai
 		dashboardResult(w, nil, err)
 		return
 	}
-	items, err := d.browsers[user.TelegramUserID].Client().GetDoctorsAndFacilities(r.Context(), input.CityID, input.ServiceID)
+	items, err := d.providersForUser(r.Context(), user, input.CityID, input.ServiceID)
 	dashboardResult(w, items, err)
 }
 
@@ -411,8 +445,52 @@ func (d *dashboard) setStatus(w http.ResponseWriter, r *http.Request, user domai
 	dashboardResult(w, nil, d.db.SetUserWatchStatus(r.Context(), user.ID, input.ID, input.Status))
 }
 
+func (d *dashboard) providersForUser(ctx context.Context, user domain.User, cityID, serviceID int) (domain.DoctorsAndFacilities, error) {
+	client, err := d.client(ctx, user)
+	if err != nil {
+		return domain.DoctorsAndFacilities{}, err
+	}
+	return client.GetDoctorsAndFacilities(ctx, cityID, serviceID)
+}
+
+func (d *dashboard) client(ctx context.Context, user domain.User) (*luxmed.HTTPClient, error) {
+	account, err := d.db.LoginAccount(ctx, user.ID, true)
+	if errors.Is(err, sql.ErrNoRows) {
+		return d.browsers[user.TelegramUserID].Client(), nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	creds, err := d.cfg.Cryptor.OpenCredentials(user.ID, account.EncryptedPassword)
+	if err != nil {
+		return nil, err
+	}
+	return luxmed.NewPasswordClient(creds), nil
+}
+
+func (d *dashboard) saveCredentials(w http.ResponseWriter, r *http.Request, user domain.User) {
+	var creds luxmed.Credentials
+	if !decodeDashboard(w, r, &creds) {
+		return
+	}
+	creds.Login = strings.TrimSpace(creds.Login)
+	if creds.Login == "" || len(creds.Login) > 254 || creds.Password == "" || len(creds.Password) > 1024 {
+		reply(w, http.StatusBadRequest, nil)
+		return
+	}
+	ctx := r.Context()
+	if err := d.verifyCredentials(ctx, creds); err != nil {
+		dashboardResult(w, nil, err)
+		return
+	}
+	dashboardResult(w, nil, d.db.SaveCredentials(ctx, d.cfg.Cryptor, user.ID, creds))
+}
+
 func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {
-	err := d.browsers[user.TelegramUserID].Check(r.Context())
+	client, err := d.client(r.Context(), user)
+	if err == nil {
+		err = client.Check(r.Context())
+	}
 	switch {
 	case err == nil:
 		reply(w, http.StatusOK, map[string]string{"state": "connected"})
@@ -432,6 +510,7 @@ func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user dom
 	}
 	link, err := d.connect(r.Context(), user.TelegramUserID)
 	if err == nil {
+		err = d.db.ForgetCredentials(r.Context(), user.ID)
 		link += "&lang=" + i18n.Normalize(user.Locale, "pl")
 	}
 	dashboardResult(w, map[string]string{"url": link}, err)
@@ -522,7 +601,7 @@ func (d *dashboard) saveWatch(w http.ResponseWriter, r *http.Request, user domai
 			watch.DoctorID, watch.DoctorName, watch.DoctorMode = previous.DoctorID, previous.DoctorName, previous.DoctorMode
 			watch.FacilityIDs, watch.FacilityNames, watch.FacilityMode = previous.FacilityIDs, previous.FacilityNames, previous.FacilityMode
 		} else {
-			data, err := d.browsers[user.TelegramUserID].Client().GetDoctorsAndFacilities(ctx, city.ID, service.ID)
+			data, err := d.providersForUser(ctx, user, city.ID, service.ID)
 			if err != nil {
 				dashboardResult(w, nil, err)
 				return

@@ -1,4 +1,12 @@
 {
+  "account.chrome": "Увійти через Chrome",
+  "account.save_credentials": "Зберегти логін і пароль",
+  "account.change_credentials": "Змінити збережені дані",
+  "account.forget": "Видалити дані входу й перейти на Chrome",
+  "account.login": "Логін LUX MED",
+  "account.password": "Пароль",
+  "account.encryption": "Бот зашифрує логін і пароль для вашого облікового запису та використовуватиме їх для фонових перевірок.",
+  "account.login_failed": "Перевірте логін і пароль. Якщо LUX MED вимагає додаткового підтвердження, увійдіть через Chrome.",
   "account.connected": "LUX MED підключено",
   "account.instructions": "Увійдіть через вікно віддаленого браузера. Якщо LUX MED попросить код, введіть його там, а потім поверніться й перевірте підключення.",
   "account.needs_login": "Потрібен повторний вхід.",

@@ -59,6 +59,9 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := db.EncryptLegacyLogins(ctx, cryptor); err != nil {
+		return fmt.Errorf("encrypt legacy LuxMed credentials: %w", err)
+	}
 	httpClient := &http.Client{Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second}
 	api, err := tgbotapi.NewBotAPIWithClient(a.cfg.TelegramToken, tgbotapi.APIEndpoint, telegramHTTP{
 		ctx: ctx, client: httpClient,
@@ -108,6 +111,7 @@ func (a *App) Run(ctx context.Context) error {
 	watcher := scheduler.New(db, runner, 15*time.Second, a.cfg.HistoryRetention, a.logger)
 
 	dashboardCfg := miniapp.DashboardConfig{
+		Cryptor:         cryptor,
 		MinimumInterval: a.cfg.MinimumInterval,
 		DefaultInterval: a.cfg.DefaultInterval,
 		SyncAppMenu:     tgBot.SyncAppMenu,

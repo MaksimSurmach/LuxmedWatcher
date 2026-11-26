@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS luxmed_accounts (
 	user_id %[5]s NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
 	login TEXT NOT NULL,
 	encrypted_password TEXT NOT NULL,
+	use_saved_login BOOLEAN NOT NULL DEFAULT FALSE,
 	encrypted_session_data TEXT NOT NULL DEFAULT '',
 	session_expires_at %[6]s,
 	last_login_at %[6]s,

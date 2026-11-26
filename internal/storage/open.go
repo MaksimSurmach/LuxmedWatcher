@@ -104,7 +104,20 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("apply storage schema: %w", err)
 	}
-	if !db.postgres {
+	if db.postgres {
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE luxmed_accounts ADD COLUMN IF NOT EXISTS use_saved_login BOOLEAN NOT NULL DEFAULT FALSE"); err != nil {
+			return err
+		}
+	} else {
+		var exists bool
+		if err := tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM pragma_table_info('luxmed_accounts') WHERE name='use_saved_login')").Scan(&exists); err != nil {
+			return err
+		}
+		if !exists {
+			if _, err := tx.ExecContext(ctx, "ALTER TABLE luxmed_accounts ADD COLUMN use_saved_login BOOLEAN NOT NULL DEFAULT FALSE"); err != nil {
+				return err
+			}
+		}
 		for _, column := range []struct{ name, definition string }{
 			{"preferred_city_id", "INTEGER"},
 			{"preferred_city_name", "TEXT NOT NULL DEFAULT ''"},

@@ -353,7 +353,7 @@ func TestWatchWithExpiredSessionOffersSignIn(t *testing.T) {
 			t.Errorf("unexpected message: %q", text)
 		}
 		markup := r.Form.Get("reply_markup")
-		if !strings.Contains(markup, "Sign in to LUX MED") || !strings.Contains(markup, "connect:open") {
+		if !strings.Contains(markup, "Sign in to LUX MED") || !strings.Contains(markup, "account") {
 			t.Errorf("missing sign-in action: %s", markup)
 		}
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)

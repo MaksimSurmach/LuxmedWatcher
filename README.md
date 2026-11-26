@@ -28,7 +28,8 @@ Selecting another database starts from the data already in that database. Keep t
 ## Telegram workflow
 
 - Open the bot in a private chat and use `/start`. Admins can issue a limited-use invite with `/invite [max_uses]`.
-- Connect your LuxMed account, then use `/new` to choose a city, service, doctor or clinic filters and a check interval.
+- Use `/connect` or the account section of the Mini App to choose a sign-in method. Chrome handles interactive sign-in and verification. With **Save login and password**, the watcher verifies the credentials, encrypts both fields for this user with `APP_MASTER_KEY`, and signs in directly for background checks. Switching back to Chrome deletes the saved credentials and keeps existing watches. If LUX MED requires interactive verification, use Chrome.
+- After connecting, use `/new` to choose a city, service, doctor or clinic filters and a check interval.
 - Use `/watches` to review, change, pause or manually check a watch. `/history` opens appointment history. `/logout_luxmed` removes the saved credentials and pauses active watches.
 - Open LuxMed from an alert to view or book the appointment. If the portal requires a fresh sign-in, a questionnaire or a referral, finish that step in LuxMed. A partial search can still report the slots it verified.
 

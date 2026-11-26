@@ -59,7 +59,7 @@ func (b *Bot) handleWidgetQuery(ctx context.Context, query *widgetQuery) {
 
 func validWidgetAction(action string) bool {
 	switch action {
-	case "account", "app", "app:history", "connect:open", "history", "menu", "new", "settings", "settings:language", "watches":
+	case "account", "app", "app:history", "connect:chrome", "connect:open", "connect:password", "history", "menu", "new", "settings", "settings:language", "watches":
 		return true
 	}
 	if locale, ok := strings.CutPrefix(action, "lang:"); ok {

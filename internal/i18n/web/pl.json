@@ -1,4 +1,12 @@
 {
+  "account.chrome": "Zaloguj się przez Chrome",
+  "account.save_credentials": "Zapisz login i hasło",
+  "account.change_credentials": "Zmień zapisane dane logowania",
+  "account.forget": "Usuń dane logowania i przejdź na Chrome",
+  "account.login": "Login LUX MED",
+  "account.password": "Hasło",
+  "account.encryption": "Bot zaszyfruje login i hasło dla Twojego konta i użyje ich do sprawdzania terminów w tle.",
+  "account.login_failed": "Sprawdź login i hasło. Jeśli LUX MED wymaga dodatkowej weryfikacji, zaloguj się przez Chrome.",
   "account.connected": "Konto LUX MED połączone",
   "account.instructions": "Zaloguj się w oknie zdalnej przeglądarki. Jeśli LUX MED poprosi o kod, wpisz go tam, a po powrocie sprawdź połączenie.",
   "account.needs_login": "Zaloguj się ponownie.",

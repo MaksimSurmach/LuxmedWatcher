@@ -143,6 +143,10 @@ func TestRejectedCredentialsAreNotRetried(t *testing.T) {
 	client := &fakeLuxMed{authErr: luxmed.ErrAuthentication}
 	runner.newClient = func(bool) luxmed.Client { return client }
 
+	if err := db.SaveCredentials(ctx, runner.cryptor, watch.UserID, luxmed.Credentials{Login: "saved", Password: "password"}); err != nil {
+		t.Fatal(err)
+	}
+	runner.UseBrowsers(map[int64]*luxmed.Browser{42: {}})
 	for range 2 {
 		if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
 			t.Fatalf("check error = %v", err)
@@ -225,11 +229,15 @@ func testRunner(t *testing.T, notifier Notifier) (*Runner, *storage.DB, domain.W
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Exercise startup of an existing password-only installation.
 	encrypted, err := cryptor.Encrypt("synthetic-password")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Login: "test", EncryptedPassword: encrypted}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EncryptLegacyLogins(ctx, cryptor); err != nil {
 		t.Fatal(err)
 	}
 	id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})

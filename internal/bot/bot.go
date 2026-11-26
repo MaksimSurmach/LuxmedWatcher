@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -244,11 +245,15 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		return
 	}
 	state := b.getFlow(user.ID)
-	if state != nil && state.Kind == flowAccountPass && user.IsActive() && update.Message.Command() != "cancel" {
+	if state != nil && user.IsActive() && (state.Kind == flowAccountPass && update.Message.Command() != "cancel" || state.Kind == flowAccountLogin && !update.Message.IsCommand()) {
 		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(update.Message.Chat.ID, update.Message.MessageID)); err != nil {
 			b.logger.Warn("could not delete Telegram credential message")
 		}
-		b.handleText(ctx, user, update.Message.Text)
+		value := update.Message.Text
+		if state.Kind == flowAccountLogin {
+			value = strings.TrimSpace(value)
+		}
+		b.handleText(ctx, user, value)
 		return
 	}
 	if update.Message.IsCommand() {
@@ -378,19 +383,7 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		encrypted, err := b.cryptor.Encrypt(text)
-		if err != nil {
-			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
-			return
-		}
-		now := time.Now().UTC()
-		err = b.db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
-			UserID:            user.ID,
-			Login:             state.Login,
-			EncryptedPassword: encrypted,
-			LastLoginAt:       &now,
-			Status:            domain.AccountStatusActive,
-		})
+		err := b.db.SaveCredentials(ctx, b.cryptor, user.ID, luxmed.Credentials{Login: state.Login, Password: text})
 		b.clearFlow(user.ID)
 		if err != nil {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
@@ -481,7 +474,25 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 		b.showStart(ctx, user, false)
 	case data == "account":
 		b.showConnect(ctx, user)
+	case data == "connect:password":
+		b.clearFlow(user.ID)
+		if b.cfg.MiniApp != nil {
+			b.showApp(ctx, user, "settings")
+		} else {
+			b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
+			b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
+		}
 	case data == "connect:open":
+		// Old sign-in buttons predate the explicit choice to erase saved credentials.
+		if _, err := b.db.LoginAccount(ctx, user.ID, true); err == nil {
+			b.showConnect(ctx, user)
+			return
+		} else if !errors.Is(err, sql.ErrNoRows) {
+			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
+			return
+		}
+		b.showAccount(ctx, user)
+	case data == "connect:chrome":
 		b.showAccount(ctx, user)
 	case data == "app":
 		b.showApp(ctx, user, "")
@@ -1521,26 +1532,26 @@ func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domai
 }
 
 func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (luxmed.Client, error) {
-	if b.cfg.Browsers != nil {
-		browser := b.cfg.Browsers[user.TelegramUserID]
-		if browser == nil {
-			return nil, luxmed.ErrAuthentication
-		}
+	browser := b.cfg.Browsers[user.TelegramUserID]
+	if b.cfg.Browsers != nil && browser == nil {
+		return nil, luxmed.ErrAuthentication
+	}
+	account, err := b.db.LoginAccount(ctx, user.ID, browser != nil)
+	if errors.Is(err, sql.ErrNoRows) && browser != nil {
 		if err := browser.Check(ctx); err != nil {
 			return nil, err
 		}
 		return browser.Client(), nil
 	}
-	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil {
 		return nil, err
 	}
-	password, err := b.cryptor.Decrypt(account.EncryptedPassword)
+	creds, err := b.cryptor.OpenCredentials(account.UserID, account.EncryptedPassword)
 	if err != nil {
 		return nil, err
 	}
 	client := b.newClient(false)
-	if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
+	if err := client.Authenticate(ctx, creds); err != nil {
 		return nil, err
 	}
 	return client, nil

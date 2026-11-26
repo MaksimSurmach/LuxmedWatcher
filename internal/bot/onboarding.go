@@ -166,8 +166,9 @@ func (b *Bot) showConnect(ctx context.Context, user domain.User) {
 		return
 	}
 	b.clearFlow(user.ID)
-	b.sendOnboarding(user, b.catalog.T(user.Locale, "button.connect"), b.catalog.T(user.Locale, "widget.connect"), [][]miniAppButton{
-		{b.actionButton(user, "button.sign_in", "connect:open")},
+	b.sendOnboarding(user, b.catalog.T(user.Locale, "button.connect"), b.catalog.T(user.Locale, "widget.login_method"), [][]miniAppButton{
+		{b.actionButton(user, "button.chrome", "connect:chrome")},
+		{b.actionButton(user, "button.saved_login", "connect:password")},
 		{b.actionButton(user, "button.menu", "menu")},
 	})
 }

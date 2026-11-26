@@ -63,6 +63,21 @@ func NewHTTPClient(rawPayloads bool) *HTTPClient {
 	return newHTTPClient(portalURL, rawPayloads)
 }
 
+func NewPasswordClient(creds Credentials) *HTTPClient {
+	client := NewHTTPClient(false)
+	client.creds = creds
+	return client
+}
+
+func (c *HTTPClient) Check(ctx context.Context) error {
+	if c.browser {
+		_, err := c.get(ctx, "/session")
+		return err
+	}
+	_, err := c.GetCities(ctx)
+	return err
+}
+
 func newHTTPClient(baseURL string, rawPayloads bool) *HTTPClient {
 	return &HTTPClient{
 		client: &http.Client{
@@ -102,7 +117,7 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 		return ErrAuthentication
 	}
 	if result.Token == "" {
-		return fmt.Errorf("luxmed login missing token: %w", ErrResponse)
+		return fmt.Errorf("luxmed login did not grant a session: %w", ErrAuthentication)
 	}
 
 	c.accessToken = result.Token

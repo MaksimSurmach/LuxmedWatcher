@@ -149,28 +149,34 @@ func HashInviteCode(code string) string {
 
 func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
 	_, err := db.sql.ExecContext(ctx, `
-		INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status, use_saved_login)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		ON CONFLICT(user_id) DO UPDATE SET
 			login=excluded.login,
+			use_saved_login=excluded.use_saved_login,
 			encrypted_password=excluded.encrypted_password,
 			encrypted_session_data=excluded.encrypted_session_data,
 			session_expires_at=excluded.session_expires_at,
 			last_login_at=excluded.last_login_at,
 			last_login_error=excluded.last_login_error,
 			status=excluded.status
-	`, account.UserID, account.Login, account.EncryptedPassword, account.EncryptedSessionData, nullableTime(account.SessionExpiresAt), nullableTime(account.LastLoginAt), account.LastLoginError, account.Status)
+	`, account.UserID, account.Login, account.EncryptedPassword, account.EncryptedSessionData, nullableTime(account.SessionExpiresAt), nullableTime(account.LastLoginAt), account.LastLoginError, account.Status, account.UseSavedLogin)
 	return err
 }
 
 func (db *DB) LuxMedAccount(ctx context.Context, userID int64) (domain.LuxMedAccount, error) {
+	return db.LoginAccount(ctx, userID, false)
+}
+
+// Browser installations use saved credentials only after the user explicitly opts in.
+func (db *DB) LoginAccount(ctx context.Context, userID int64, browserConfigured bool) (domain.LuxMedAccount, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status
-		FROM luxmed_accounts WHERE user_id=$1
-	`, userID)
+		SELECT id, user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status, use_saved_login
+		FROM luxmed_accounts WHERE user_id=$1 AND (NOT $2 OR use_saved_login)
+	`, userID, browserConfigured)
 	var account domain.LuxMedAccount
 	var sessionExpiresAt, lastLoginAt sql.NullTime
-	err := row.Scan(&account.ID, &account.UserID, &account.Login, &account.EncryptedPassword, &account.EncryptedSessionData, &sessionExpiresAt, &lastLoginAt, &account.LastLoginError, &account.Status)
+	err := row.Scan(&account.ID, &account.UserID, &account.Login, &account.EncryptedPassword, &account.EncryptedSessionData, &sessionExpiresAt, &lastLoginAt, &account.LastLoginError, &account.Status, &account.UseSavedLogin)
 	if sessionExpiresAt.Valid {
 		account.SessionExpiresAt = &sessionExpiresAt.Time
 	}
@@ -186,6 +192,11 @@ func (db *DB) UpdateLuxMedAccountAuth(ctx context.Context, account domain.LuxMed
 		WHERE user_id=$4 AND login=$5 AND encrypted_password=$6
 	`, nullableTime(account.LastLoginAt), account.LastLoginError, account.Status, account.UserID, account.Login, account.EncryptedPassword)
 	return requireOneRow(res, err)
+}
+
+func (db *DB) ForgetCredentials(ctx context.Context, userID int64) error {
+	_, err := db.sql.ExecContext(ctx, "DELETE FROM luxmed_accounts WHERE user_id=$1", userID)
+	return err
 }
 
 func (db *DB) DeleteLuxMedAccount(ctx context.Context, userID int64) error {
@@ -247,11 +258,12 @@ func (db *DB) WatchesByUser(ctx context.Context, userID int64) ([]domain.Watch, 
 	return scanWatches(rows)
 }
 
-func (db *DB) ActiveWatchTelegramIDs(ctx context.Context) ([]int64, error) {
+func (db *DB) ActiveBrowserWatchTelegramIDs(ctx context.Context) ([]int64, error) {
 	rows, err := db.sql.QueryContext(ctx, `
 		SELECT DISTINCT u.telegram_user_id
 		FROM users u JOIN watches w ON w.user_id=u.id
 		WHERE u.status=$1 AND u.role <> '' AND w.status=$2
+		AND NOT EXISTS (SELECT 1 FROM luxmed_accounts a WHERE a.user_id=u.id AND a.use_saved_login)
 		ORDER BY u.telegram_user_id
 	`, domain.UserStatusActive, domain.WatchStatusActive)
 	if err != nil {

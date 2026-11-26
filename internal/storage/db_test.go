@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 )
 
 func TestInviteRedeemAndWatchHistory(t *testing.T) {
@@ -255,7 +256,7 @@ func TestDueHistoryAndAccount(t *testing.T) {
 		if len(due) != 0 {
 			t.Fatalf("watch unexpectedly due before its interval: %+v", due)
 		}
-		owners, err := db.ActiveWatchTelegramIDs(ctx)
+		owners, err := db.ActiveBrowserWatchTelegramIDs(ctx)
 		must(err)
 		if len(owners) != 1 || owners[0] != user.TelegramUserID {
 			t.Fatalf("active watch owners between searches = %v", owners)
@@ -340,7 +341,7 @@ func TestDueHistoryAndAccount(t *testing.T) {
 		if updated.Status != domain.WatchStatusPaused {
 			t.Fatalf("watch status after account deletion = %v", updated.Status)
 		}
-		owners, err = db.ActiveWatchTelegramIDs(ctx)
+		owners, err = db.ActiveBrowserWatchTelegramIDs(ctx)
 		must(err)
 		if len(owners) != 0 {
 			t.Fatalf("paused watch owners eligible for renewal = %v", owners)
@@ -688,6 +689,57 @@ func TestUpcomingHistoryPagesNearestFirst(t *testing.T) {
 		}
 		if want := []int{24, 48, 72, -2, -48}; !slices.Equal(got, want) {
 			t.Fatalf("hours from now across pages = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestCredentialMigrationAndModeSwitch(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 123, Role: domain.UserRoleUser, Status: domain.UserStatusActive})
+		must(err)
+		key, err := security.NewCryptor(make([]byte, 32))
+		must(err)
+		password, err := key.Encrypt("old password")
+		must(err)
+		must(db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Login: "old login", EncryptedPassword: password}))
+		must(db.EncryptLegacyLogins(ctx, key))
+		must(db.EncryptLegacyLogins(ctx, key))
+		a, err := db.LoginAccount(ctx, user.ID, false)
+		must(err)
+		creds, err := key.OpenCredentials(user.ID, a.EncryptedPassword)
+		must(err)
+		if a.Login != "" || creds.Login != "old login" || creds.Password != "old password" {
+			t.Fatal("legacy account migration failed")
+		}
+		if _, err := db.LoginAccount(ctx, user.ID, true); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatal("legacy credentials enabled in Chrome mode")
+		}
+		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		must(db.SaveCredentials(ctx, key, user.ID, creds))
+		_, err = db.LoginAccount(ctx, user.ID, true)
+		must(err)
+		ids, err := db.ActiveBrowserWatchTelegramIDs(ctx)
+		must(err)
+		if len(ids) != 0 {
+			t.Fatal("password mode scheduled browser renewal")
+		}
+		must(db.ForgetCredentials(ctx, user.ID))
+		watch, err := db.Watch(ctx, id)
+		must(err)
+		if watch.Status != domain.WatchStatusActive {
+			t.Fatal("switching mode paused the watch")
+		}
+		ids, err = db.ActiveBrowserWatchTelegramIDs(ctx)
+		must(err)
+		if len(ids) != 1 || ids[0] != user.TelegramUserID {
+			t.Fatal("browser renewal did not resume")
 		}
 	})
 }

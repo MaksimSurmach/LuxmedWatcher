@@ -1,4 +1,12 @@
 {
+  "account.chrome": "Sign in with Chrome",
+  "account.save_credentials": "Save login and password",
+  "account.change_credentials": "Change saved login and password",
+  "account.forget": "Delete saved credentials and use Chrome",
+  "account.login": "LUX MED login",
+  "account.password": "Password",
+  "account.encryption": "The watcher encrypts both fields for your account and uses them for background checks.",
+  "account.login_failed": "Check your login and password. If LUX MED requires additional verification, use Chrome.",
   "account.connected": "LUX MED connected",
   "account.instructions": "Sign in through a remote browser. If LUX MED asks for a code, enter it there, then return and check the connection.",
   "account.needs_login": "Sign-in required.",

@@ -93,6 +93,7 @@ async function api(action, data = {}) {
   if (response.status === 401) throw new DashboardError('error.reopen');
   if (response.status === 403) throw new DashboardError('error.access_denied');
   if (response.status === 429) throw new DashboardError('error.browser_busy');
+  if (response.status === 409 && action === 'credentials') throw new DashboardError('account.login_failed');
   if (response.status === 409) throw new DashboardError('error.connect_first');
   if (response.status === 400) throw new DashboardError('error.invalid_fields');
   if (response.status === 404) throw new DashboardError('error.stale');
@@ -121,7 +122,6 @@ function show(title, html, focus = true) {
 }
 
 // The portal connection is only checked when the user asks (never automatically).
-// Compact: a status line with the two actions, used on Home. Full: adds instructions, used in Settings.
 function accountSection(compact = false) {
   return `<section class="card stack account${compact ? ' compact' : ''}" data-state="${account}" aria-labelledby="account-heading">
     <div class="account-head">
@@ -129,11 +129,22 @@ function accountSection(compact = false) {
       <p class="account-status" data-state="${account}" role="status">${text(`account.${account}`)}</p>
     </div>
     <div class="account-actions">
-      <button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text('account.sign_in')} ${icon('link')}</button>
+      ${state.SavedLogin
+        ? `<button type="button" class="secondary" id="forget-credentials">${text('account.forget')}</button>`
+        : `<button type="button" class="secondary" id="connect">${text('account.chrome')} ${icon('link')}</button>`}
       <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
     </div>
+    <details>
+      <summary>${text(state.SavedLogin ? 'account.change_credentials' : 'account.save_credentials')}</summary>
+      <form id="credentials" class="stack">
+        <label class="field">${text('account.login')}<input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="254" required></label>
+        <label class="field">${text('account.password')}<input name="password" type="password" autocomplete="current-password" maxlength="1024" required></label>
+        <p class="muted">${text('account.encryption')}</p>
+        <button type="submit" class="primary">${text('account.save_credentials')}</button>
+      </form>
+    </details>
     <p class="muted error" data-account-error role="status"></p>
-    ${compact ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
+    ${compact || state.SavedLogin ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
   </section>`;
 }
 
@@ -154,7 +165,28 @@ async function signIn() {
 function bindAccount() {
   const failure = main.querySelector('[data-account-error]');
   const connect = main.querySelector('#connect');
-  connect.onclick = () => void run(connect, signIn, failure);
+  if (connect) connect.onclick = () => void run(connect, signIn, failure);
+  const form = main.querySelector('#credentials');
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    void run(form.querySelector('button'), async () => {
+      try {
+        await api('credentials', { Login: form.elements.login.value, Password: form.elements.password.value });
+      } finally {
+        form.elements.password.value = '';
+      }
+      state.SavedLogin = true;
+      account = 'connected';
+      await switchTab(tab);
+    }, failure);
+  };
+  const forget = main.querySelector('#forget-credentials');
+  if (forget) forget.onclick = () => void run(forget, async () => {
+    await api('forget-credentials');
+    state.SavedLogin = false;
+    account = 'unchecked';
+    await switchTab(tab);
+  }, failure);
   const check = main.querySelector('#account-check');
   check.onclick = () => void run(check, async () => {
     account = (await api('account')).state;
@@ -293,7 +325,7 @@ function watches() {
     const watch = items.find((item) => item.ID === Number(button.dataset.autobook));
     button.onclick = () => (watch.AutoBook ? setAutoBook(button, watch, false) : autoBookDialog(button, watch));
   }
-  for (const button of main.querySelectorAll('[data-sign-in]')) button.onclick = () => void run(button, signIn);
+  for (const button of main.querySelectorAll('[data-sign-in]')) button.onclick = () => void switchTab('settings');
   const chat = main.querySelector('#check-in-chat');
   if (chat) chat.onclick = () => {
     if (telegram?.close) telegram.close();
@@ -496,7 +528,7 @@ function cityOptions(items, selected, placeholder) {
 async function settingsScreen(id) {
   show(titleFor('settings'), `<div class="stack">
     ${accountSection()}
-    <form class="stack">
+    <form class="stack" id="preferences">
       <section class="card stack" aria-labelledby="preferences-heading">
         <h2 id="preferences-heading">${text('settings.preferences')}</h2>
         <label class="field">${text('settings.default_city')}<select name="city"></select></label>
@@ -508,7 +540,7 @@ async function settingsScreen(id) {
       <p class="muted error" data-error role="status"></p>
       <button type="submit" class="primary">${text('common.save')}</button>
     </form></div>`);
-  const form = main.querySelector('form');
+  const form = main.querySelector('#preferences');
   const error = form.querySelector('[data-error]');
   const loadCities = main.querySelector('#load-cities');
   const selected = { ID: state.CityID, Name: state.CityName };

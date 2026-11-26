@@ -1,4 +1,7 @@
 {
+  "button.chrome": "Zaloguj się przez Chrome",
+  "button.saved_login": "Zapisz login i hasło",
+  "widget.login_method": "Wybierz sposób logowania. Wybór Chrome usunie zapisany login i hasło.",
   "button.connect": "Połącz konto LUX MED",
   "button.account": "Konto LUX MED",
   "button.afternoon": "12:00–16:00",
@@ -136,7 +139,7 @@
   "command.start": "Uruchom Luxmed Watcher",
   "command.help": "Wyświetl pomoc",
   "widget.start": "Obserwuj terminy w LUX MED i otrzymuj powiadomienia w Telegramie, gdy pojawi się pasujący termin.",
-  "widget.start_connect": "Połącz konto, a następnie utwórz pierwsze wyszukiwanie. Dane logowania wpisuj tylko w oknie logowania LUX MED.",
+  "widget.start_connect": "Połącz konto LUX MED i utwórz pierwsze wyszukiwanie. Możesz wybrać Chrome lub zapisany login i hasło.",
   "widget.connect": "Otwórz LUX MED, zaloguj się i w razie potrzeby potwierdź logowanie. Następnie zamknij okno logowania. Nie wysyłaj na tym czacie loginu ani hasła do LUX MED.",
   "widget.error": "Nie udało się wykonać tej akcji. Spróbuj ponownie lub użyj przycisków poniżej."
 }

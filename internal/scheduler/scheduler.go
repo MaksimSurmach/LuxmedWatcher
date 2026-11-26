@@ -29,12 +29,12 @@ type Notifier interface {
 }
 
 type accountCheck struct {
-	busy                     bool
-	next, lastCheck          time.Time
-	failures                 int
-	authenticatedAt          time.Time
-	login, encryptedPassword string
-	client                   luxmed.Client
+	busy              bool
+	next, lastCheck   time.Time
+	failures          int
+	authenticatedAt   time.Time
+	encryptedPassword string
+	client            luxmed.Client
 }
 
 type Runner struct {
@@ -171,16 +171,24 @@ func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool)
 }
 
 func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, state *accountCheck, started time.Time) (int, error) {
+	browser := r.browsers[user.TelegramUserID]
+	if r.browsers != nil && browser == nil {
+		return 0, ErrInactive
+	}
+	account, err := r.db.LoginAccount(ctx, user.ID, browser != nil)
 	var client luxmed.Client
-	if r.browsers != nil {
-		browser := r.browsers[user.TelegramUserID]
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		state.client = nil
+		state.encryptedPassword = ""
 		if browser == nil {
-			return 0, ErrInactive
+			return 0, ErrNoAccount
 		}
 		client = browser.Client()
-	} else {
-		var err error
-		client, err = r.passwordClient(ctx, user.ID, state)
+	case err != nil:
+		return 0, fmt.Errorf("load LuxMed account: %w", err)
+	default:
+		client, err = r.passwordClient(ctx, account, state)
 		if err != nil {
 			return 0, err
 		}
@@ -254,27 +262,19 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 	return len(seen), errors.Join(searchErr, notifyErr, recordErr)
 }
 
-func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accountCheck) (luxmed.Client, error) {
-	account, err := r.db.LuxMedAccount(ctx, userID)
-	if errors.Is(err, sql.ErrNoRows) {
-		state.client = nil
-		state.login, state.encryptedPassword = "", ""
-		return nil, ErrNoAccount
-	}
-	if err != nil {
-		return nil, fmt.Errorf("load LuxMed account: %w", err)
-	}
+func (r *Runner) passwordClient(ctx context.Context, account domain.LuxMedAccount, state *accountCheck) (luxmed.Client, error) {
 	if account.Status == domain.AccountStatusAuthFailed {
+		state.client = nil
 		return nil, luxmed.ErrAuthentication
 	}
-	if state.client == nil || state.login != account.Login || state.encryptedPassword != account.EncryptedPassword || time.Since(state.authenticatedAt) > 15*time.Minute {
+	if state.client == nil || state.encryptedPassword != account.EncryptedPassword || time.Since(state.authenticatedAt) > 15*time.Minute {
 		state.client = nil
-		password, err := r.cryptor.Decrypt(account.EncryptedPassword)
+		creds, err := r.cryptor.OpenCredentials(account.UserID, account.EncryptedPassword)
 		if err != nil {
 			return nil, fmt.Errorf("decrypt LuxMed credentials: %w", err)
 		}
 		client := r.newClient(r.rawPayloads)
-		if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
+		if err := client.Authenticate(ctx, creds); err != nil {
 			if errors.Is(err, luxmed.ErrAuthentication) {
 				return nil, errors.Join(err, r.recordAuthFailure(ctx, account))
 			}
@@ -287,7 +287,7 @@ func (r *Runner) passwordClient(ctx context.Context, userID int64, state *accoun
 			return nil, fmt.Errorf("save LuxMed account status: %w", err)
 		}
 		state.client, state.authenticatedAt = client, now
-		state.login, state.encryptedPassword = account.Login, account.EncryptedPassword
+		state.encryptedPassword = account.EncryptedPassword
 	}
 
 	return state.client, nil
@@ -380,7 +380,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 // Search intervals can be longer than the portal's refresh cookie lifetime.
 func (s *Scheduler) maintainBrowserSessions(ctx context.Context) {
 	for ctx.Err() == nil {
-		ids, err := s.db.ActiveWatchTelegramIDs(ctx)
+		ids, err := s.db.ActiveBrowserWatchTelegramIDs(ctx)
 		if err != nil && ctx.Err() == nil {
 			s.logger.Warn("load active accounts for LuxMed session renewal", "err", err)
 		}

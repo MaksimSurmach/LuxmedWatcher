@@ -15,14 +15,7 @@ import (
 )
 
 func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
-	if b.cfg.Browsers != nil {
-		browser := b.cfg.Browsers[user.TelegramUserID]
-		if browser == nil {
-			return luxmed.ErrAuthentication
-		}
-		return browser.Check(ctx)
-	}
-	_, err := b.db.LuxMedAccount(ctx, user.ID)
+	_, err := b.authenticatedLuxMedClient(ctx, user)
 	return err
 }
 
@@ -49,7 +42,7 @@ func (b *Bot) withAccountRecovery(
 	var button tgbotapi.InlineKeyboardButton
 	switch key {
 	case "errors.needs_login":
-		button = tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.sign_in"), "connect:open")
+		button = tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.sign_in"), "account")
 	case "errors.no_account":
 		button = tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.connect"), "account")
 	default:
@@ -69,6 +62,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if !user.IsActive() || browser == nil {
 		return
 	}
+	b.clearFlow(user.ID)
 	if b.cfg.MiniApp != nil {
 		b.showMiniApp(ctx, user)
 		return
@@ -77,6 +71,10 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if err != nil {
 		b.logger.Warn("open browser viewer failed", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
+		return
+	}
+	if err := b.db.ForgetCredentials(ctx, user.ID); err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
 	if strings.HasPrefix(link, "http://localhost:") {
@@ -96,6 +94,10 @@ func (b *Bot) showMiniApp(ctx context.Context, user domain.User) {
 	if err != nil {
 		b.logger.Warn("Mini App unavailable", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
+		return
+	}
+	if err := b.db.ForgetCredentials(ctx, user.ID); err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
 	b.sendMiniApp(user, "flow.browser.open", "button.sign_in", link+"&lang="+i18n.Normalize(user.Locale, "pl"))

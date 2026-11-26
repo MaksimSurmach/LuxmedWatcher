@@ -3,7 +3,9 @@ package miniapp
 import (
 	"context"
 	"crypto/ed25519"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +19,7 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
@@ -102,6 +105,48 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	}
 	token := session(signed)
 	otherToken := session(signTelegram(other.TelegramUserID, 12, time.Now(), priv))
+	d.cfg.Cryptor, err = security.NewCryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const secret = "  example password  "
+	d.verifyCredentials = func(_ context.Context, creds luxmed.Credentials) error {
+		if creds.Login != "patient" || creds.Password != secret {
+			return luxmed.ErrAuthentication
+		}
+		return nil
+	}
+	validLogin := `{"Login":"patient","Password":"  example password  "}`
+	request("credentials", validLogin, origin, "", http.StatusUnauthorized)
+	request("credentials", validLogin, "https://other.example", token, http.StatusUnauthorized)
+	request("credentials", `{"Login":"  ","Password":"x"}`, origin, token, http.StatusBadRequest)
+	request("credentials", validLogin, origin, token, http.StatusNoContent)
+	request("credentials", `{"Login":"patient","Password":"wrong"}`, origin, token, http.StatusConflict)
+	request("forget-credentials", "{}", origin, otherToken, http.StatusNoContent)
+	saved, err := db.LoginAccount(ctx, owner.ID, true)
+	if err != nil || saved.Login != "" || saved.EncryptedPassword == "" {
+		t.Fatal("expected encrypted credentials only", err)
+	}
+	creds, err := d.cfg.Cryptor.OpenCredentials(owner.ID, saved.EncryptedPassword)
+	if err != nil || creds.Login != "patient" || creds.Password != secret {
+		t.Fatal("original credentials were not preserved")
+	}
+	if _, err := d.cfg.Cryptor.OpenCredentials(other.ID, saved.EncryptedPassword); err == nil {
+		t.Fatal("ciphertext accepted for another user")
+	}
+	for _, tc := range []struct {
+		token string
+		saved bool
+	}{{token, true}, {otherToken, false}} {
+		view := request("load", "{}", origin, tc.token, http.StatusOK).Body.String()
+		if !strings.Contains(view, fmt.Sprintf(`"SavedLogin":%t`, tc.saved)) || strings.Contains(view, secret) || strings.Contains(view, "patient") || strings.Contains(view, saved.EncryptedPassword) {
+			t.Fatal("incorrect or unsafe account view")
+		}
+	}
+	request("forget-credentials", "{}", origin, token, http.StatusNoContent)
+	if _, err := db.LuxMedAccount(ctx, owner.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatal("credentials retained", err)
+	}
 	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), "Other") {
 		t.Fatalf("other user's search missing: %s", res.Body)
 	}

@@ -88,6 +88,7 @@ type LuxMedAccount struct {
 	UserID               int64
 	Login                string
 	EncryptedPassword    string
+	UseSavedLogin        bool
 	EncryptedSessionData string
 	SessionExpiresAt     *time.Time
 	LastLoginAt          *time.Time
