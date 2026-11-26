@@ -147,8 +147,14 @@ func HashInviteCode(code string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
-	_, err := db.sql.ExecContext(ctx, `
+func (db *DB) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT(user_id) DO UPDATE SET
@@ -160,7 +166,13 @@ func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAcco
 			last_login_error=excluded.last_login_error,
 			status=excluded.status
 	`, account.UserID, account.Login, account.EncryptedPassword, account.EncryptedSessionData, nullableTime(account.SessionExpiresAt), nullableTime(account.LastLoginAt), account.LastLoginError, account.Status)
-	return err
+	if err != nil {
+		return err
+	}
+	if err := resolveLuxMedReconnect(ctx, tx, account.UserID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (db *DB) LuxMedAccount(ctx context.Context, userID int64) (domain.LuxMedAccount, error) {

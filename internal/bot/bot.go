@@ -400,7 +400,11 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			return
 		}
 		now := time.Now().UTC()
-		err = b.db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
+		save := b.db.SaveVerifiedLuxMedAccount
+		if b.runner != nil {
+			save = b.runner.SaveVerifiedLuxMedAccount
+		}
+		err = save(ctx, domain.LuxMedAccount{
 			UserID:            user.ID,
 			Login:             state.Login,
 			EncryptedPassword: encrypted,
@@ -1531,14 +1535,10 @@ func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domai
 
 func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (luxmed.Client, error) {
 	if b.cfg.Browsers != nil {
-		browser := b.cfg.Browsers[user.TelegramUserID]
-		if browser == nil {
-			return nil, luxmed.ErrAuthentication
-		}
-		if err := browser.Check(ctx); err != nil {
+		if err := b.checkAccount(ctx, user); err != nil {
 			return nil, err
 		}
-		return browser.Client(), nil
+		return b.cfg.Browsers[user.TelegramUserID].Client(), nil
 	}
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil {

@@ -236,7 +236,7 @@ func testRunnerAt(t *testing.T, notifier Notifier, path string) (*Runner, *stora
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Login: "test", EncryptedPassword: encrypted}); err != nil {
+	if err := db.SaveVerifiedLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Login: "test", EncryptedPassword: encrypted}); err != nil {
 		t.Fatal(err)
 	}
 	id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
@@ -759,5 +759,68 @@ func TestScheduledNotificationUsesLocaleChangedDuringSearch(t *testing.T) {
 	}
 	if deliveredFor != "uk" {
 		t.Errorf("notification used %q after switching to Ukrainian", deliveredFor)
+	}
+}
+
+func TestPasswordReconnectSerializesWithQueuedWarning(t *testing.T) {
+	ctx := t.Context()
+	sending := make(chan struct{})
+	unblock := make(chan struct{})
+	releaseSend := sync.OnceFunc(func() { close(unblock) })
+	t.Cleanup(releaseSend)
+	attempts := 0
+	notifier := reconnectNotifierFunc{send: func() error {
+		attempts++
+		if attempts == 1 {
+			close(sending)
+			<-unblock
+		}
+		return &ReconnectDeliveryRejected{}
+	}}
+	runner, db, watch := testRunner(t, notifier)
+	account, err := db.LuxMedAccount(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.BeginLuxMedReconnect(ctx, watch.UserID); err != nil {
+		t.Fatal(err)
+	}
+	if attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, watch.UserID, time.Now()); err != nil || attempt != 1 {
+		t.Fatalf("prepare scheduled retry: attempt=%d, err=%v", attempt, err)
+	}
+	if err := db.RecordLuxMedReconnectRejection(ctx, watch.UserID, time.Now().Add(-time.Minute), 0); err != nil {
+		t.Fatal(err)
+	}
+
+	retryDone := make(chan error, 1)
+	go func() { retryDone <- runner.renewBrowserSession(ctx, 42, nil) }()
+	select {
+	case <-sending:
+	case err := <-retryDone:
+		t.Fatalf("retry missed the notifier: %v", err)
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+
+	account.Login = "verified login"
+	waitCtx, cancel := context.WithTimeout(ctx, 100*time.Millisecond)
+	defer cancel()
+	if err := runner.SaveVerifiedLuxMedAccount(waitCtx, account); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("password sign-in bypassed the in-flight retry: %v", err)
+	}
+	releaseSend()
+	if err := <-retryDone; err == nil {
+		t.Fatal("expected temporary rejection from retry")
+	}
+
+	if err := runner.SaveVerifiedLuxMedAccount(ctx, account); err != nil {
+		t.Fatal(err)
+	}
+	user, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runner.deliverReconnect(ctx, user, time.Now().Add(time.Hour)); err != nil || attempts != 1 {
+		t.Fatalf("retry after verified login: attempts=%d, err=%v", attempts, err)
 	}
 }

@@ -48,7 +48,7 @@ type reconnectNotifier interface {
 }
 
 type accountCheck struct {
-	busy                     bool
+	inFlight                 chan struct{}
 	next, lastCheck          time.Time
 	failures                 int
 	authenticatedAt          time.Time
@@ -92,7 +92,7 @@ func (r *Runner) ManualCheck(ctx context.Context, watch domain.Watch) (int, erro
 	return r.check(ctx, watch, true)
 }
 
-func (r *Runner) acquireAccount(userID int64, respectCooldown bool) *accountCheck {
+func (r *Runner) acquireAccount(userID int64, respectCooldown bool) (*accountCheck, <-chan struct{}) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -101,22 +101,44 @@ func (r *Runner) acquireAccount(userID int64, respectCooldown bool) *accountChec
 		state = &accountCheck{}
 		r.accounts[userID] = state
 	}
-	if state.busy || respectCooldown && time.Now().Before(state.next) {
-		return nil
+	if state.inFlight != nil {
+		return nil, state.inFlight
 	}
-	state.busy = true
+	if respectCooldown && time.Now().Before(state.next) {
+		return nil, nil
+	}
+	state.inFlight = make(chan struct{})
 	state.lastCheck = time.Now()
-	return state
+	return state, nil
 }
 
 func (r *Runner) releaseAccount(state *accountCheck) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	state.busy = false
+	close(state.inFlight)
+	state.inFlight = nil
+}
+
+// SaveVerifiedLuxMedAccount commits sign-in after any in-flight check or delivery.
+func (r *Runner) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	for ctx.Err() == nil {
+		state, done := r.acquireAccount(account.UserID, false)
+		if state != nil {
+			defer r.releaseAccount(state)
+			return r.db.SaveVerifiedLuxMedAccount(ctx, account)
+		}
+
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return ctx.Err()
 }
 
 func (r *Runner) check(ctx context.Context, requested domain.Watch, manual bool) (count int, err error) {
-	state := r.acquireAccount(requested.UserID, true)
+	state, _ := r.acquireAccount(requested.UserID, true)
 	if state == nil {
 		return 0, ErrRateLimited
 	}
@@ -386,7 +408,7 @@ func (r *Runner) probeBrowserSession(ctx context.Context, user domain.User, brow
 	if !user.IsActive() {
 		return nil
 	}
-	state := r.acquireAccount(user.ID, false)
+	state, _ := r.acquireAccount(user.ID, false)
 	if state == nil {
 		return luxmed.ErrBrowserBusy
 	}
@@ -584,7 +606,7 @@ func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched
 	now := time.Now()
 	s.runner.mu.Lock()
 	for userID, account := range s.runner.accounts {
-		if !account.busy && now.After(account.next) && now.Sub(account.lastCheck) > 15*time.Minute {
+		if account.inFlight == nil && now.After(account.next) && now.Sub(account.lastCheck) > 15*time.Minute {
 			delete(s.runner.accounts, userID)
 		}
 	}
@@ -606,7 +628,7 @@ func (s *Scheduler) tick(ctx context.Context, checks *sync.WaitGroup, dispatched
 		accounts[watch.UserID] = true
 		s.runner.mu.Lock()
 		account := s.runner.accounts[watch.UserID]
-		blocked := account != nil && (account.busy || now.Before(account.next))
+		blocked := account != nil && (account.inFlight != nil || now.Before(account.next))
 		s.runner.mu.Unlock()
 		if blocked {
 			continue

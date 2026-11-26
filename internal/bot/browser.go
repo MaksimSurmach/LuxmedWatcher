@@ -74,6 +74,9 @@ func (c *reconnectHTTP) Do(req *http.Request) (*http.Response, error) {
 
 func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
 	if b.cfg.Browsers != nil {
+		if b.runner != nil {
+			return b.runner.CheckBrowserSession(ctx, user)
+		}
 		browser := b.cfg.Browsers[user.TelegramUserID]
 		if browser == nil {
 			return luxmed.ErrAuthentication

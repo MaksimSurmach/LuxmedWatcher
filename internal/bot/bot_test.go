@@ -20,6 +20,7 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
@@ -108,21 +109,69 @@ type authClient struct {
 
 func (c authClient) Authenticate(context.Context, luxmed.Credentials) error { return c.err }
 
-func TestCredentialsAreStoredOnlyAfterAuthentication(t *testing.T) {
+func TestPasswordLoginResumesOnlyActiveSearchesAfterAuthentication(t *testing.T) {
 	ctx := context.Background()
 	b := testBot(t)
 	user := createUser(t, b, 10, domain.UserStatusActive)
+	const minimum = 5 * time.Minute
+	runner := scheduler.NewRunner(b.db, b.cryptor, b, minimum, time.Hour, false)
+	b.SetRunner(runner)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	search := domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 12, CheckIntervalSeconds: 3600}
+	activeID, err := b.db.CreateWatch(ctx, search)
+	must(err)
+	pausedID, err := b.db.CreateWatch(ctx, search)
+	must(err)
+	must(b.db.MarkWatchChecked(ctx, activeID, false, "luxmed_authentication"))
+	must(b.db.MarkWatchChecked(ctx, pausedID, false, "luxmed_authentication"))
+	must(b.db.SetWatchStatus(ctx, pausedID, domain.WatchStatusPaused))
+	must(b.db.BeginLuxMedReconnect(ctx, user.ID))
+	if attempt, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, time.Now()); err != nil || attempt != 1 {
+		t.Fatalf("claim reconnect warning: attempt=%d, err=%v", attempt, err)
+	}
+	must(b.db.RecordLuxMedReconnectRejection(ctx, user.ID, time.Now().Add(time.Minute), 0))
+	if reserved, err := b.db.ReserveLuxMedSearch(ctx, user.ID, time.Now(), minimum); err != nil || !reserved {
+		t.Fatalf("reserve search before login: reserved=%v, err=%v", reserved, err)
+	}
+
 	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "example"})
 	b.newClient = func(bool) luxmed.Client { return authClient{err: errors.New("login failed")} }
 	b.handleText(ctx, user, "example password")
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("invalid credentials saved: err=%v", err)
 	}
+	if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err != nil || !required {
+		t.Fatalf("failed login closed reconnect episode: required=%v, err=%v", required, err)
+	}
 	b.newClient = func(bool) luxmed.Client { return authClient{} }
 	b.handleText(ctx, user, "example password")
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil || account.Status != domain.AccountStatusActive || account.EncryptedPassword == "example password" {
 		t.Fatalf("authenticated credentials not safely saved: status=%s, err=%v", account.Status, err)
+	}
+
+	if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err != nil || required {
+		t.Fatalf("successful login left reconnect episode open: required=%v, err=%v", required, err)
+	}
+	if attempt, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, time.Now().Add(time.Hour)); err != nil || attempt != 0 {
+		t.Fatalf("queued reconnect warning survived successful login: attempt=%d, err=%v", attempt, err)
+	}
+	due, err := b.db.DueWatches(ctx, 0)
+	if err != nil || len(due) != 1 || due[0].ID != activeID || due[0].CityID != search.CityID ||
+		due[0].ServiceID != search.ServiceID || due[0].CheckIntervalSeconds != search.CheckIntervalSeconds {
+		t.Fatalf("active search did not resume with saved filters: due=%+v, err=%v", due, err)
+	}
+	if err := runner.CheckWatch(ctx, due[0]); !errors.Is(err, scheduler.ErrRateLimited) {
+		t.Fatalf("successful login bypassed the minimum search interval: %v", err)
+	}
+	paused, err := b.db.Watch(ctx, pausedID)
+	if err != nil || paused.Status != domain.WatchStatusPaused || paused.LastCheckedAt == nil {
+		t.Fatalf("successful login changed a paused search: %+v, err=%v", paused, err)
 	}
 }
 
@@ -456,5 +505,37 @@ func TestStandaloneConnectLinkUsesSavedLanguage(t *testing.T) {
 				t.Fatal("viewer link was not sent")
 			}
 		})
+	}
+}
+
+func TestTelegramBrowserAccountCheckResolvesReconnect(t *testing.T) {
+	ctx := t.Context()
+	b := testBot(t)
+	user := createUser(t, b, 10, domain.UserStatusActive)
+	if err := b.db.BeginLuxMedReconnect(ctx, user.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/session" {
+			t.Errorf("unexpected browser request: %s", req.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+	runner := scheduler.NewRunner(b.db, b.cryptor, nil, time.Minute, time.Hour, false)
+	runner.UseBrowsers(b.cfg.Browsers)
+	b.SetRunner(runner)
+
+	if err := b.checkAccount(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err != nil || required {
+		t.Fatalf("confirmed browser session left reconnect episode open: required=%v, err=%v", required, err)
 	}
 }

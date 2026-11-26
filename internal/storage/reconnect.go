@@ -90,6 +90,13 @@ func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
 	}
 	defer tx.Rollback()
 
+	if err := resolveLuxMedReconnect(ctx, tx, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func resolveLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64) error {
 	result, err := tx.ExecContext(ctx, `DELETE FROM luxmed_reconnect WHERE user_id=$1`, userID)
 	if err != nil {
 		return err
@@ -108,5 +115,5 @@ func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }

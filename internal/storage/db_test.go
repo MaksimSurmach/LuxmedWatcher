@@ -324,7 +324,7 @@ func TestDueHistoryAndAccount(t *testing.T) {
 		}
 
 		account := domain.LuxMedAccount{UserID: user.ID, Login: "fixture", EncryptedPassword: "cipher", Status: domain.AccountStatusActive}
-		must(db.UpsertLuxMedAccount(ctx, account))
+		must(db.SaveVerifiedLuxMedAccount(ctx, account))
 		stale := account
 		stale.EncryptedPassword = "previous-cipher"
 		if err := db.UpdateLuxMedAccountAuth(ctx, stale); !errors.Is(err, sql.ErrNoRows) {
