@@ -50,6 +50,7 @@ func (b *Bot) handleWidgetQuery(ctx context.Context, query *widgetQuery) {
 		!validWidgetAction(query.Data) {
 		return
 	}
+	b.cancelPendingChromeLogin(ctx, query.From.ID, query.Data)
 	if _, err := b.api.MakeRequest("answerWidgetQuery", tgbotapi.Params{"widget_query_id": query.ID}); err != nil {
 		b.logger.Warn("answer Telegram widget query failed")
 		return

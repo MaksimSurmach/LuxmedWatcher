@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -121,6 +122,7 @@ func TestFirstPasswordLoginSavesCredentialsWhenHistoryIsUnavailable(t *testing.T
 	b.newClient = func(bool) luxmed.Client { return authClient{historyErr: luxmed.ErrUnavailable} }
 	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "example"})
 	b.handleText(ctx, user, "example password")
+	b.workers.Wait()
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil || account.EncryptedPassword == "" || account.EncryptedPassword == "example password" {
 		t.Fatalf("first login did not save encrypted credentials: %v", err)
@@ -165,6 +167,7 @@ func TestPasswordLoginDuringCooldownSavesCredentialsAndQueuesOnlyActiveSearches(
 	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "example"})
 	b.newClient = func(bool) luxmed.Client { return authClient{err: errors.New("login failed")} }
 	b.handleText(ctx, user, "example password")
+	b.workers.Wait()
 	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
 		t.Fatalf("invalid credentials saved: err=%v", err)
 	}
@@ -173,6 +176,7 @@ func TestPasswordLoginDuringCooldownSavesCredentialsAndQueuesOnlyActiveSearches(
 	}
 	b.newClient = func(bool) luxmed.Client { return authClient{} }
 	b.handleText(ctx, user, "example password")
+	b.workers.Wait()
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil || account.Status != domain.AccountStatusActive || account.EncryptedPassword == "example password" {
 		t.Fatalf("authenticated credentials not safely saved: status=%s, err=%v", account.Status, err)
@@ -648,5 +652,95 @@ func TestTelegramBrowserAccountCheckLeavesSearchVerificationPending(t *testing.T
 	_, access, err := b.db.WatchesWithReconnectState(ctx, user.ID)
 	if err != nil || access.EpisodeID == "" || access.Status != storage.LuxMedAccessPending {
 		t.Fatalf("session check did not leave protected verification pending: %+v, %v", access, err)
+	}
+}
+
+type blockedLoginClient struct {
+	luxmed.Client
+	started chan<- struct{}
+	release <-chan struct{}
+}
+
+func (c blockedLoginClient) Authenticate(context.Context, luxmed.Credentials) error {
+	close(c.started)
+	<-c.release
+	return nil
+}
+
+func TestTelegramChromeCancelsInFlightPasswordVerification(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	started, release := make(chan struct{}), make(chan struct{})
+	releaseLogin := sync.OnceFunc(func() { close(release) })
+	var b *Bot
+	b = testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/answerCallbackQuery") {
+			// Let authentication return while Telegram is acknowledging the Chrome click.
+			releaseLogin()
+			b.workers.Wait()
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	worker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/viewer" {
+			t.Errorf("unexpected browser request: %s", r.URL.Path)
+		}
+		fmt.Fprintf(w, `{"ticket":%q}`, strings.Repeat("a", 64))
+	}))
+	t.Cleanup(worker.Close)
+	browser, err := luxmed.NewBrowser(worker.URL, "http://localhost:18769")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+	defer func() {
+		releaseLogin()
+		b.workers.Wait()
+	}()
+	b.newClient = func(bool) luxmed.Client { return blockedLoginClient{started: started, release: release} }
+	b.setFlow(user.ID, &flow{Kind: flowAccountPass, Login: "fixture"})
+	from := &tgbotapi.User{ID: user.TelegramUserID}
+	chat := &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"}
+	done := make(chan error, 1)
+	go func() {
+		config := tgbotapi.NewUpdate(0)
+		done <- b.processUpdates(ctx, &config, []telegramUpdate{{Update: tgbotapi.Update{
+			UpdateID: 1,
+			Message:  &tgbotapi.Message{MessageID: 20, From: from, Chat: chat, Text: "fixture password"},
+		}}})
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("password verification did not start")
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("password verification blocked the Telegram update loop")
+	}
+
+	config := tgbotapi.NewUpdate(2)
+	if err := b.processUpdates(ctx, &config, []telegramUpdate{{Update: tgbotapi.Update{
+		UpdateID: 2,
+		CallbackQuery: &tgbotapi.CallbackQuery{
+			ID: "chrome", From: from, Message: &tgbotapi.Message{MessageID: 21, Chat: chat}, Data: "connect:chrome",
+		},
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	releaseLogin()
+	b.workers.Wait()
+	fresh, err := b.db.UserByID(ctx, user.ID)
+	if err != nil || fresh.CredentialSaveRevision != user.CredentialSaveRevision+1 ||
+		fresh.CredentialRevision != user.CredentialRevision || b.getFlow(user.ID) != nil {
+		t.Fatalf("Chrome did not cancel the verification: user=%+v, err=%v", fresh, err)
+	}
+	if _, err := b.db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("late verification persisted the password: %v", err)
 	}
 }

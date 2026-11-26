@@ -255,7 +255,7 @@ func TestSearchAccessRejectionAllowsExplicitPasswordRetry(t *testing.T) {
 	}
 }
 
-func TestPausedSearchLoginRejectionSharesRetryAfterWithSave(t *testing.T) {
+func TestPausedSearchLoginBackoffExpiresWithoutReplacingCredentials(t *testing.T) {
 	ctx := t.Context()
 	runner, db, watch := testRunner(t, nil)
 	watch.CityID, watch.ServiceID = 1, 2
@@ -272,14 +272,23 @@ func TestPausedSearchLoginRejectionSharesRetryAfterWithSave(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	account, err := db.LuxMedAccount(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	account.Status = domain.AccountStatusActive
+	if err := db.UpdateLuxMedAccountAuth(ctx, account); err != nil {
+		t.Fatal(err)
+	}
 	client := &catalogClient{
-		fakeLuxMed: fakeLuxMed{authErr: errors.Join(luxmed.ErrCredentialsRejected, &luxmed.HTTPError{
+		fakeLuxMed: fakeLuxMed{authErr: errors.Join(luxmed.ErrUnavailable, &luxmed.HTTPError{
 			StatusCode: http.StatusForbidden, RetryAfter: time.Minute,
 		})},
 		cities: func(context.Context) error { return nil },
 	}
+	client.search = func(context.Context) ([]domain.Appointment, error) { return nil, nil }
 	runner.newClient = func(bool) luxmed.Client { return client }
-	if err := runner.renewBrowserSession(ctx, user.TelegramUserID, nil); !errors.Is(err, luxmed.ErrAuthentication) {
+	if err := runner.renewBrowserSession(ctx, user.TelegramUserID, nil); !errors.Is(err, luxmed.ErrUnavailable) {
 		t.Fatalf("paused search login = %v", err)
 	}
 	client.authErr = nil
@@ -287,6 +296,19 @@ func TestPausedSearchLoginRejectionSharesRetryAfterWithSave(t *testing.T) {
 	if err := runner.SaveCredentials(ctx, user, creds); !errors.Is(err, luxmed.ErrUnavailable) || client.logins != 1 {
 		t.Fatalf("save bypassed the rejected login's Retry-After: err=%v logins=%d", err, client.logins)
 	}
+	account, err = db.LuxMedAccount(ctx, user.ID)
+	if err != nil || account.Status != domain.AccountStatusActive {
+		t.Fatalf("temporary response invalidated saved credentials: %s, %v", account.Status, err)
+	}
+	runner.accounts[user.ID].retryAfter = time.Time{}
+	runner.accounts[user.ID].next = time.Time{}
+	if err := db.SetWatchStatus(ctx, watch.ID, domain.WatchStatusActive); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.ManualCheck(ctx, watch); err != nil || client.logins != 2 {
+		t.Fatalf("search did not resume after backoff: err=%v logins=%d", err, client.logins)
+	}
+
 }
 
 func TestOpeningChromeKeepsInFlightChromeSearch(t *testing.T) {

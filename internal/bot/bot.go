@@ -39,18 +39,19 @@ type Config struct {
 }
 
 type Bot struct {
-	api           *tgbotapi.BotAPI
-	db            *storage.DB
-	catalog       *i18n.Catalog
-	cryptor       *security.Cryptor
-	cfg           Config
-	runner        *scheduler.Runner
-	manualChecks  chan struct{}
-	manualWorkers sync.WaitGroup
-	appMenuLocks  sync.Map // User ID to *sync.Mutex.
-	logger        *slog.Logger
-	newClient     func(bool) luxmed.Client
-	flowState     map[int64]*flow
+	api          *tgbotapi.BotAPI
+	db           *storage.DB
+	catalog      *i18n.Catalog
+	cryptor      *security.Cryptor
+	cfg          Config
+	runner       *scheduler.Runner
+	manualChecks chan struct{}
+	workers      sync.WaitGroup
+	appMenuLocks sync.Map // User ID to *sync.Mutex.
+	logger       *slog.Logger
+	newClient    func(bool) luxmed.Client
+	flowMu       sync.Mutex
+	flowState    map[int64]*flow
 }
 
 type flowKind string
@@ -60,6 +61,7 @@ const (
 	flowInvite        flowKind = "invite"
 	flowAccountLogin  flowKind = "account_login"
 	flowAccountPass   flowKind = "account_pass"
+	flowAccountCheck  flowKind = "account_verifying"
 	flowWatchCity     flowKind = "watch_city"
 	flowCitySearch    flowKind = "city_search"
 	flowWatchService  flowKind = "watch_service"
@@ -76,6 +78,7 @@ const (
 
 type flow struct {
 	Kind                 flowKind
+	cancel               context.CancelFunc
 	Login                string
 	CitySettings         bool
 	ProcedureSearchQuery string
@@ -95,7 +98,7 @@ func (b *Bot) SetRunner(runner *scheduler.Runner) {
 }
 
 func (b *Bot) Run(ctx context.Context) error {
-	defer b.manualWorkers.Wait()
+	defer b.workers.Wait()
 	b.registerCommands()
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = b.cfg.PollTimeout
@@ -255,11 +258,14 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		return
 	}
 	state := b.getFlow(user.ID)
-	if state != nil && user.IsActive() && (state.Kind == flowAccountPass && update.Message.Command() != "cancel" || state.Kind == flowAccountLogin && !update.Message.IsCommand()) {
+	if user.IsActive() && state.receivesCredential(update.Message) {
 		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(update.Message.Chat.ID, update.Message.MessageID)); err != nil {
 			b.logger.Warn("could not delete Telegram credential message")
 			b.clearFlow(user.ID)
 			b.send(user, b.catalog.T(user.Locale, "flow.account.delete_failed"), nil)
+			return
+		}
+		if state.Kind == flowAccountCheck {
 			return
 		}
 		value := update.Message.Text
@@ -388,27 +394,9 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, "flow.account.password"), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		creds := luxmed.Credentials{Login: state.Login, Password: text}
-		err := b.saveLogin(ctx, user, creds)
-		if err != nil {
-			key := "errors.generic"
-			switch {
-			case errors.Is(err, luxmed.ErrUnavailable), errors.Is(err, context.DeadlineExceeded):
-				key = "errors.luxmed_unavailable"
-			case errors.Is(err, luxmed.ErrAuthentication):
-				key = "errors.auth_failed"
-			case errors.Is(err, luxmed.ErrBrowserBusy):
-				key = "watch.browser_busy"
-			}
-			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
-			return
-		}
-		b.clearFlow(user.ID)
-		key := "flow.account.saved"
-		if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err == nil && required {
-			key = "flow.account.verification_pending"
-		}
-		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+		b.submitLogin(ctx, user, luxmed.Credentials{Login: state.Login, Password: text})
+	case flowAccountCheck:
+		return
 	case flowWatchCity:
 		b.showCityPicker(ctx, user, state.CitySettings, 0)
 	case flowCitySearch:
@@ -444,8 +432,9 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		(b.cfg.Browsers != nil && b.cfg.Browsers[cb.From.ID] == nil) {
 		return
 	}
-	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 	data := cb.Data
+	b.cancelPendingChromeLogin(ctx, cb.From.ID, data)
+	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 	if strings.HasPrefix(data, "options:") && strings.Count(data, ":") == 2 {
 		// Only the opening button is on the notification itself. Page buttons carry its message ID.
 		data += ":" + strconv.Itoa(cb.Message.MessageID)
@@ -505,6 +494,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 		if b.cfg.Browsers[user.TelegramUserID] == nil {
 			return
 		}
+		b.clearFlow(user.ID)
 		err := b.db.ConfirmBrowserLogin(ctx, user)
 		if errors.Is(err, storage.ErrCredentialsChanged) {
 			b.showConnect(ctx, user)
@@ -519,6 +509,7 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 		if b.cfg.Browsers[user.TelegramUserID] == nil {
 			return
 		}
+		b.clearFlow(user.ID)
 		if err := b.db.ForgetCredentials(ctx, user.ID); err != nil {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
@@ -1544,18 +1535,6 @@ func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domai
 	return b.db.UpsertFacilities(ctx, city, procedureID, data.Facilities)
 }
 
-func (b *Bot) saveLogin(ctx context.Context, user domain.User, creds luxmed.Credentials) error {
-	if b.runner != nil {
-		return b.runner.SaveCredentials(ctx, user, creds)
-	}
-	// A bot without a runner is used by the standalone bot tests.
-	if err := b.newClient(false).Authenticate(ctx, creds); err != nil {
-		return err
-	}
-	_, err := b.db.SaveCredentials(ctx, b.cryptor, user, creds)
-	return err
-}
-
 func withLuxMedCatalog[T any](
 	ctx context.Context,
 	b *Bot,
@@ -1635,7 +1614,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "check":
 		select {
 		case b.manualChecks <- struct{}{}:
-			b.manualWorkers.Go(func() {
+			b.workers.Go(func() {
 				defer func() { <-b.manualChecks }()
 				b.checkWatchNow(ctx, user, watch)
 			})
@@ -1802,15 +1781,26 @@ func (b *Bot) send(user domain.User, text string, markup any) {
 }
 
 func (b *Bot) setFlow(userID int64, state *flow) {
+	b.flowMu.Lock()
+	defer b.flowMu.Unlock()
+	if current := b.flowState[userID]; current != nil && current.cancel != nil && current != state {
+		current.cancel()
+	}
+	if state == nil {
+		delete(b.flowState, userID)
+		return
+	}
 	b.flowState[userID] = state
 }
 
 func (b *Bot) getFlow(userID int64) *flow {
+	b.flowMu.Lock()
+	defer b.flowMu.Unlock()
 	return b.flowState[userID]
 }
 
 func (b *Bot) clearFlow(userID int64) {
-	delete(b.flowState, userID)
+	b.setFlow(userID, nil)
 }
 
 func parseIDName(text string) (int, string, bool) {

@@ -105,6 +105,9 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 	}
 	body, _ := json.Marshal(map[string]string{"login": creds.Login, "password": creds.Password})
 	data, err := c.request(ctx, http.MethodPost, LoginURL, body)
+	if RetryAfter(err) > 0 {
+		return errors.Join(ErrUnavailable, err)
+	}
 	var status *HTTPError
 	if errors.As(err, &status) && (status.StatusCode == http.StatusUnauthorized || status.StatusCode == http.StatusForbidden) {
 		return fmt.Errorf("%w: %w", ErrCredentialsRejected, err)

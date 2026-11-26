@@ -317,3 +317,34 @@ func TestAuthenticationPreservesRetryAfterFromXSRF(t *testing.T) {
 		t.Fatalf("failed XSRF request lost its cooldown: %v", err)
 	}
 }
+
+func TestLoginUsesRetryAfterBeforeRejectingCredentials(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var throttled atomic.Bool
+			throttled.Store(true)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != LoginURL {
+					t.Errorf("unexpected request: %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if throttled.Load() {
+					w.Header().Set("Retry-After", "60")
+				}
+				w.WriteHeader(status)
+			}))
+			t.Cleanup(server.Close)
+			client := newHTTPClient(server.URL, false)
+			creds := Credentials{Login: "fixture", Password: "fixture"}
+			err := client.Authenticate(t.Context(), creds)
+			if !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrCredentialsRejected) || RetryAfter(err) != time.Minute {
+				t.Fatalf("temporary login failure was misclassified: %v", err)
+			}
+			throttled.Store(false)
+			if err := client.Authenticate(t.Context(), creds); !errors.Is(err, ErrCredentialsRejected) {
+				t.Fatalf("login rejection without Retry-After: %v", err)
+			}
+		})
+	}
+}
