@@ -587,7 +587,7 @@ func TestAddressFallbackPreservesLegacyNotification(t *testing.T) {
 	})
 }
 
-func TestAvailableWatchOptions(t *testing.T) {
+func TestAvailableNotificationOptions(t *testing.T) {
 	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
 		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 101, TelegramChatID: 101})
 		if err != nil {
@@ -601,18 +601,30 @@ func TestAvailableWatchOptions(t *testing.T) {
 		for _, fixture := range []struct {
 			fingerprint string
 			offset      time.Duration
-		}{{"later", 2 * time.Hour}, {"past", -time.Hour}, {"earliest", time.Hour}} {
-			if _, _, err := db.UpsertAppointmentHistory(ctx, watchID, domain.Appointment{
+			messageID   int
+			status      domain.NotificationStatus
+		}{
+			{"later", 2 * time.Hour, 10, domain.NotificationStatusSent},
+			{"past", -time.Hour, 10, domain.NotificationStatusSent},
+			{"earliest", time.Hour, 10, domain.NotificationStatusSent},
+			{"other message", time.Minute, 11, domain.NotificationStatusSent},
+			{"failed", time.Minute, 10, domain.NotificationStatusFailed},
+		} {
+			item, _, err := db.UpsertAppointmentHistory(ctx, watchID, domain.Appointment{
 				Fingerprint: fixture.fingerprint, DateTime: now.Add(fixture.offset),
-			}); err != nil {
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := db.MarkNotifications(ctx, []domain.AppointmentHistory{item}, fixture.messageID, fixture.status, ""); err != nil {
 				t.Fatal(err)
 			}
 		}
-		items, err := db.AvailableWatchOptions(ctx, user.ID, watchID, now, 5, 0)
+		items, err := db.AvailableNotificationOptions(ctx, user.ID, watchID, 10, now, 5, 0)
 		if err != nil || len(items) != 2 || items[0].Fingerprint != "earliest" || items[1].Fingerprint != "later" {
 			t.Fatalf("available options = %+v, err = %v", items, err)
 		}
-		items, err = db.AvailableWatchOptions(ctx, user.ID+1, watchID, now, 5, 0)
+		items, err = db.AvailableNotificationOptions(ctx, user.ID+1, watchID, 10, now, 5, 0)
 		if err != nil || len(items) != 0 {
 			t.Fatalf("another user could list watch options: %+v, err = %v", items, err)
 		}

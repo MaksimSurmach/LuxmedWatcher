@@ -107,7 +107,7 @@
   "flow.watch.updated": "Watch updated.",
   "help.text": "Use buttons to create watches, manage your LuxMed account, and view found appointments.",
   "history.empty": "No appointment times found yet.",
-  "options.empty": "No available times for this search.",
+  "options.empty": "No times from this notification are still available.",
   "history.expired": "This appointment time has passed.",
   "history.unavailable": "This time no longer appears in search results. Check other times.",
   "history.notified": "Notification sent",

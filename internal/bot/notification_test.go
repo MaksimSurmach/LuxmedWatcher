@@ -139,7 +139,7 @@ func TestMultiSlotNotificationUsesTextAndAllOptionsListsAddresses(t *testing.T) 
 	}
 }
 
-func TestAllOptionsCallbackShowsAvailableSlotsInWatchOrder(t *testing.T) {
+func TestAllOptionsCallbackShowsAvailableSlotsFromItsNotification(t *testing.T) {
 	ctx := t.Context()
 	type message struct {
 		text     string
@@ -205,15 +205,20 @@ func TestAllOptionsCallbackShowsAvailableSlotsInWatchOrder(t *testing.T) {
 	}
 	now := time.Now().Truncate(time.Second)
 	expired := insert(watch.ID, "Expired listing", now.Add(72*time.Hour))
-	if err := b.db.MarkMissingAppointments(ctx, watch.ID, expired.LastSeenAt.Add(time.Millisecond), time.Time{}); err != nil {
-		t.Fatal(err)
-	}
-	insert(watch.ID, "Past appointment", now.Add(-time.Hour))
+	past := insert(watch.ID, "Past appointment", now.Add(-time.Hour))
 	hidden := insert(watch.ID, "Hidden listing", now.Add(30*time.Minute))
 	if err := b.db.HideAppointmentHistory(ctx, user.ID, hidden.ID); err != nil {
 		t.Fatal(err)
 	}
-	insert(otherID, "Other watch", now.Add(30*time.Minute))
+	otherWatch := insert(otherID, "Other watch", now.Add(30*time.Minute))
+
+	previous := make([]domain.AppointmentHistory, 0, 5)
+	for i := range 5 {
+		previous = append(previous, insert(watch.ID, fmt.Sprintf("Previously shown %d", i), now.Add(time.Duration(i+1)*time.Minute)))
+	}
+	if err := b.db.MarkNotifications(ctx, previous, 6, domain.NotificationStatusSent, ""); err != nil {
+		t.Fatal(err)
+	}
 
 	items := make([]domain.AppointmentHistory, 0, 11)
 	for i := range 11 {
@@ -225,26 +230,39 @@ func TestAllOptionsCallbackShowsAvailableSlotsInWatchOrder(t *testing.T) {
 	if button(nextMessage(), "All options") != "" {
 		t.Fatal("complete short list exposed All options")
 	}
-	if _, err := b.NotifyAppointments(ctx, user, watch, items[:10], len(items)); err != nil {
+	batch := append(append([]domain.AppointmentHistory(nil), items...), expired, past, hidden)
+	notificationID, err := b.NotifyAppointments(ctx, user, watch, items[:10], len(batch))
+	if err != nil {
 		t.Fatal(err)
+	}
+	if err := b.db.MarkNotifications(ctx, append(batch, otherWatch), notificationID, domain.NotificationStatusSent, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.db.MarkMissingAppointments(ctx, watch.ID, time.Now().Add(time.Second), time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range append(append(previous, items...), past) {
+		if _, _, err := b.db.UpsertAppointmentHistory(ctx, watch.ID, item.Appointment); err != nil {
+			t.Fatal(err)
+		}
 	}
 	notification := nextMessage()
 	action := button(notification, "All options")
-	if action == "" || !strings.Contains(notification.text, b.catalog.T(user.Locale, "notification.title", 11)) ||
+	if action == "" || !strings.Contains(notification.text, b.catalog.T(user.Locale, "notification.title", len(batch))) ||
 		!strings.Contains(notification.text, "Street 05") || strings.Contains(notification.text, "Street 06") {
 		t.Fatalf("unexpected long notification: %q (action %q)", notification.text, action)
 	}
-	click := func(action string) {
+	click := func(messageID int, action string) {
 		t.Helper()
 		if action == "" {
 			t.Fatal("expected a callback")
 		}
 		b.handleCallback(ctx, &tgbotapi.CallbackQuery{
 			ID: "test", Data: action, From: &tgbotapi.User{ID: user.TelegramUserID},
-			Message: &tgbotapi.Message{Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"}},
+			Message: &tgbotapi.Message{MessageID: messageID, Chat: &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"}},
 		})
 	}
-	click(action)
+	click(notificationID, action)
 	first := nextMessage()
 	lastIndex := -1
 	for i := range 5 {
@@ -254,13 +272,28 @@ func TestAllOptionsCallbackShowsAvailableSlotsInWatchOrder(t *testing.T) {
 		}
 		lastIndex = index
 	}
-	for _, excluded := range []string{"Expired listing", "Past appointment", "Other watch", "Hidden listing", "Street 06"} {
+	for _, excluded := range []string{"Previously shown", "Expired listing", "Past appointment", "Other watch", "Hidden listing", "Street 06"} {
 		if strings.Contains(first.text, excluded) {
 			t.Errorf("unexpected %q on first page: %q", excluded, first.text)
 		}
 	}
-	click(button(first, "Next"))
-	if msg := nextMessage(); !strings.Contains(msg.text, "Street 06") || strings.Contains(msg.text, "Street 01") {
-		t.Errorf("unexpected second page: %q", msg.text)
+	click(50, button(first, "Next"))
+	second := nextMessage()
+	if !strings.Contains(second.text, "Street 06") || strings.Contains(second.text, "Street 01") {
+		t.Errorf("unexpected second page: %q", second.text)
+	}
+	click(51, button(second, "Next"))
+	third := nextMessage()
+	if !strings.Contains(third.text, "Street 11") || strings.Contains(third.text, "Street 06") {
+		t.Errorf("unexpected third page: %q", third.text)
+	}
+	click(52, button(third, b.catalog.T(user.Locale, "button.hide_history", 1)))
+	if msg := nextMessage(); msg.text != b.catalog.T(user.Locale, "options.empty") {
+		t.Errorf("hiding the last slot should leave the page empty: %q", msg.text)
+	} else {
+		click(53, button(msg, "Previous"))
+		if previous := nextMessage(); !strings.Contains(previous.text, "Street 06") || strings.Contains(previous.text, "Previously shown") {
+			t.Errorf("unexpected previous page: %q", previous.text)
+		}
 	}
 }

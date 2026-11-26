@@ -385,13 +385,21 @@ func (db *DB) WatchHistory(ctx context.Context, userID, watchID int64, limit, of
 	`, userID, watchID, domain.HistoryStatusHidden, limit, offset)
 }
 
-func (db *DB) AvailableWatchOptions(ctx context.Context, userID, watchID int64, now time.Time, limit, offset int) ([]domain.AppointmentHistory, error) {
+func (db *DB) AvailableNotificationOptions(
+	ctx context.Context, userID, watchID, messageID int64, now time.Time, limit, offset int,
+) ([]domain.AppointmentHistory, error) {
 	date := db.dateTimeSQL("date_time")
 	return db.queryHistory(ctx, historySelect()+`
 		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1 AND id=$2 AND status <> $3)
 			AND status NOT IN ($4, $5) AND `+date+` > `+db.dateTimeSQL("$6")+`
-		ORDER BY `+date+` ASC, id ASC LIMIT $7 OFFSET $8
-	`, userID, watchID, domain.WatchStatusDeleted, domain.HistoryStatusHidden, domain.HistoryStatusExpired, now.UTC(), limit, offset)
+			AND EXISTS (
+				SELECT 1 FROM notification_history AS n
+				WHERE n.watch_id=$2 AND n.appointment_fingerprint=appointment_history.fingerprint
+					AND n.appointment_history_id=appointment_history.id AND n.message_id=$7 AND n.status=$8
+			)
+		ORDER BY `+date+` ASC, id ASC LIMIT $9 OFFSET $10
+	`, userID, watchID, domain.WatchStatusDeleted, domain.HistoryStatusHidden, domain.HistoryStatusExpired,
+		now.UTC(), messageID, domain.NotificationStatusSent, limit, offset)
 }
 
 func (db *DB) queryHistory(ctx context.Context, query string, args ...any) ([]domain.AppointmentHistory, error) {

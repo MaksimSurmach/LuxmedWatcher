@@ -431,7 +431,12 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		return
 	}
 	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
-	b.handleAction(ctx, cb.From.ID, cb.Data)
+	data := cb.Data
+	if strings.HasPrefix(data, "options:") && strings.Count(data, ":") == 2 {
+		// Only the opening button is on the notification itself. Page buttons carry its message ID.
+		data += ":" + strconv.Itoa(cb.Message.MessageID)
+	}
+	b.handleAction(ctx, cb.From.ID, data)
 }
 
 func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
@@ -1580,7 +1585,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 		b.editWatch(ctx, user, watch)
 		return
 	case "history":
-		b.showHistoryPage(ctx, user, "history", watch.ID, 0)
+		b.showHistoryPage(ctx, user, watch.ID, 0, 0)
 		return
 
 	case "show":
@@ -1684,7 +1689,7 @@ func (b *Bot) showWatch(ctx context.Context, user domain.User, watch domain.Watc
 }
 
 func (b *Bot) showHistory(ctx context.Context, user domain.User) {
-	b.showHistoryPage(ctx, user, "history", 0, 0)
+	b.showHistoryPage(ctx, user, 0, 0, 0)
 }
 
 func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string) {
