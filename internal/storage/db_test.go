@@ -573,20 +573,18 @@ func TestUpcomingHistoryPagesNearestFirst(t *testing.T) {
 			}
 		}
 		var got []int
-		var after *HistoryPosition
-		for range 3 {
-			page, err := db.UpcomingHistory(ctx, user.ID, now, 2, 0, after)
+		ids, err := db.UpcomingHistoryIDs(ctx, user.ID, now, 6)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for offset := 0; offset < len(ids); offset += 2 {
+			page, err := db.HistoryByIDs(ctx, user.ID, ids[offset:min(offset+2, len(ids))])
 			if err != nil {
 				t.Fatal(err)
 			}
 			for _, item := range page {
 				got = append(got, int(item.DateTime.Sub(now).Hours()))
 			}
-			if len(page) == 0 {
-				break
-			}
-			last := page[len(page)-1]
-			after = &HistoryPosition{DateTime: last.DateTime, ID: last.ID, Expired: last.Status == domain.HistoryStatusExpired}
 		}
 		if want := []int{24, 48, 72, -2, -48}; !slices.Equal(got, want) {
 			t.Fatalf("hours from now across pages = %v, want %v", got, want)

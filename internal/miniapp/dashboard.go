@@ -28,12 +28,13 @@ type DashboardConfig struct {
 }
 
 type dashboard struct {
-	cfg      DashboardConfig
-	key      ed25519.PublicKey
-	sessions sessions
-	db       *storage.DB
-	browsers map[int64]*luxmed.Browser
-	connect  func(context.Context, int64) (string, error)
+	cfg          DashboardConfig
+	key          ed25519.PublicKey
+	sessions     sessions
+	historyViews historyViews
+	db           *storage.DB
+	browsers     map[int64]*luxmed.Browser
+	connect      func(context.Context, int64) (string, error)
 }
 
 func Dashboard(cfg DashboardConfig, db *storage.DB, browsers map[int64]*luxmed.Browser, app *luxmed.MiniApp) http.Handler {
@@ -117,8 +118,8 @@ type dashboardHistory struct {
 }
 
 type dashboardHistoryCursor struct {
-	AsOf     time.Time
-	Position storage.HistoryPosition
+	View   string
+	Offset int
 }
 
 func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -143,6 +144,10 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 }
 
 func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.User) {
+	const (
+		pageSize      = 24
+		maxPageOffset = 10_000
+	)
 	var input struct {
 		Offset int
 		After  *dashboardHistoryCursor
@@ -150,42 +155,55 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 	if !decodeDashboard(w, r, &input) {
 		return
 	}
-	if input.Offset < 0 || input.Offset > 10_000 {
+	if input.Offset < 0 || input.Offset > maxPageOffset {
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
-	asOf := time.Now().UTC()
-	var after *storage.HistoryPosition
+	now := time.Now()
+	var ids []int64
+	view := ""
+	offset := input.Offset
 	if input.After != nil {
-		if input.Offset != 0 || input.After.AsOf.IsZero() ||
-			input.After.Position.DateTime.IsZero() || input.After.Position.ID <= 0 {
+		if input.Offset != 0 || input.After.View == "" || input.After.Offset <= 0 {
 			reply(w, http.StatusBadRequest, nil)
 			return
 		}
-		asOf = input.After.AsOf
-		after = &input.After.Position
-	}
-	const pageSize = 24
-	items, err := d.db.UpcomingHistory(r.Context(), user.ID, asOf, pageSize+1, input.Offset, after)
-	if err != nil {
-		reply(w, http.StatusServiceUnavailable, nil)
-		return
-	}
-	more := len(items) > pageSize
-	var next *dashboardHistoryCursor
-	if more {
-		items = items[:pageSize]
-		last := items[len(items)-1]
-		next = &dashboardHistoryCursor{
-			AsOf: asOf,
-			Position: storage.HistoryPosition{DateTime: last.DateTime, ID: last.ID,
-				Expired: last.Status == domain.HistoryStatusExpired},
+		view, offset = input.After.View, input.After.Offset
+		var ok bool
+		ids, ok = d.historyViews.load(view, user.ID, now)
+		if !ok || offset >= len(ids) {
+			reply(w, http.StatusNotFound, nil)
+			return
+		}
+	} else {
+		var err error
+		ids, err = d.db.UpcomingHistoryIDs(r.Context(), user.ID, now, maxPageOffset+pageSize)
+		if err != nil {
+			reply(w, http.StatusServiceUnavailable, nil)
+			return
 		}
 	}
-	slots := make([]dashboardHistory, 0, len(items))
-	for _, item := range items {
-		slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, procedures.Name(user.Locale, item.ServiceName),
-			item.DoctorName, item.FacilityName, item.Address, item.Status})
+	slots := make([]dashboardHistory, 0, pageSize)
+	for len(slots) < pageSize && offset < len(ids) {
+		end := min(offset+pageSize-len(slots), len(ids))
+		items, err := d.db.HistoryByIDs(r.Context(), user.ID, ids[offset:end])
+		if err != nil {
+			reply(w, http.StatusServiceUnavailable, nil)
+			return
+		}
+		for _, item := range items {
+			slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, procedures.Name(user.Locale, item.ServiceName),
+				item.DoctorName, item.FacilityName, item.Address, item.Status})
+		}
+		offset = end
+	}
+	more := offset < len(ids)
+	var next *dashboardHistoryCursor
+	if more {
+		if view == "" {
+			view = d.historyViews.save(user.ID, now, ids)
+		}
+		next = &dashboardHistoryCursor{View: view, Offset: offset}
 	}
 	reply(w, http.StatusOK, struct {
 		Slots []dashboardHistory

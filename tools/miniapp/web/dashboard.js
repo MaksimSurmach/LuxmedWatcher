@@ -410,8 +410,15 @@ async function historyScreen(id) {
   const loaded = [];
   const byID = new Map();
   async function append(offset, cursor) {
-    const { Slots, More, Next } = await api('history', cursor ? { After: cursor } : { Offset: offset });
+    let page;
+    try {
+      page = await api('history', cursor ? { After: cursor } : { Offset: offset });
+    } catch (error) {
+      if (cursor && error?.key === 'error.stale' && id === renderID) return historyScreen(id);
+      throw error;
+    }
     if (id !== renderID) return;
+    const { Slots, More, Next } = page;
     const first = loaded.length;
     for (const slot of Slots) {
       const previous = byID.get(slot.ID);
