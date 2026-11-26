@@ -267,17 +267,16 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		state.client = nil
 		return 0, searchErr
 	}
+	if result.Checked {
+		if err := r.resolveReconnect(ctx, user.ID); err != nil {
+			return 0, errors.Join(searchErr, err)
+		}
+	}
 	if searchErr != nil && len(appointments) == 0 {
 		return 0, searchErr
 	}
 	if err := r.checkWatchUnchanged(ctx, watch); err != nil {
 		return 0, errors.Join(searchErr, err)
-	}
-
-	if searchErr == nil && result.Checked {
-		if err := r.resolveReconnect(ctx, user.ID); err != nil {
-			return 0, err
-		}
 	}
 
 	slices.SortFunc(appointments, func(a, b domain.Appointment) int {

@@ -824,3 +824,96 @@ func TestPasswordReconnectSerializesWithQueuedWarning(t *testing.T) {
 		t.Fatalf("retry after verified login: attempts=%d, err=%v", attempts, err)
 	}
 }
+
+type fixedSearchResultClient struct {
+	fakeLuxMed
+	result luxmed.SearchResult
+	err    error
+}
+
+func (c *fixedSearchResultClient) SearchAppointments(context.Context, domain.Watch) (luxmed.SearchResult, error) {
+	return c.result, c.err
+}
+
+func TestConfirmedPartialSearchResolvesReconnect(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		checked   bool
+		slots     int
+		searchErr error
+		wantSlots int
+		wantError string
+		reconnect bool
+	}{
+		{
+			name: "confirmed partial search without slots", checked: true,
+			searchErr: luxmed.ErrPartialResults, wantError: "luxmed_partial",
+		},
+		{
+			name: "confirmed partial search with slots", checked: true, slots: 2, wantSlots: 2,
+			searchErr: luxmed.ErrPartialResults, wantError: "luxmed_partial",
+		},
+		{
+			name: "later request rejected authentication", checked: true, slots: 2,
+			searchErr: errors.Join(luxmed.ErrPartialResults, luxmed.ErrAuthentication), reconnect: true,
+			wantError: "luxmed_authentication",
+		},
+		{
+			name: "partial result without confirmation", searchErr: luxmed.ErrPartialResults, reconnect: true,
+			wantError: "luxmed_partial",
+		},
+		{
+			name: "locally skipped search", reconnect: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := t.Context()
+			delivered := 0
+			runner, db, watch := testRunner(t, notifyFunc(func(
+				_ context.Context, _ domain.User, _ domain.Watch, _ []domain.AppointmentHistory, count int,
+			) (int, error) {
+				delivered += count
+				return 23, nil
+			}))
+			appointments := make([]domain.Appointment, 0, test.slots)
+			for i := range test.slots {
+				appointments = append(appointments, domain.Appointment{
+					Fingerprint: strconv.Itoa(i), DateTime: time.Now().Add(time.Duration(i+1) * time.Hour),
+				})
+			}
+			runner.newClient = func(bool) luxmed.Client {
+				return &fixedSearchResultClient{
+					result: luxmed.SearchResult{Checked: test.checked, Appointments: appointments},
+					err:    test.searchErr,
+				}
+			}
+			if err := db.BeginLuxMedReconnect(ctx, watch.UserID); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now()
+			if attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, watch.UserID, now); err != nil || attempt != 1 {
+				t.Fatalf("seed warning delivery: attempt=%d err=%v", attempt, err)
+			}
+			if err := db.RecordLuxMedReconnectRejection(ctx, watch.UserID, now.Add(time.Minute), 0); err != nil {
+				t.Fatal(err)
+			}
+
+			count, err := runner.ManualCheck(ctx, watch)
+			if !errors.Is(err, test.searchErr) || count != test.wantSlots || delivered != test.wantSlots {
+				t.Fatalf("search: slots=%d delivered=%d err=%v", count, delivered, err)
+			}
+			saved, err := db.Watch(ctx, watch.ID)
+			if err != nil || saved.LastError != test.wantError {
+				t.Fatalf("watch error = %q, want %q, err=%v", saved.LastError, test.wantError, err)
+			}
+			required, err := db.LuxMedReconnectRequired(ctx, watch.UserID)
+			if err != nil || required != test.reconnect {
+				t.Fatalf("reconnect required = %t, want %t, err=%v", required, test.reconnect, err)
+			}
+			attempt, err := db.ClaimLuxMedReconnectDelivery(ctx, watch.UserID, now.Add(time.Hour))
+			if err != nil || (attempt != 0) != test.reconnect {
+				t.Fatalf("warning retry: attempt=%d reconnect=%t err=%v", attempt, test.reconnect, err)
+			}
+		})
+	}
+}

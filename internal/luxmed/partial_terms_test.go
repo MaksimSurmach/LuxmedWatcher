@@ -73,8 +73,9 @@ func TestSearchLoadsOnlyBoundedMissingDays(t *testing.T) {
 		CityID: 1, CityName: "Example City", ServiceID: 2, DateFrom: &from, DateTo: &to,
 	})
 	apps := result.Appointments
-	if !errors.Is(err, ErrPartialResults) || len(apps) != 5 || calls.Load() != 4 {
-		t.Fatalf("appointments = %d, requests = %d, err = %v", len(apps), calls.Load(), err)
+	if !result.Checked || !errors.Is(err, ErrPartialResults) || len(apps) != 5 || calls.Load() != 4 {
+		t.Fatalf("checked = %v, appointments = %d, requests = %d, err = %v",
+			result.Checked, len(apps), calls.Load(), err)
 	}
 }
 
