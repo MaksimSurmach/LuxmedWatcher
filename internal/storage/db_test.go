@@ -596,11 +596,24 @@ func TestReconnectDeliveryCounterMigration(t *testing.T) {
 		if claim.Attempt != 5 {
 			t.Fatalf("legacy attempts consumed the new 403 budget: attempt=%d", claim.Attempt)
 		}
-		must(db.RecordLuxMedReconnectRejection(ctx, user.ID, claim, now.Add(15*time.Hour), 2))
+		must(db.JournalReconnectRejection(ctx, user.ID, claim, now.Add(15*time.Hour), 2))
 		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, now.Add(16*time.Hour))
 		must(err)
 		if claim.Attempt != 0 {
 			t.Fatalf("delivery resumed after reaching the 403 limit: attempt=%d", claim.Attempt)
+		}
+		unblockedAt := now.Add(17 * time.Hour)
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 2, unblockedAt))
+		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt)
+		must(err)
+		if claim.Attempt != 6 {
+			t.Fatalf("delivery was not resumed after unblock: attempt=%d", claim.Attempt)
+		}
+		must(db.ResumeLuxMedReconnectDelivery(ctx, user.ID, 2, unblockedAt))
+		claim, err = db.ClaimLuxMedReconnectDelivery(ctx, user.ID, unblockedAt)
+		must(err)
+		if claim.Attempt != 0 {
+			t.Fatalf("repeat unblock reopened an attempt with an unknown outcome: attempt=%d", claim.Attempt)
 		}
 	})
 }

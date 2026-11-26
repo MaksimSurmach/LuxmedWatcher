@@ -98,7 +98,7 @@ func (b *Bot) Run(ctx context.Context) error {
 	b.registerCommands()
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = b.cfg.PollTimeout
-	config.AllowedUpdates = []string{"message", "callback_query", "widget_query"}
+	config.AllowedUpdates = []string{"message", "callback_query", "widget_query", "my_chat_member"}
 	var delay time.Duration
 	for ctx.Err() == nil {
 		updates, err := b.getUpdates(config)
@@ -225,6 +225,10 @@ func truncateMessage(text string, limit int) string {
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
+	if update.MyChatMember != nil {
+		b.handleBotMembership(ctx, update.MyChatMember)
+		return
+	}
 	if update.CallbackQuery != nil {
 		b.handleCallback(ctx, update.CallbackQuery)
 		return

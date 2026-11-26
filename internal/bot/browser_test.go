@@ -10,12 +10,82 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 )
+
+func TestTelegramUnblockResumesReconnectWarning(t *testing.T) {
+	var sends atomic.Int32
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/getUpdates") {
+			fmt.Fprint(w, `{"ok":true,"result":[{"update_id":1,"my_chat_member":{"chat":{"id":42,"type":"private"},"from":{"id":42},"old_chat_member":{"status":"kicked"},"new_chat_member":{"status":"member","user":{"id":99}}}}]}`)
+			return
+		}
+		if !strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			t.Errorf("unexpected Telegram call: %s", r.URL.Path)
+		}
+		sends.Add(1)
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":42}}`)
+	})
+	ctx := t.Context()
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	id, err := b.db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 1, NextDays: 1})
+	must(err)
+	watch, err := b.db.Watch(ctx, id)
+	must(err)
+	must(b.db.BeginLuxMedReconnect(ctx, user.ID))
+	now := time.Now().Add(-30 * time.Hour)
+	for i := range reconnectForbiddenLimit {
+		attemptAt := now.Add(time.Duration(i) * 6 * time.Hour)
+		claim, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, attemptAt)
+		must(err)
+		if claim.Attempt != i+1 {
+			t.Fatalf("attempt = %d, want %d", claim.Attempt, i+1)
+		}
+		must(b.db.RecordLuxMedReconnectRejection(ctx, user.ID, claim, attemptAt.Add(6*time.Hour), reconnectForbiddenLimit))
+	}
+	claim, err := b.db.ClaimLuxMedReconnectDelivery(ctx, user.ID, time.Now())
+	must(err)
+	if claim.Attempt != 0 {
+		t.Fatal("403 limit did not suspend delivery")
+	}
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(upstream.Close)
+	browser, err := luxmed.NewBrowser(upstream.URL, "http://localhost:18769")
+	must(err)
+	runner := scheduler.NewRunner(b.db, b.cryptor, b, 0, time.Hour, false)
+	runner.UseBrowsers(map[int64]*luxmed.Browser{user.TelegramUserID: browser})
+	b.SetRunner(runner)
+	updates, err := b.getUpdates(tgbotapi.NewUpdate(0))
+	must(err)
+	if len(updates) != 1 {
+		t.Fatalf("received %d membership updates", len(updates))
+	}
+	for range 2 {
+		b.handleUpdate(ctx, updates[0].Update)
+		if err := runner.CheckWatch(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
+			t.Fatalf("check watch: %v", err)
+		}
+	}
+	if sends := sends.Load(); sends != 1 {
+		t.Fatalf("delivered %d warnings, want one", sends)
+	}
+}
 
 func TestNotifyLuxMedReconnectDeliveryOutcomes(t *testing.T) {
 	for _, test := range []struct {

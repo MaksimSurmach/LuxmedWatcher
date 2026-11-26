@@ -122,11 +122,27 @@ func (r *Runner) releaseAccount(state *accountCheck) {
 
 // SaveVerifiedLuxMedAccount commits sign-in after any in-flight check or delivery.
 func (r *Runner) SaveVerifiedLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	return r.withAccount(ctx, account.UserID, func() error {
+		return r.db.SaveVerifiedLuxMedAccount(ctx, account)
+	})
+}
+
+// ResumeLuxMedReconnectDelivery lets the next session check deliver a warning after an unblock.
+func (r *Runner) ResumeLuxMedReconnectDelivery(ctx context.Context, userID int64, forbiddenLimit int) error {
+	return r.withAccount(ctx, userID, func() error {
+		if err := r.db.ReplayReconnectRejection(ctx, userID); err != nil {
+			return err
+		}
+		return r.db.ResumeLuxMedReconnectDelivery(ctx, userID, forbiddenLimit, time.Now())
+	})
+}
+
+func (r *Runner) withAccount(ctx context.Context, userID int64, action func() error) error {
 	for ctx.Err() == nil {
-		state, done := r.acquireAccount(account.UserID, false)
+		state, done := r.acquireAccount(userID, false)
 		if state != nil {
 			defer r.releaseAccount(state)
-			return r.db.SaveVerifiedLuxMedAccount(ctx, account)
+			return action()
 		}
 
 		select {

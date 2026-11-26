@@ -1,12 +1,44 @@
 package app
 
 import (
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/http/httptrace"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
+
+	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
+
+func TestPostgresReconnectJournalDirectoryIsIndependentOfSQLitePath(t *testing.T) {
+	root := t.TempDir()
+	blocked := filepath.Join(root, "not-a-directory")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := New(Config{
+		DatabaseURL:  "postgres://localhost/watcher",
+		DatabasePath: filepath.Join(blocked, "obsolete.sqlite"),
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err := app.configureReconnectJournal(new(storage.DB)); err != nil {
+		t.Fatalf("PostgreSQL startup depends on the SQLite path: %v", err)
+	}
+	app.cfg.ReconnectJournalDir = filepath.Join(root, "persistent", "reconnect")
+	if err := app.configureReconnectJournal(new(storage.DB)); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(app.cfg.ReconnectJournalDir); err != nil || !info.IsDir() {
+		t.Fatalf("explicit journal directory was not created: %v", err)
+	}
+	app.cfg.ReconnectJournalDir = filepath.Join(blocked, "unavailable")
+	if err := app.configureReconnectJournal(new(storage.DB)); err == nil {
+		t.Fatal("unavailable explicit journal directory was accepted")
+	}
+}
 
 func TestTelegramHTTPPreservesRequestTrace(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

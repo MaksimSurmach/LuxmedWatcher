@@ -93,6 +93,20 @@ func (db *DB) RecordLuxMedReconnectRejection(
 	return err
 }
 
+// ResumeLuxMedReconnectDelivery reopens only attempts stopped by confirmed 403s.
+func (db *DB) ResumeLuxMedReconnectDelivery(ctx context.Context, userID int64, forbiddenLimit int, now time.Time) error {
+	if forbiddenLimit <= 0 {
+		return errors.New("missing reconnect forbidden limit")
+	}
+	_, err := db.sql.ExecContext(ctx, `
+		UPDATE luxmed_reconnect_delivery
+		SET forbidden_failures=0, retry_at=$3
+		WHERE user_id=$1 AND forbidden_failures >= $2 AND retry_at IS NULL
+		    AND EXISTS (SELECT 1 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified)
+	`, userID, forbiddenLimit, now.UTC())
+	return err
+}
+
 func (db *DB) ReserveLuxMedSearch(ctx context.Context, userID int64, started time.Time, interval time.Duration) (bool, error) {
 	res, err := db.sql.ExecContext(ctx, `
 		INSERT INTO luxmed_search_cooldown (user_id, started_at) VALUES ($1, $2)

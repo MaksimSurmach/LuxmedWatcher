@@ -22,6 +22,13 @@ func (db *DB) SetReconnectJournalDirectory(directory string) error {
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return fmt.Errorf("create reconnect journal directory: %w", err)
 	}
+	probe, err := os.CreateTemp(directory, ".write-check-*")
+	if err != nil {
+		return fmt.Errorf("check reconnect journal directory: %w", err)
+	}
+	if err := errors.Join(probe.Close(), os.Remove(probe.Name())); err != nil {
+		return fmt.Errorf("clean up reconnect journal directory check: %w", err)
+	}
 	db.reconnectDirectory = directory
 	return nil
 }
@@ -33,6 +40,9 @@ func (db *DB) JournalReconnectRejection(
 	retryAt time.Time,
 	forbiddenLimit int,
 ) error {
+	if db.reconnectDirectory == "" {
+		return db.RecordLuxMedReconnectRejection(ctx, userID, claim, retryAt, forbiddenLimit)
+	}
 	outcome := reconnectRejection{Claim: claim, RetryAt: retryAt, ForbiddenLimit: forbiddenLimit}
 	if err := db.writeReconnectRejection(userID, outcome); err != nil {
 		// The primary database can still preserve the outcome if the local journal fails.
@@ -75,9 +85,6 @@ func (db *DB) reconnectRejectionPath(userID int64) string {
 }
 
 func (db *DB) writeReconnectRejection(userID int64, outcome reconnectRejection) error {
-	if db.reconnectDirectory == "" {
-		return errors.New("reconnect journal directory is unset")
-	}
 	if err := os.MkdirAll(db.reconnectDirectory, 0o700); err != nil {
 		return err
 	}

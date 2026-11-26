@@ -19,6 +19,26 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 )
 
+const reconnectForbiddenLimit = 4
+
+func (b *Bot) handleBotMembership(ctx context.Context, update *tgbotapi.ChatMemberUpdated) {
+	if b.runner == nil || !privateChat(&update.Chat, &update.From) ||
+		update.OldChatMember.Status != "kicked" || update.NewChatMember.Status != "member" ||
+		update.NewChatMember.User == nil || update.NewChatMember.User.ID != b.api.Self.ID {
+		return
+	}
+	user, err := b.db.UserByTelegramID(ctx, update.From.ID)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && !user.IsActive()) {
+		return
+	}
+	if err == nil {
+		err = b.runner.ResumeLuxMedReconnectDelivery(ctx, user.ID, reconnectForbiddenLimit)
+	}
+	if err != nil {
+		b.logger.Warn("resume reconnect warning after Telegram unblock", "err", err)
+	}
+}
+
 func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error {
 	if !user.IsActive() || user.TelegramChatID <= 0 || user.TelegramChatID != user.TelegramUserID {
 		return errors.New("reconnect recipient has no private chat")
@@ -55,7 +75,7 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 		return &scheduler.ReconnectDeliveryRejected{RetryAfter: delay}
 	case code == http.StatusForbidden:
 		// The user may unblock the bot while the reconnect episode is still open.
-		return &scheduler.ReconnectDeliveryRejected{RetryAfter: max(6*time.Hour, delay), ForbiddenLimit: 4}
+		return &scheduler.ReconnectDeliveryRejected{RetryAfter: max(6*time.Hour, delay), ForbiddenLimit: reconnectForbiddenLimit}
 	case code >= http.StatusBadRequest && code < http.StatusInternalServerError:
 		return errors.New("telegram permanently rejected reconnect warning")
 	case apiRejected && code >= http.StatusInternalServerError:

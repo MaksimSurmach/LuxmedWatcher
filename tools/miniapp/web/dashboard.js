@@ -161,7 +161,8 @@ function bindAccount() {
     if (!check.isConnected) return;
     const latest = await api('load');
     if (!check.isConnected) return;
-    applySnapshot(latest, result.state);
+    const episodeClosed = (state.ReconnectRequired || result.ReconnectRequired) && !latest.ReconnectRequired;
+    applySnapshot(latest, episodeClosed && result.state === 'needs_login' ? 'unchecked' : result.state);
     if (tab === 'home' || tab === 'watches') {
       await switchTab(tab, { reload: false });
       return;

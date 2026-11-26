@@ -50,7 +50,7 @@ func (a *App) Run(ctx context.Context) error {
 		return err
 	}
 	defer db.Close()
-	if err := db.SetReconnectJournalDirectory(a.cfg.DatabasePath + ".reconnect"); err != nil {
+	if err := a.configureReconnectJournal(db); err != nil {
 		return err
 	}
 
@@ -164,6 +164,21 @@ func (a *App) Run(ctx context.Context) error {
 	err = tgBot.Run(ctx)
 	stop()
 	workers.Wait()
+	return err
+}
+
+func (a *App) configureReconnectJournal(db *storage.DB) error {
+	if a.cfg.ReconnectJournalDir != "" {
+		return db.SetReconnectJournalDirectory(a.cfg.ReconnectJournalDir)
+	}
+	if a.cfg.DatabasePath == "" && a.cfg.DatabaseURL != "" {
+		return nil
+	}
+	err := db.SetReconnectJournalDirectory(a.cfg.DatabasePath + ".reconnect")
+	if err != nil && a.cfg.DatabaseURL != "" {
+		a.logger.Warn("reconnect journal unavailable, using PostgreSQL for rejection records", "err", err)
+		return nil
+	}
 	return err
 }
 
