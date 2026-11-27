@@ -2,8 +2,11 @@ package bot
 
 import (
 	"context"
+	"net/http"
 	"strconv"
 	"testing"
+
+	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
@@ -43,5 +46,28 @@ func TestWatchActionRejectsOtherUsersWatch(t *testing.T) {
 	}
 	if watch.Status != domain.WatchStatusActive {
 		t.Fatalf("attacker changed status to %q", watch.Status)
+	}
+}
+
+// A user who was never invited must not reach the account flow by forging a callback.
+func TestCallbackIgnoredBeforeInvite(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/test.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	pending, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 3, TelegramChatID: 3, Locale: "en", Status: domain.UserStatusPendingInvite, Role: domain.UserRoleUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &tgbotapi.BotAPI{Client: http.DefaultClient}
+	api.SetAPIEndpoint("http://127.0.0.1:1/bot%s/%s") // closed port: the callback ack fails fast, offline
+	b := &Bot{db: db, api: api, flowState: map[int64]*flow{}}
+
+	b.handleCallback(ctx, &tgbotapi.CallbackQuery{ID: "1", From: &tgbotapi.User{ID: 3}, Message: &tgbotapi.Message{}, Data: "account"})
+
+	if state := b.getFlow(pending.ID); state != nil {
+		t.Fatalf("pending user entered flow %q", state.Kind)
 	}
 }

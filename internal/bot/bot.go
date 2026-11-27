@@ -293,6 +293,11 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	}
 	data := cb.Data
 	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+	// Callback data is client-controlled: until invited, only language choice is allowed,
+	// otherwise the account flow becomes a free LuxMed credential checker.
+	if !user.IsActive() && !strings.HasPrefix(data, "lang:") {
+		return
+	}
 	switch {
 	case strings.HasPrefix(data, "lang:"):
 		locale := strings.TrimPrefix(data, "lang:")
