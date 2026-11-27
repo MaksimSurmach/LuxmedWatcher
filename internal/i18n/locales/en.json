@@ -23,6 +23,7 @@
   "button.show_all_favorite_places": "All favorite places",
   "button.show_all_places": "All places",
   "button.show_all_procedures": "Browse A-Z",
+  "button.show_watch": "Show watch",
   "errors.auth_failed": "Login failed. Check login and password.",
   "errors.blocked": "Your access to this bot is blocked.",
   "errors.generic": "Something went wrong. Please try again.",

@@ -23,6 +23,7 @@
   "button.show_all_favorite_places": "Все избранные клиники",
   "button.show_all_places": "Все клиники",
   "button.show_all_procedures": "Обзор A-Z",
+  "button.show_watch": "Показать поиск",
   "errors.auth_failed": "Не удалось войти. Проверьте логин и пароль.",
   "errors.blocked": "Доступ к боту заблокирован.",
   "errors.generic": "Что-то пошло не так. Попробуйте еще раз.",

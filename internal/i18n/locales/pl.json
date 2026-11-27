@@ -23,6 +23,7 @@
   "button.show_all_favorite_places": "Wszystkie ulubione placówki",
   "button.show_all_places": "Wszystkie placówki",
   "button.show_all_procedures": "Przegląd A-Z",
+  "button.show_watch": "Pokaż obserwację",
   "errors.auth_failed": "Logowanie nie powiodło się. Sprawdź login i hasło.",
   "errors.blocked": "Dostęp do bota jest zablokowany.",
   "errors.generic": "Coś poszło nie tak. Spróbuj ponownie.",

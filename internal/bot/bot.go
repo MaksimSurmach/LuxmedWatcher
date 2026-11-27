@@ -110,8 +110,8 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), first.BookingURL)),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.pause"), fmt.Sprintf("watch:pause:%d", watch.ID)),
 			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID)),
+			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.show_watch"), fmt.Sprintf("watch:show:%d", watch.ID)),
 		),
 	)
 
@@ -1603,6 +1603,11 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	if err != nil {
 		return
 	}
+	// Callback data is client-controlled: every watch action must belong to the caller.
+	watch, err := b.db.Watch(ctx, id)
+	if err != nil || watch.UserID != user.ID {
+		return
+	}
 	switch parts[1] {
 	case "pause":
 		_ = b.db.SetWatchStatus(ctx, id, domain.WatchStatusPaused)
@@ -1617,12 +1622,9 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 		if b.runner == nil {
 			return
 		}
-		watch, err := b.db.Watch(ctx, id)
-		if err == nil {
-			go func() { _ = b.runner.CheckWatch(context.Background(), watch) }()
-		}
+		go func() { _ = b.runner.CheckWatch(context.Background(), watch) }()
 	case "show":
-		b.showWatches(ctx, user)
+		b.sendWatchCard(ctx, user, watch)
 	}
 }
 
@@ -1641,14 +1643,18 @@ func (b *Bot) showWatches(ctx context.Context, user domain.User) {
 		return
 	}
 	for _, watch := range watches {
-		count, _ := b.db.CountHistoryForWatch(ctx, watch.ID)
-		last := "-"
-		if watch.LastCheckedAt != nil {
-			last = watch.LastCheckedAt.Format(appointmentTimeLayout)
-		}
-		text := b.catalog.T(user.Locale, "watch.list.item", esc(watch.Name), watch.Status, last, count)
-		b.sendHTML(user, text, watchKeyboard(b.catalog, user.Locale, watch))
+		b.sendWatchCard(ctx, user, watch)
 	}
+}
+
+func (b *Bot) sendWatchCard(ctx context.Context, user domain.User, watch domain.Watch) {
+	count, _ := b.db.CountHistoryForWatch(ctx, watch.ID)
+	last := "-"
+	if watch.LastCheckedAt != nil {
+		last = watch.LastCheckedAt.Format(appointmentTimeLayout)
+	}
+	text := b.catalog.T(user.Locale, "watch.list.item", esc(watch.Name), watch.Status, last, count)
+	b.sendHTML(user, text, watchKeyboard(b.catalog, user.Locale, watch))
 }
 
 func (b *Bot) showHistory(ctx context.Context, user domain.User) {
