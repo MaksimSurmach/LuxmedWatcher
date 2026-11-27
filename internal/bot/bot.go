@@ -50,7 +50,6 @@ const (
 	flowCitySearch    flowKind = "city_search"
 	flowWatchService  flowKind = "watch_service"
 	flowWatchSearch   flowKind = "watch_search"
-	flowWatchDoctor   flowKind = "watch_doctor"
 	flowWatchFacility flowKind = "watch_facility"
 	flowWatchTime     flowKind = "watch_time"
 )
@@ -90,17 +89,32 @@ func (b *Bot) Run(ctx context.Context) error {
 }
 
 func (b *Bot) NotifyAppointment(ctx context.Context, user domain.User, watch domain.Watch, history domain.AppointmentHistory) (int, error) {
-	text := b.catalog.T(user.Locale, "notification.appointment_found.title") + "\n\n" +
-		b.catalog.T(user.Locale, "notification.appointment_found.body", watch.Name, history.DateTime.Format("2006-01-02 15:04"), history.DoctorName, history.FacilityName, history.ServiceName)
-	msg := tgbotapi.NewMessage(user.TelegramChatID, text)
+	return b.NotifyAppointments(ctx, user, watch, []domain.AppointmentHistory{history}, 1)
+}
+
+func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch domain.Watch, histories []domain.AppointmentHistory, totalFound int) (int, error) {
+	if len(histories) == 0 {
+		return 0, nil
+	}
+
+	shown := len(histories)
+	if totalFound < shown {
+		totalFound = shown
+	}
+
+	messageText := appointmentsHTML(b.catalog.T(user.Locale, "notification.appointment_found.title"), watch, histories, totalFound)
+
+	first := histories[0]
+	msg := tgbotapi.NewMessage(user.TelegramChatID, messageText)
+	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), history.BookingURL)),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.open_luxmed"), first.BookingURL)),
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.pause"), fmt.Sprintf("watch:pause:%d", watch.ID)),
-			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.show_watch"), fmt.Sprintf("watch:show:%d", watch.ID)),
+			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID)),
 		),
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.check_again"), fmt.Sprintf("watch:check:%d", watch.ID))),
 	)
+
 	sent, err := b.api.Send(msg)
 	return sent.MessageID, err
 }
@@ -238,18 +252,6 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 		b.handleProcedureText(ctx, user, state, text)
 	case flowWatchSearch:
 		b.handleProcedureText(ctx, user, state, text)
-	case flowWatchDoctor:
-		id, name, ok := parseIDName(text)
-		if !ok {
-			b.send(user, b.catalog.T(user.Locale, "flow.watch.doctor_exact"), cancelKeyboard(b.catalog, user.Locale))
-			return
-		}
-		state.Watch.DoctorID = &id
-		state.Watch.DoctorName = name
-		state.Watch.DoctorMode = domain.DoctorModeExact
-		state.Kind = flowWatchFacility
-		b.setFlow(user.ID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility"), cancelKeyboard(b.catalog, user.Locale))
 	case flowWatchFacility:
 		b.handleFacilityText(ctx, user, state, text)
 	case flowWatchTime:
@@ -402,56 +404,6 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		if state != nil {
 			b.finishSelectedFacilities(ctx, user, state)
 		}
-
-	case data == "fac:any":
-		state := b.getFlow(user.ID)
-		if state != nil {
-			state.Watch.FacilityMode = domain.FacilityModeAll
-			state.Watch.FacilityIDs = nil
-			state.Watch.FacilityNames = nil
-			b.setFlow(user.ID, state)
-			b.showTimeStep(user, state)
-		}
-
-	case data == "fac:all":
-		state := b.getFlow(user.ID)
-		if state != nil {
-			b.showFacilityPage(ctx, user, state, "all", 0)
-		}
-
-	case data == "fac:favs":
-		state := b.getFlow(user.ID)
-		if state != nil {
-			b.showFacilityPage(ctx, user, state, "favs", 0)
-		}
-
-	case strings.HasPrefix(data, "facpage:"):
-		state := b.getFlow(user.ID)
-		if state != nil {
-			b.handleFacilityPage(ctx, user, state, data)
-		}
-
-	case strings.HasPrefix(data, "facsel:"):
-		state := b.getFlow(user.ID)
-		if state != nil {
-			b.handleFacilityToggle(ctx, user, state, data)
-		}
-
-	case data == "facclear":
-		state := b.getFlow(user.ID)
-		if state != nil {
-			state.Watch.FacilityIDs = nil
-			state.Watch.FacilityNames = nil
-			state.Watch.FacilityMode = ""
-			b.setFlow(user.ID, state)
-			b.showFacilityPage(ctx, user, state, "all", 0)
-		}
-
-	case data == "facdone":
-		state := b.getFlow(user.ID)
-		if state != nil {
-			b.finishSelectedFacilities(ctx, user, state)
-		}
 	case strings.HasPrefix(data, "time:"):
 		state := b.getFlow(user.ID)
 		if state != nil {
@@ -461,26 +413,6 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		b.finishWatch(ctx, user, data)
 	case strings.HasPrefix(data, "fac:"):
 		b.handleFacility(ctx, user, data)
-	case data == "doctor:any":
-		state := b.getFlow(user.ID)
-		if state == nil {
-			return
-		}
-		state.Watch.DoctorMode = domain.DoctorModeAny
-		state.Watch.FacilityMode = domain.FacilityModeAll
-		state.Kind = flowWatchFacility
-		b.setFlow(user.ID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility"), cancelKeyboard(b.catalog, user.Locale))
-	case data == "doctor:exact":
-		state := b.getFlow(user.ID)
-		if state == nil {
-			return
-		}
-		state.Kind = flowWatchDoctor
-		b.setFlow(user.ID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.watch.doctor_exact"), cancelKeyboard(b.catalog, user.Locale))
-	case strings.HasPrefix(data, "interval:"):
-		b.finishWatch(ctx, user, data)
 	case strings.HasPrefix(data, "watch:"):
 		b.handleWatchAction(ctx, user, data)
 	}
@@ -502,24 +434,6 @@ func (b *Bot) startWatchFlow(ctx context.Context, user domain.User) {
 		return
 	}
 	b.showCityPicker(ctx, user, false, 0)
-}
-
-func (b *Bot) finishFacilityStep(ctx context.Context, user domain.User, state *flow, text string) {
-	if strings.EqualFold(text, "all") {
-		state.Watch.FacilityMode = domain.FacilityModeAll
-	} else {
-		id, name, ok := parseIDName(text)
-		if !ok {
-			b.send(user, b.catalog.T(user.Locale, "flow.watch.facility"), cancelKeyboard(b.catalog, user.Locale))
-			return
-		}
-		state.Watch.FacilityMode = domain.FacilityModeSelected
-		state.Watch.FacilityIDs = []int{id}
-		state.Watch.FacilityNames = []string{name}
-	}
-	b.setFlow(user.ID, state)
-	b.showTimeStep(user, state)
-	_ = ctx
 }
 
 func (b *Bot) showCityPicker(ctx context.Context, user domain.User, settings bool, page int) {
@@ -894,10 +808,6 @@ func (b *Bot) showProcedureSearchResults(ctx context.Context, user domain.User, 
 	b.showProcedureSearchResultsPage(ctx, user, state, query, 0)
 }
 
-func (b *Bot) showAllProcedures(ctx context.Context, user domain.User, state *flow) {
-	b.showProcedureLetters(ctx, user, state)
-}
-
 func (b *Bot) handleProcedure(ctx context.Context, user domain.User, data string) {
 	state := b.getFlow(user.ID)
 	if state == nil {
@@ -961,15 +871,6 @@ func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flo
 		b.catalog.T(user.Locale, "flow.watch.facility")+"\n\nМожно выбрать все клиники в городе или открыть список и выбрать несколько.",
 		facilityMenuKeyboard(nil, b.catalog, user.Locale),
 	)
-}
-
-func (b *Bot) showFavoriteFacilities(ctx context.Context, user domain.User, state *flow, limit int) {
-	_ = limit
-	b.showFacilityPage(ctx, user, state, "favs", 0)
-}
-
-func (b *Bot) showAllFacilities(ctx context.Context, user domain.User, state *flow) {
-	b.showFacilityPage(ctx, user, state, "all", 0)
 }
 
 func (b *Bot) handleFacility(ctx context.Context, user domain.User, data string) {
@@ -1214,7 +1115,7 @@ func (b *Bot) sendFacilityOptions(user domain.User, title string, facilities []d
 			label += ", " + facility.Address
 		}
 
-		lines = append(lines, fmt.Sprintf("%s %d. %s\n   ID: %d", prefix, i+1, label, facility.ID))
+		lines = append(lines, fmt.Sprintf("%s %d. %s", prefix, i+1, label))
 	}
 
 	b.send(user, strings.Join(lines, "\n\n"), markup)
@@ -1622,7 +1523,7 @@ func (b *Bot) sendProcedureOptions(user domain.User, title string, procedures []
 	lines = append(lines, strings.TrimSpace(title))
 
 	for i, proc := range procedures {
-		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, proc.Name, proc.ID))
+		lines = append(lines, fmt.Sprintf("%d. %s", i+1, proc.Name))
 	}
 
 	b.send(user, strings.Join(lines, "\n\n"), markup)
@@ -1743,10 +1644,10 @@ func (b *Bot) showWatches(ctx context.Context, user domain.User) {
 		count, _ := b.db.CountHistoryForWatch(ctx, watch.ID)
 		last := "-"
 		if watch.LastCheckedAt != nil {
-			last = watch.LastCheckedAt.Format("2006-01-02 15:04")
+			last = watch.LastCheckedAt.Format(appointmentTimeLayout)
 		}
-		text := b.catalog.T(user.Locale, "watch.list.item", watch.Name, watch.Status, watch.CityName, watch.ServiceName, last, count)
-		b.send(user, text, watchKeyboard(b.catalog, user.Locale, watch))
+		text := b.catalog.T(user.Locale, "watch.list.item", esc(watch.Name), watch.Status, last, count)
+		b.sendHTML(user, text, watchKeyboard(b.catalog, user.Locale, watch))
 	}
 }
 
@@ -1756,11 +1657,7 @@ func (b *Bot) showHistory(ctx context.Context, user domain.User) {
 		b.send(user, b.catalog.T(user.Locale, "history.empty"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
-	var lines []string
-	for _, item := range items {
-		lines = append(lines, fmt.Sprintf("%s\n%s\n%s\n%s", item.DateTime.Format("2006-01-02 15:04"), item.ServiceName, item.DoctorName, item.FacilityName))
-	}
-	b.send(user, strings.Join(lines, "\n\n"), mainKeyboard(b.catalog, user.Locale))
+	b.sendHTML(user, historyHTML(items), mainKeyboard(b.catalog, user.Locale))
 }
 
 func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string) {
@@ -1795,7 +1692,17 @@ func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
 }
 
 func (b *Bot) send(user domain.User, text string, markup any) {
+	b.sendMode(user, text, markup, "")
+}
+
+// sendHTML is for messages whose dynamic parts are already escaped with esc.
+func (b *Bot) sendHTML(user domain.User, text string, markup any) {
+	b.sendMode(user, text, markup, tgbotapi.ModeHTML)
+}
+
+func (b *Bot) sendMode(user domain.User, text string, markup any, parseMode string) {
 	msg := tgbotapi.NewMessage(user.TelegramChatID, text)
+	msg.ParseMode = parseMode
 	if markup != nil {
 		msg.ReplyMarkup = markup
 	}

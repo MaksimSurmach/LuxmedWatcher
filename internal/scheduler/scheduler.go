@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -13,7 +14,7 @@ import (
 )
 
 type Notifier interface {
-	NotifyAppointment(ctx context.Context, user domain.User, watch domain.Watch, history domain.AppointmentHistory) (int, error)
+	NotifyAppointments(ctx context.Context, user domain.User, watch domain.Watch, histories []domain.AppointmentHistory, totalFound int) (int, error)
 }
 
 type Runner struct {
@@ -80,6 +81,8 @@ func (r *Runner) CheckWatch(ctx context.Context, watch domain.Watch) error {
 		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, err.Error())
 		return err
 	}
+	pendingNotifications := make([]domain.AppointmentHistory, 0)
+
 	for _, app := range apps {
 		history, isNew, err := r.db.UpsertAppointmentHistory(ctx, watch.ID, app)
 		if err != nil {
@@ -89,16 +92,49 @@ func (r *Runner) CheckWatch(ctx context.Context, watch domain.Watch) error {
 		if !isNew && !r.cooldownExpired(ctx, watch.ID, history.Fingerprint) {
 			continue
 		}
-		messageID, notifyErr := r.notifier.NotifyAppointment(ctx, user, watch, history)
+		pendingNotifications = append(pendingNotifications, history)
+	}
+
+	if len(pendingNotifications) > 0 {
+		sort.Slice(pendingNotifications, func(i, j int) bool {
+			left := pendingNotifications[i]
+			right := pendingNotifications[j]
+
+			if !left.DateTime.Equal(right.DateTime) {
+				return left.DateTime.Before(right.DateTime)
+			}
+			if left.FacilityName != right.FacilityName {
+				return left.FacilityName < right.FacilityName
+			}
+			return left.DoctorName < right.DoctorName
+		})
+
+		visibleNotifications := pendingNotifications
+		if len(visibleNotifications) > 10 {
+			visibleNotifications = visibleNotifications[:10]
+		}
+
+		messageID, notifyErr := r.notifier.NotifyAppointments(ctx, user, watch, visibleNotifications, len(pendingNotifications))
 		status := domain.NotificationStatusSent
 		errText := ""
 		if notifyErr != nil {
 			status = domain.NotificationStatusFailed
 			errText = notifyErr.Error()
 		}
-		if err := r.db.MarkNotified(ctx, watch.ID, history.ID, history.Fingerprint, messageID, status, errText); err != nil {
-			r.logger.Warn("store notification history failed", "watch_id", watch.ID, "err", err)
+
+		for _, history := range pendingNotifications {
+			if err := r.db.MarkNotified(ctx, watch.ID, history.ID, history.Fingerprint, messageID, status, errText); err != nil {
+				r.logger.Warn("store notification history failed", "watch_id", watch.ID, "history_id", history.ID, "err", err)
+			}
 		}
+
+		r.logger.Info(
+			"appointment notifications batched",
+			"watch_id", watch.ID,
+			"total", len(pendingNotifications),
+			"shown", len(visibleNotifications),
+			"status", status,
+		)
 	}
 	return r.db.MarkWatchChecked(ctx, watch.ID, true, "")
 }
