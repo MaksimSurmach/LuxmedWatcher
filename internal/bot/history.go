@@ -9,6 +9,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
 const historyPageSize = 5
@@ -86,9 +87,21 @@ func (b *Bot) sendHistoryPage(
 	var bookingURL string
 	var hide []tgbotapi.InlineKeyboardButton
 	for i, item := range items {
-		line := fmt.Sprintf("%d. %s\n%s\n%s · %s", i+1,
-			appointmentDateTime(user.Locale, item.DateTime),
-			truncateMessage(item.ServiceName, 160), truncateMessage(item.DoctorName, 80), truncateMessage(item.FacilityName, 120))
+		when := b.slotDateTime(user.Locale, item.DateTime)
+		if item.DateTime.Before(now) && item.DateTime.In(luxmed.Location()).Year() != now.In(luxmed.Location()).Year() {
+			when = appointmentDateTime(user.Locale, item.DateTime)
+		}
+		var details []string
+		if item.DoctorName != "" {
+			details = append(details, truncateMessage(item.DoctorName, 80))
+		}
+		if facility := slotPlace(item).facility; facility != "" {
+			details = append(details, truncateMessage(facility, 120))
+		}
+		line := fmt.Sprintf("%d. %s\n%s", i+1, when, truncateMessage(item.ServiceName, 160))
+		if len(details) > 0 {
+			line += "\n" + strings.Join(details, " · ")
+		}
 		if item.Address != "" {
 			line += "\n" + truncateMessage(item.Address, 100)
 		}

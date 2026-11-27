@@ -27,7 +27,7 @@ func TestNotificationSingleSlot(t *testing.T) {
 	if shown != 1 || strings.Contains(text, "More options") {
 		t.Fatalf("shown=%d text=%q", shown, text)
 	}
-	for _, want := range []string{"<b>Krakow</b>\nClinic A\nMain 1\n<b>Jan 5, 2030</b>\n09:30 · Dr A"} {
+	for _, want := range []string{"<b>Krakow</b>\nClinic A\nMain 1\n<b>Sat 05.01</b>\n09:30 · Dr A"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("missing %q in %q", want, text)
 		}
@@ -45,7 +45,7 @@ func TestNotificationGroupsSameStreetOnceAndSortsTimes(t *testing.T) {
 	if shown != 3 || strings.Count(text, "\nMain 1\n") != 1 || strings.Count(text, "Clinic A") != 1 {
 		t.Errorf("expected all slots under one original address, got %d in %q", shown, text)
 	}
-	order := []string{"Jan 5, 2030", "09:00", "14:00", "Jan 6, 2030", "08:00"}
+	order := []string{"Sat 05.01", "09:00", "14:00", "Sun 06.01", "08:00"}
 	last := -1
 	for _, part := range order {
 		i := strings.Index(text, part)
@@ -78,8 +78,8 @@ func TestNotificationGroupsFallbackClinicNamesByAddress(t *testing.T) {
 	}
 	text, shown := b.appointmentNotification("en", domain.Watch{}, items, len(items), 10)
 	for _, block := range []string{
-		"\nMain 1\n<b>Jan 5, 2030</b>\n09:00 · Dr B\n14:00 · Dr A",
-		"\nClinic A\nMain 1\n<b>Jan 5, 2030</b>\n10:00 · Dr C",
+		"\nMain 1\n<b>Sat 05.01</b>\n09:00 · Dr B\n14:00 · Dr A",
+		"\nClinic A\nMain 1\n<b>Sat 05.01</b>\n10:00 · Dr C",
 	} {
 		if !strings.Contains(text, block) {
 			t.Errorf("missing block %q in %q", block, text)
@@ -328,6 +328,53 @@ func TestAllOptionsCallbackShowsAvailableSlotsFromItsNotification(t *testing.T) 
 		click(53, button(msg, "Previous"))
 		if previous := nextMessage(); !strings.Contains(previous.text, "Street 06") || strings.Contains(previous.text, "Previously shown") {
 			t.Errorf("unexpected previous page: %q", previous.text)
+		}
+	}
+}
+
+func TestAcceptedCheckAcknowledgedInSavedLocale(t *testing.T) {
+	ctx := t.Context()
+	acks := make(chan string, 4)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		switch r.URL.Path {
+		case "/botfake/answerCallbackQuery":
+			acks <- r.Form.Get("text")
+		case "/botfake/answerWidgetQuery":
+			acks <- r.Form.Get("data")
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":7}}`)
+	})
+	owner := createUser(t, b, 41, domain.UserStatusActive)
+	other := createUser(t, b, 42, domain.UserStatusActive)
+	if err := b.db.SetUserLocale(ctx, owner.ID, "pl"); err != nil {
+		t.Fatal(err)
+	}
+	id, err := b.db.CreateWatch(ctx, domain.Watch{UserID: owner.ID, Name: "W", CityID: 1, ServiceID: 12, CheckIntervalSeconds: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := fmt.Sprintf("watch:check:%d", id)
+	for _, test := range []struct {
+		actor domain.User
+		want  string
+	}{{owner, "Sprawdzam…"}, {other, ""}} {
+		from := &tgbotapi.User{ID: test.actor.TelegramUserID}
+		chat := &tgbotapi.Chat{ID: from.ID, Type: "private"}
+		b.handleCallback(ctx, &tgbotapi.CallbackQuery{ID: "cb", Data: data, From: from, Message: &tgbotapi.Message{Chat: chat}})
+		query := widgetQuery{ID: "w", From: from, Chat: chat, MessageID: 1, Data: data}
+		query.Type.Type = "data"
+		b.handleWidgetQuery(ctx, &query)
+		b.workers.Wait()
+		for range 2 {
+			select {
+			case got := <-acks:
+				if got != test.want {
+					t.Errorf("user %d: acknowledgement %q, want %q", from.ID, got, test.want)
+				}
+			default:
+				t.Fatalf("missing acknowledgement for user %d", from.ID)
+			}
 		}
 	}
 }

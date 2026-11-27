@@ -1,4 +1,6 @@
 {
+  "slot.weekdays": "Нд,Пн,Аў,Ср,Чц,Пт,Сб",
+  "toast.checking": "Правяраю…",
   "language.name": "Беларуская",
   "input.all": "усе",
   "input.any": "любое",

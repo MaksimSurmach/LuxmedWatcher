@@ -62,7 +62,7 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 			}
 		}
 		if newDate {
-			fmt.Fprintf(&piece, "\n<b>%s</b>", appointmentDate(locale, item.DateTime))
+			fmt.Fprintf(&piece, "\n<b>%s</b>", b.slotDate(locale, item.DateTime))
 		}
 		fmt.Fprintf(&piece, "\n%s", item.DateTime.In(luxmed.Location()).Format("15:04"))
 		if item.DoctorName != "" {

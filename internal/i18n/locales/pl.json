@@ -1,4 +1,6 @@
 {
+  "slot.weekdays": "Nd,Pn,Wt,Śr,Cz,Pt,Sb",
+  "toast.checking": "Sprawdzam…",
   "language.name": "Polski",
   "input.all": "wszystkie",
   "input.any": "dowolne",

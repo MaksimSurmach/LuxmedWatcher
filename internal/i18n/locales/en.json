@@ -1,4 +1,6 @@
 {
+  "slot.weekdays": "Sun,Mon,Tue,Wed,Thu,Fri,Sat",
+  "toast.checking": "Checking…",
   "language.name": "English",
   "input.all": "all",
   "input.any": "any",
