@@ -1883,7 +1883,15 @@ func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
-	b.send(user, b.catalog.T(user.Locale, "flow.invite.code", code), nil)
+	text := b.catalog.T(user.Locale, "flow.invite.code", code)
+	if username := b.api.Self.UserName; username != "" {
+		text += "\nhttps://t.me/" + username + "?start=" + code
+	}
+	msg := tgbotapi.NewMessage(user.TelegramChatID, text)
+	msg.DisableWebPagePreview = true
+	if _, err := b.api.Send(msg); err != nil {
+		b.logger.Warn("send Telegram invite failed")
+	}
 }
 
 func (b *Bot) send(user domain.User, text string, markup any) bool {

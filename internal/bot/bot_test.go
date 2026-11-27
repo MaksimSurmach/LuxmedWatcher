@@ -382,11 +382,26 @@ func (watchCatalogClient) GetDoctorsAndFacilities(context.Context, int, int) (do
 	}, nil
 }
 
+func TestIntervalPickerUsesWholeSecondsAndOffersAllowedPresets(t *testing.T) {
+	requests := make(chan string, 1)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		requests <- r.FormValue("text") + r.FormValue("reply_markup")
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	b.cfg.MinimumInterval = 2*time.Minute + 500*time.Millisecond
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	b.showIntervalStep(user, &flow{})
+	page := <-requests
+	if !strings.Contains(page, "Default (2 min 1 sec)") || !strings.Contains(page, `"interval:3"`) || strings.Contains(page, `"interval:2"`) {
+		t.Fatalf("incorrect default or allowed interval choices: %s", page)
+	}
+}
+
 func TestCreateWatchThroughTelegramCallbacks(t *testing.T) {
 	ctx := context.Background()
 	b := testBot(t)
-	b.cfg.MinimumInterval = 2 * time.Minute
-	b.cfg.DefaultInterval = 5 * time.Minute
+	b.cfg.MinimumInterval = 2*time.Minute + 500*time.Millisecond
+	b.cfg.DefaultInterval = b.cfg.MinimumInterval
 	b.newClient = func(bool) luxmed.Client { return watchCatalogClient{} }
 	pending := createUser(t, b, 10, domain.UserStatusPendingInvite)
 	admin := createUser(t, b, 20, domain.UserStatusActive)
@@ -454,7 +469,7 @@ func TestCreateWatchThroughTelegramCallbacks(t *testing.T) {
 	}
 	watch := watches[0]
 	if watch.CityID != 1 || watch.ServiceID != 12 || watch.DoctorID == nil || *watch.DoctorID != 21 ||
-		!slices.Equal(watch.FacilityIDs, []int{31}) || watch.CheckIntervalSeconds != 300 ||
+		!slices.Equal(watch.FacilityIDs, []int{31}) || watch.CheckIntervalSeconds != 121 ||
 		watch.DateFrom == nil || watch.DateTo == nil ||
 		watch.DateFrom.In(luxmed.Location()).Format(time.DateOnly) != start.Format(time.DateOnly) ||
 		watch.DateTo.In(luxmed.Location()).Format(time.DateOnly) != end.Format(time.DateOnly) ||
@@ -610,6 +625,39 @@ func TestWatchWithExpiredSessionOffersSignIn(t *testing.T) {
 	b.showWatches(ctx, user)
 	if got := sends.Load(); got != 1 {
 		t.Errorf("sent %d messages, want 1", got)
+	}
+}
+
+func TestAdminInviteLinkActivatesItsRecipient(t *testing.T) {
+	type reply struct{ text, disablePreview string }
+	replies := make(chan reply, 8)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		replies <- reply{r.FormValue("text"), r.FormValue("disable_web_page_preview")}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":13}}`)
+	})
+	b.api.Self.UserName = "test_watcher_bot"
+	b.cfg.AdminTelegramIDs = map[int64]bool{101: true}
+	send := func(user int64, command, arg string) {
+		t.Helper()
+		text := "/" + command
+		if arg != "" {
+			text += " " + arg
+		}
+		b.handleUpdate(t.Context(), tgbotapi.Update{Message: &tgbotapi.Message{
+			Chat: &tgbotapi.Chat{ID: user, Type: "private"}, From: &tgbotapi.User{ID: user},
+			Text: text, Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: len(command) + 1}},
+		}})
+	}
+	send(101, "invite", "")
+	result := <-replies
+	_, code, ok := strings.Cut(result.text, "\nhttps://t.me/test_watcher_bot?start=")
+	if !ok || code == "" || result.disablePreview != "true" {
+		t.Fatalf("invalid invitation link or active preview")
+	}
+	send(202, "start", code)
+	user, err := b.db.UserByTelegramID(t.Context(), 202)
+	if err != nil || !user.IsActive() {
+		t.Fatalf("invite activation: user=%v, error=%v", user.Status, err)
 	}
 }
 

@@ -196,19 +196,19 @@ func (b *Bot) showIntervalStep(user domain.User, state *flow) {
 	state.Kind = flowWatchInterval
 	interval := max(b.cfg.DefaultInterval, b.cfg.MinimumInterval, time.Minute)
 	var choices []tgbotapi.InlineKeyboardButton
-	for _, minutes := range []int{2, 5, 10} {
+	for _, minutes := range []int{2, 3, 5, 10} {
 		if time.Duration(minutes)*time.Minute >= b.cfg.MinimumInterval {
 			choices = append(choices, tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.interval_minutes", minutes), fmt.Sprintf("interval:%d", minutes)))
 		}
 	}
 	rows := [][]tgbotapi.InlineKeyboardButton{
-		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.interval_default", b.intervalText(user.Locale, interval)), "interval:default")),
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.interval_default", b.intervalText(user.Locale, intervalSeconds(interval))), "interval:default")),
 	}
 	if len(choices) > 0 {
 		rows = append(rows, choices)
 	}
 	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.cancel"), "cancel")))
-	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.interval", b.intervalText(user.Locale, b.cfg.MinimumInterval)), tgbotapi.NewInlineKeyboardMarkup(rows...))
+	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.interval", b.intervalText(user.Locale, intervalSeconds(b.cfg.MinimumInterval))), tgbotapi.NewInlineKeyboardMarkup(rows...))
 }
 
 func (b *Bot) previewWatch(user domain.User, state *flow, interval time.Duration) {
@@ -216,7 +216,7 @@ func (b *Bot) previewWatch(user domain.User, state *flow, interval time.Duration
 		b.showIntervalStep(user, state)
 		return
 	}
-	state.Watch.CheckIntervalSeconds = int(max(time.Minute, interval).Seconds())
+	state.Watch.CheckIntervalSeconds = intervalSeconds(max(time.Minute, interval))
 	state.Watch.Name = state.Watch.ServiceName + " · " + state.Watch.CityName
 	state.Kind, state.Confirmation = flowWatchConfirm, randomCode()
 	b.sendWatchStep(user, b.watchSummary(user, state.Watch), tgbotapi.NewInlineKeyboardMarkup(
@@ -258,7 +258,7 @@ func (b *Bot) watchSummary(user domain.User, watch domain.Watch) string {
 			days = strings.Join(names, ", ")
 		}
 	}
-	return tr("flow.watch.preview", watch.ServiceName, watch.CityName, doctor, truncateMessage(facilities, 400), dates, days, hours, b.intervalText(user.Locale, time.Duration(watch.CheckIntervalSeconds)*time.Second))
+	return tr("flow.watch.preview", watch.ServiceName, watch.CityName, doctor, truncateMessage(facilities, 400), dates, days, hours, b.intervalText(user.Locale, watch.CheckIntervalSeconds))
 }
 
 func (b *Bot) finishWatch(ctx context.Context, user domain.User, token string) {

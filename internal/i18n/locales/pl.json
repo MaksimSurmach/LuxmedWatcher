@@ -127,7 +127,7 @@
   "flow.watch.summary": "Wyszukiwanie: %s\nMiasto: %s\nUsługa: %s\nLekarz: %s\nPlacówki: %s\nInterwał: %s",
   "flow.watch.time": "Krok 5/8: MVP używa najbliższych 14 dni i dowolnej godziny.",
   "flow.watch.updated": "Wyszukiwanie zaktualizowane.",
-  "help.text": "Używaj przycisków, aby tworzyć wyszukiwania, zarządzać kontem LUX MED i przeglądać znalezione terminy.",
+  "help.text": "1. Zaloguj się do LUX MED przez /connect.\n2. Wybierz usługę i filtry przez /new.\n3. Gdy pojawi się pasujący termin, otwórz powiadomienie i zarezerwuj wizytę w Portalu Pacjenta.",
   "history.empty": "Nie znaleziono jeszcze wolnych terminów.",
   "options.empty": "Żaden termin z tego powiadomienia nie jest już dostępny.",
   "history.expired": "Termin wizyty już minął.",
