@@ -123,20 +123,19 @@ func (c *reconnectHTTP) Do(req *http.Request) (*http.Response, error) {
 	return res, err
 }
 
-func (b *Bot) checkAccount(ctx context.Context, user domain.User) error {
-	if b.cfg.Browsers != nil {
-		if b.runner != nil {
-			_, err := b.runner.CheckBrowserSession(ctx, user)
-			return err
-		}
-		browser := b.cfg.Browsers[user.TelegramUserID]
-		if browser == nil {
-			return luxmed.ErrAuthentication
-		}
-		return browser.Check(ctx)
+func (b *Bot) checkWatchAccount(ctx context.Context, user domain.User) error {
+	if b.runner != nil {
+		return b.runner.CheckWatchAccount(ctx, user)
 	}
-	_, err := b.db.LuxMedAccount(ctx, user.ID)
-	return err
+	_, err := b.db.LoginAccount(ctx, user.ID, b.cfg.Browsers != nil)
+	if !errors.Is(err, sql.ErrNoRows) || b.cfg.Browsers == nil {
+		return err
+	}
+	browser := b.cfg.Browsers[user.TelegramUserID]
+	if browser == nil {
+		return luxmed.ErrAuthentication
+	}
+	return browser.Check(ctx)
 }
 
 func accountCheckMessage(err error) string {
@@ -162,7 +161,7 @@ func (b *Bot) withAccountRecovery(
 	var button tgbotapi.InlineKeyboardButton
 	switch key {
 	case "errors.needs_login":
-		button = tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.sign_in"), "connect:open")
+		button = tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.sign_in"), "account")
 	case "errors.no_account":
 		button = tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.connect"), "account")
 	default:
@@ -174,7 +173,7 @@ func (b *Bot) withAccountRecovery(
 
 func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if b.cfg.Browsers == nil {
-		b.setFlow(user.ID, &flow{Kind: flowAccountLogin})
+		b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountLogin})
 		b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
 		return
 	}
@@ -182,6 +181,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if !user.IsActive() || browser == nil {
 		return
 	}
+	b.clearCredentialFlow(user.TelegramUserID)
 	if b.cfg.MiniApp != nil {
 		b.showMiniApp(ctx, user)
 		return
@@ -190,6 +190,7 @@ func (b *Bot) showAccount(ctx context.Context, user domain.User) {
 	if err != nil {
 		b.logger.Warn("open browser viewer failed", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
+		b.showConnect(ctx, user)
 		return
 	}
 	if strings.HasPrefix(link, "http://localhost:") {
@@ -209,6 +210,7 @@ func (b *Bot) showMiniApp(ctx context.Context, user domain.User) {
 	if err != nil {
 		b.logger.Warn("Mini App unavailable", "err", err)
 		b.send(user, b.catalog.T(user.Locale, "errors.luxmed_unavailable"), nil)
+		b.showConnect(ctx, user)
 		return
 	}
 	b.sendMiniApp(user, "flow.browser.open", "button.sign_in", link+"&lang="+i18n.Normalize(user.Locale, "pl"))

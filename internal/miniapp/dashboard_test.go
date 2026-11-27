@@ -3,7 +3,9 @@ package miniapp
 import (
 	"context"
 	"crypto/ed25519"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +21,7 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
+	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
@@ -78,8 +81,19 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	runner := scheduler.NewRunner(db, nil, nil, 2*time.Minute, time.Hour, false)
 	runner.UseBrowsers(browsers)
 	d := &dashboard{db: db, key: pub, sessions: newSessions(),
-		browsers: browsers, checkAccount: runner.CheckBrowserSession,
+		browsers: browsers, runner: runner, checkAccount: runner.CheckBrowserSession,
 		cfg: DashboardConfig{Origin: origin, BotID: 12, MinimumInterval: 2 * time.Minute}}
+	failConnect := true
+	d.connect = func(_ context.Context, id int64) (string, error) {
+		if id != owner.TelegramUserID {
+			t.Errorf("unexpected viewer owner: %d", id)
+		}
+		if failConnect {
+			failConnect = false
+			return "", luxmed.ErrUnavailable
+		}
+		return "https://app.example/viewer?ticket=fixture", nil
+	}
 	var syncedLocales []string
 	d.cfg.SyncAppMenu = func(ctx context.Context, userID int64) {
 		persisted, err := db.UserByID(ctx, userID)
@@ -90,7 +104,7 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 		syncedLocales = append(syncedLocales, persisted.Locale)
 	}
 	handler := d.handler()
-	request := func(action, body, requestOrigin, identity string, want int) *httptest.ResponseRecorder {
+	request := func(action, body, requestOrigin, identity string, want int, attemptID ...string) *httptest.ResponseRecorder {
 		t.Helper()
 		req := httptest.NewRequest(http.MethodPost, dashboardPrefix+action, strings.NewReader(body))
 		req.Header.Set("Origin", requestOrigin)
@@ -98,6 +112,12 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 			req.Header.Set("X-Telegram-Init-Data", identity)
 		} else {
 			req.Header.Set("Authorization", "Bearer "+identity)
+		}
+		if action == "connect" {
+			req.Header.Set("X-Telegram-Init-Data", signTelegram(owner.TelegramUserID, 12, time.Now(), priv))
+		}
+		if len(attemptID) != 0 {
+			req.Header.Set("X-LuxMed-Login-Attempt", attemptID[0])
 		}
 		res := httptest.NewRecorder()
 		handler.ServeHTTP(res, req)
@@ -123,6 +143,181 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	}
 	token := session(signed)
 	otherToken := session(signTelegram(other.TelegramUserID, 12, time.Now(), priv))
+	type accountRevisions struct {
+		CredentialRevision     *int64
+		CredentialSaveRevision *int64
+	}
+	revisions := func(identity string) string {
+		t.Helper()
+		view := request("load", "{}", origin, identity, http.StatusOK)
+		var snapshot accountRevisions
+		if err := json.Unmarshal(view.Body.Bytes(), &snapshot); err != nil ||
+			snapshot.CredentialRevision == nil || snapshot.CredentialSaveRevision == nil {
+			t.Fatalf("invalid account revision: %s", view.Body)
+		}
+		return fmt.Sprintf(`{"CredentialRevision":%d,"CredentialSaveRevision":%d}`,
+			*snapshot.CredentialRevision, *snapshot.CredentialSaveRevision)
+	}
+	credentialBody := func(snapshot, password string) string {
+		quoted, err := json.Marshal(password)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return fmt.Sprintf(`%s,"Login":"patient","Password":%s}`, strings.TrimSuffix(snapshot, "}"), quoted)
+	}
+	legacyRevision := revisions(token)
+	cryptor, err := security.NewCryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyPassword, err := cryptor.Encrypt("legacy fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
+		UserID: owner.ID, Login: "legacy", EncryptedPassword: legacyPassword,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EncryptLegacyLogins(ctx, cryptor); err != nil {
+		t.Fatal(err)
+	}
+	request("connect", legacyRevision, origin, token, http.StatusServiceUnavailable)
+	refreshed := revisions(token)
+	if refreshed == legacyRevision {
+		t.Fatal("failed viewer link did not publish the committed save revision")
+	}
+	if res := request("connect", refreshed, origin, token, http.StatusOK); !strings.Contains(res.Body.String(), "viewer?ticket=fixture") {
+		t.Fatalf("Chrome viewer link is missing: %s", res.Body)
+	}
+	legacy, err := db.LuxMedAccount(ctx, owner.ID)
+	if err != nil || legacy.UseSavedLogin || legacy.EncryptedPassword == "" {
+		t.Fatalf("Chrome opening changed the migrated account: %v", err)
+	}
+	request("forget-credentials", revisions(token), origin, token, http.StatusNoContent)
+	if _, err := db.LuxMedAccount(ctx, owner.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("explicit Mini App removal retained migrated credentials: %v", err)
+	}
+	const secret = "  example password  "
+	d.saveLogin = func(ctx context.Context, user domain.User, creds luxmed.Credentials, id string) error {
+		if deadline, ok := ctx.Deadline(); !ok || time.Until(deadline) > 17*time.Second {
+			t.Error("credential request does not reserve time for the gateway response")
+		}
+		if creds.Login != "patient" || creds.Password != secret {
+			return luxmed.ErrAuthentication
+		}
+		if id != "" {
+			attempt, err := db.StartCredentialAttempt(ctx, user, id)
+			if err != nil {
+				return err
+			}
+			defer attempt.Finish()
+			if err := db.PrepareCredentialAttempt(attempt.Context(), cryptor, user, creds, attempt); err != nil {
+				return err
+			}
+			_, err = db.SaveCredentialAttempt(attempt.Context(), attempt)
+			return err
+		}
+		_, err := db.SaveCredentials(ctx, cryptor, user, creds)
+		return err
+	}
+	validLogin := `{"Login":"patient","Password":"  example password  "}`
+	request("credentials", validLogin, origin, "", http.StatusUnauthorized)
+	request("credentials", validLogin, "https://other.example", token, http.StatusUnauthorized)
+	request("credentials", `{"Login":"  ","Password":"x"}`, origin, token, http.StatusBadRequest)
+	beforeCommit := revisions(token)
+	request("credentials", credentialBody(beforeCommit, secret), origin, token, http.StatusNoContent, "commit-first")
+	request("connect", beforeCommit, origin, token, http.StatusPreconditionFailed, "different-attempt")
+	request("connect", beforeCommit, origin, token, http.StatusOK, "commit-first")
+	beforeClick := revisions(token)
+	request("connect", beforeClick, origin, token, http.StatusOK, "click-first")
+	request("credentials", credentialBody(beforeClick, secret), origin, token, http.StatusPreconditionFailed, "delayed-other-tab")
+	request("credentials", credentialBody(revisions(token), secret), origin, token, http.StatusPreconditionFailed, "click-first")
+	request("credentials", validLogin, origin, token, http.StatusPreconditionFailed)
+	current, err := db.UserByID(ctx, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatAttempt, err := db.StartCredentialAttempt(ctx, current, "new-chat-attempt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer chatAttempt.Finish()
+	if err := db.PrepareCredentialAttempt(
+		chatAttempt.Context(), cryptor, current, luxmed.Credentials{Login: "chat", Password: "fixture"}, chatAttempt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	request("connect", beforeClick, origin, token, http.StatusPreconditionFailed)
+	request("connect", beforeClick, origin, token, http.StatusPreconditionFailed, "new-chat-attempt")
+	request("connect", fmt.Sprintf(`{"CredentialRevision":%d}`, current.CredentialRevision), origin, token, http.StatusPreconditionFailed)
+	if err := chatAttempt.Context().Err(); err != nil {
+		t.Fatalf("stale Chrome button canceled a newer save at the same mode revision: %v", err)
+	}
+	request("connect", revisions(token), origin, token, http.StatusOK)
+	if !errors.Is(chatAttempt.Context().Err(), context.Canceled) {
+		t.Fatal("Mini App did not cancel the active chat request")
+	}
+	if _, err := db.SaveCredentialAttempt(ctx, chatAttempt); !errors.Is(err, storage.ErrCredentialsChanged) {
+		t.Fatalf("late chat login crossed the Mini App Chrome choice: %v", err)
+	}
+	chatAttempt.Finish()
+	staleRevision := revisions(token)
+	request("credentials", credentialBody(revisions(token), secret), origin, token, http.StatusNoContent)
+	request("connect", revisions(token), origin, token, http.StatusPreconditionFailed)
+	current, err = db.UserByID(ctx, owner.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement, err := db.StartCredentialAttempt(ctx, current, "replacement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer replacement.Finish()
+	if err := db.PrepareCredentialAttempt(replacement.Context(), cryptor, current,
+		luxmed.Credentials{Login: "patient", Password: secret}, replacement); err != nil {
+		t.Fatal(err)
+	}
+	request("connect", staleRevision, origin, token, http.StatusPreconditionFailed)
+	request("forget-credentials", legacyRevision, origin, token, http.StatusPreconditionFailed)
+	if err := replacement.Context().Err(); err != nil {
+		t.Fatalf("outdated tab canceled the replacement: %v", err)
+	}
+	if _, err := db.SaveCredentialAttempt(replacement.Context(), replacement); err != nil {
+		t.Fatal(err)
+	}
+	replacement.Finish()
+	request("credentials", credentialBody(revisions(token), "wrong"), origin, token, http.StatusConflict)
+	request("forget-credentials", revisions(otherToken), origin, otherToken, http.StatusNoContent)
+	saved, err := db.LoginAccount(ctx, owner.ID, true)
+	if err != nil || saved.Login != "" || saved.EncryptedPassword == "" {
+		t.Fatal("expected encrypted credentials only", err)
+	}
+	creds, err := cryptor.OpenCredentials(owner.ID, saved.EncryptedPassword)
+	if err != nil || creds.Login != "patient" || creds.Password != secret {
+		t.Fatal("original credentials were not preserved")
+	}
+	if _, err := cryptor.OpenCredentials(other.ID, saved.EncryptedPassword); err == nil {
+		t.Fatal("ciphertext accepted for another user")
+	}
+	for _, tc := range []struct {
+		token string
+		saved bool
+	}{{token, true}, {otherToken, false}} {
+		view := request("load", "{}", origin, tc.token, http.StatusOK).Body.String()
+		if !strings.Contains(view, fmt.Sprintf(`"SavedLogin":%t`, tc.saved)) || strings.Contains(view, secret) || strings.Contains(view, "patient") || strings.Contains(view, saved.EncryptedPassword) {
+			t.Fatal("incorrect or unsafe account view")
+		}
+	}
+	beforeReplacement := revisions(token)
+	request("credentials", credentialBody(beforeReplacement, secret), origin, token, http.StatusNoContent, "form-replacement")
+	request("forget-credentials", beforeReplacement, origin, token, http.StatusPreconditionFailed)
+	request("forget-credentials", beforeReplacement, origin, token, http.StatusPreconditionFailed, "wrong-replacement")
+	request("forget-credentials", beforeReplacement, origin, token, http.StatusNoContent, "form-replacement")
+	if _, err := db.LuxMedAccount(ctx, owner.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatal("credentials retained", err)
+	}
+	request("connect", revisions(token), origin, token, http.StatusOK)
 	if res := request("load", "{}", origin, otherToken, http.StatusOK); !strings.Contains(res.Body.String(), "Other") {
 		t.Fatalf("other user's search missing: %s", res.Body)
 	}
@@ -292,6 +487,11 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	watch, err := db.Watch(ctx, id)
 	if err != nil || watch.Status != domain.WatchStatusPaused || watch.NextDays != 7 {
 		t.Fatalf("editing a paused watch: %+v, %v", watch, err)
+	}
+	request("status", fmt.Sprintf(`{"ID":%d,"Status":"active"}`, id), origin, token, http.StatusNoContent)
+	watch, err = db.Watch(ctx, id)
+	if err != nil || watch.Status != domain.WatchStatusActive {
+		t.Fatalf("Mini App did not resume the Chrome watch locally: %+v, %v", watch, err)
 	}
 	item := domain.Appointment{Fingerprint: "slot", DateTime: time.Now().AddDate(0, 0, 1), ServiceName: "Konsultacja okulistyczna  - bez badania dna oka", RawPayload: "private record"}
 	if _, _, err := db.UpsertAppointmentHistory(ctx, id, item); err != nil {
@@ -470,6 +670,8 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 	const origin = "https://app.example"
 	d := &dashboard{db: db, sessions: newSessions(), cfg: DashboardConfig{Origin: origin},
 		browsers: make(map[int64]*luxmed.Browser)}
+	d.runner = scheduler.NewRunner(db, nil, nil, 0, 0, false)
+	d.runner.UseBrowsers(d.browsers)
 	addUser := func(id int64, serve http.HandlerFunc) domain.User {
 		t.Helper()
 		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: id, Status: domain.UserStatusActive, Locale: "pl"})
@@ -484,13 +686,24 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 		}
 		return user
 	}
+	var failPopular atomic.Bool
 	owner := addUser(24, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == luxmed.DoctorsAndFacilitiesURL && r.URL.Query().Get("cityId") == "4" &&
+			r.URL.Query().Get("serviceVariantId") == "8" {
+			fmt.Fprint(w, `{"doctors":[{"id":20,"firstName":"Fixture","lastName":"Doctor"}],"facilities":[{"id":21,"name":"Fixture clinic"}]}`)
+			return
+		}
 		switch r.URL.RequestURI() {
 		case luxmed.ReferralServicesURL:
 			fmt.Fprint(w, `{"referrals":[{"id":43210,"serviceVariantId":6,"serviceName":"private referral label","doctor":"private doctor"},{"serviceVariantId":6,"serviceName":"duplicate"},{"serviceVariantId":98,"serviceName":"unknown"},{"id":2,"eReferralId":"private referral id","serviceName":"No procedure ID"}]}`)
 		case luxmed.RecentSearchesURL:
 			fmt.Fprint(w, `{"serviceVariantId":3,"searchName":"private metadata","searchParameters":[{"serviceVariantId":6,"searchName":"Already referred"},{"serviceVariantId":1,"searchName":"private search label"}]}`)
 		case luxmed.PopularServicesURL:
+			if failPopular.Load() {
+				w.Header().Set("Retry-After", "60")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
 			fmt.Fprint(w, `[{"serviceId":1,"serviceName":"Recent"},{"serviceId":2,"serviceName":"Upstream popular label"},{"serviceId":2,"serviceName":"Duplicate"},{"serviceId":99,"serviceName":"Unknown in this city"}]`)
 		case luxmed.ServiceVariantsGroupsURL:
 			fmt.Fprint(w, `[{"id":2,"name":"Popular"}]`)
@@ -546,8 +759,9 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 			Popular:  []domain.Service{{ID: 2, Name: "Popular"}},
 		}},
 		{"preserves saved searches and popular results if private sources fail", other, 1, procedurePicks{
-			Saved:   []domain.Service{{ID: 3, Name: "Other user's search"}},
-			Popular: []domain.Service{{ID: 2, Name: "Popular"}},
+			PortalIncomplete: true,
+			Saved:            []domain.Service{{ID: 3, Name: "Other user's search"}},
+			Popular:          []domain.Service{{ID: 2, Name: "Popular"}},
 		}},
 		{"loads a city catalog on first use", owner, 3, procedurePicks{Popular: []domain.Service{{ID: 2, Name: "Popular"}}}},
 	}
@@ -568,10 +782,83 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 			if strings.Contains(res.Body.String(), "private") || strings.Contains(res.Body.String(), "43210") {
 				t.Fatal("personal metadata was included in recommendations")
 			}
+			if picks.PortalIncomplete != tt.want.PortalIncomplete {
+				t.Fatalf("portal incomplete = %v, want %v", picks.PortalIncomplete, tt.want.PortalIncomplete)
+			}
 			if !slices.Equal(picks.Referred, tt.want.Referred) || !slices.Equal(picks.Recent, tt.want.Recent) ||
 				!slices.Equal(picks.Saved, tt.want.Saved) || !slices.Equal(picks.Popular, tt.want.Popular) {
 				t.Fatalf("picks = %+v, want %+v", picks, tt.want)
 			}
 		})
 	}
+
+	requestPicks := func(t *testing.T, cityID int) procedurePicks {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, dashboardPrefix+"procedure-picks",
+			strings.NewReader(fmt.Sprintf(`{"CityID":%d}`, cityID)))
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Authorization", "Bearer "+d.sessions.issue(owner.TelegramUserID, time.Now()))
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		var picks procedurePicks
+		if err := json.Unmarshal(res.Body.Bytes(), &picks); err != nil || res.Code != http.StatusOK {
+			t.Fatalf("status = %d, body = %s, err = %v", res.Code, res.Body, err)
+		}
+		return picks
+	}
+	t.Run("busy account keeps a saved service without a catalog entry", func(t *testing.T) {
+		const uncachedCity = 4
+		if err := db.UpsertCities(ctx, []domain.City{{ID: uncachedCity, Name: "Gdańsk"}}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.CreateWatch(ctx, domain.Watch{
+			UserID: owner.ID, CityID: uncachedCity, ServiceID: 8, ServiceName: "Saved service",
+		}); err != nil {
+			t.Fatal(err)
+		}
+		err := d.runner.WithLuxMedClient(ctx, owner, func(luxmed.Client) error {
+			picks := requestPicks(t, uncachedCity)
+			want := []domain.Service{{ID: 8, Name: "Saved service"}}
+			if !picks.PortalIncomplete || !slices.Equal(picks.Saved, want) {
+				t.Fatalf("saved recommendations lost while busy: %+v", picks)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, scenario := range []struct {
+			user   domain.User
+			action string
+			code   int
+		}{
+			{user: other, action: "providers", code: http.StatusNotFound},
+			{user: other, action: "watch", code: http.StatusNotFound},
+			{user: owner, action: "providers", code: http.StatusOK},
+			{user: owner, action: "watch", code: http.StatusNoContent},
+		} {
+			req := httptest.NewRequest(http.MethodPost, dashboardPrefix+scenario.action,
+				strings.NewReader(`{"CityID":4,"ServiceID":8,"DoctorID":20,"FacilityIDs":[21],"NextDays":7,"CheckMinutes":30}`))
+			req.Header.Set("Origin", origin)
+			req.Header.Set("Authorization", "Bearer "+d.sessions.issue(scenario.user.TelegramUserID, time.Now()))
+			res := httptest.NewRecorder()
+			handler.ServeHTTP(res, req)
+			if res.Code != scenario.code {
+				t.Fatalf("%s for user %d = %d, want %d", scenario.action, scenario.user.ID, res.Code, scenario.code)
+			}
+			if scenario.code == http.StatusOK && (!strings.Contains(res.Body.String(), "Doctor") ||
+				!strings.Contains(res.Body.String(), "Fixture clinic")) {
+				t.Fatalf("providers for saved service: %s", res.Body)
+			}
+		}
+	})
+	t.Run("late portal failure keeps successful groups and saved services", func(t *testing.T) {
+		addWatch(owner, 1, 2)
+		failPopular.Store(true)
+		picks := requestPicks(t, 1)
+		if !picks.PortalIncomplete || len(picks.Referred) != 1 || len(picks.Recent) != 1 ||
+			!slices.Equal(picks.Saved, []domain.Service{{ID: 2, Name: "Popular"}}) || len(picks.Popular) != 0 {
+			t.Fatalf("partial recommendations lost: %+v", picks)
+		}
+	})
 }

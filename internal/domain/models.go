@@ -49,19 +49,33 @@ const (
 )
 
 type User struct {
-	ID                int64
-	TelegramUserID    int64
-	TelegramChatID    int64
-	Username          string
-	DisplayName       string
-	Locale            string
-	PreferredCityID   *int
-	PreferredCityName string
-	Status            UserStatus
-	Role              UserRole
-	CreatedAt         time.Time
-	UpdatedAt         time.Time
-	LastSeenAt        time.Time
+	CredentialRevision     int64 `json:"-"`
+	CredentialSaveRevision int64 `json:"-"`
+	ID                     int64
+	TelegramUserID         int64
+	TelegramChatID         int64
+	Username               string
+	DisplayName            string
+	Locale                 string
+	PreferredCityID        *int
+	PreferredCityName      string
+	Status                 UserStatus
+	Role                   UserRole
+	CreatedAt              time.Time
+	UpdatedAt              time.Time
+	LastSeenAt             time.Time
+}
+
+// CredentialRevisions identifies both the login mode and its save barrier.
+type CredentialRevisions struct {
+	CredentialRevision     int64
+	CredentialSaveRevision int64
+}
+
+func (u User) CredentialRevisions() CredentialRevisions {
+	return CredentialRevisions{
+		CredentialRevision: u.CredentialRevision, CredentialSaveRevision: u.CredentialSaveRevision,
+	}
 }
 
 func (u User) IsActive() bool {
@@ -88,6 +102,7 @@ type LuxMedAccount struct {
 	UserID               int64
 	Login                string
 	EncryptedPassword    string
+	UseSavedLogin        bool
 	EncryptedSessionData string
 	SessionExpiresAt     *time.Time
 	LastLoginAt          *time.Time

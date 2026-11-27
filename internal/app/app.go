@@ -65,6 +65,9 @@ func (a *App) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := db.EncryptLegacyLogins(ctx, cryptor); err != nil {
+		return fmt.Errorf("encrypt legacy LuxMed credentials: %w", err)
+	}
 	httpClient := &http.Client{
 		Timeout: time.Duration(a.cfg.PollTimeout+10) * time.Second,
 		// Keep delivery tracing scoped to a single Telegram request.
@@ -125,7 +128,7 @@ func (a *App) Run(ctx context.Context) error {
 	var dashboard http.Handler
 	if miniApp != nil {
 		dashboardCfg.Origin, dashboardCfg.BotID = miniApp.Origin(), api.Self.ID
-		dashboard = miniapp.Dashboard(dashboardCfg, db, browsers, miniApp, runner.CheckBrowserSession)
+		dashboard = miniapp.Dashboard(dashboardCfg, db, browsers, miniApp, runner)
 	}
 	var workers sync.WaitGroup
 	if a.cfg.ControlKey != "" {
@@ -137,7 +140,7 @@ func (a *App) Run(ctx context.Context) error {
 			return fmt.Errorf("listen for private control API: %w", err)
 		}
 		server := &http.Server{
-			Handler:           miniapp.Control(dashboardCfg, db, browsers, a.cfg.ControlTelegramID, a.cfg.ControlKey),
+			Handler:           miniapp.Control(dashboardCfg, db, browsers, a.cfg.ControlTelegramID, a.cfg.ControlKey, runner),
 			ReadHeaderTimeout: 5 * time.Second,
 			ReadTimeout:       10 * time.Second,
 			WriteTimeout:      30 * time.Second,

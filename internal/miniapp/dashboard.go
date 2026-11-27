@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 	"slices"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -37,7 +38,9 @@ type dashboard struct {
 	db           *storage.DB
 	browsers     map[int64]*luxmed.Browser
 	connect      func(context.Context, int64) (string, error)
+	runner       *scheduler.Runner
 	checkAccount func(context.Context, domain.User) (scheduler.BrowserSessionCheck, error)
+	saveLogin    func(context.Context, domain.User, luxmed.Credentials, string) error
 }
 
 func Dashboard(
@@ -45,11 +48,11 @@ func Dashboard(
 	db *storage.DB,
 	browsers map[int64]*luxmed.Browser,
 	app *luxmed.MiniApp,
-	checkAccount func(context.Context, domain.User) (scheduler.BrowserSessionCheck, error),
+	runner *scheduler.Runner,
 ) http.Handler {
 	d := &dashboard{
 		cfg: cfg, key: productionKey(), sessions: newSessions(), db: db, browsers: browsers,
-		connect: app.Link, checkAccount: checkAccount,
+		connect: app.Link, runner: runner, saveLogin: runner.SaveCredentialsForAttempt, checkAccount: runner.CheckBrowserSession,
 	}
 	return d.handler()
 }
@@ -68,12 +71,23 @@ func (d *dashboard) handler() http.Handler {
 	mux.HandleFunc("POST "+dashboardPrefix+"settings", d.authorize(d.settings))
 	mux.HandleFunc("POST "+dashboardPrefix+"watch", d.authorize(d.saveWatch))
 	mux.HandleFunc("POST "+dashboardPrefix+"status", d.authorize(d.status))
-	mux.HandleFunc("POST "+dashboardPrefix+"account", d.authorize(d.account))
-	mux.HandleFunc("POST "+dashboardPrefix+"connect", d.authorize(d.openBrowser))
+	mux.HandleFunc("POST "+dashboardPrefix+"credentials", dashboardDeadline(d.authorize(d.saveCredentials)))
+	mux.HandleFunc("POST "+dashboardPrefix+"forget-credentials", d.authorize(d.forgetCredentials))
+	mux.HandleFunc("POST "+dashboardPrefix+"account", dashboardDeadline(d.authorize(d.account)))
+	mux.HandleFunc("POST "+dashboardPrefix+"connect", d.browserLogin)
 	mux.HandleFunc("POST "+dashboardPrefix+"viewer-access", d.authorizeTelegram(func(w http.ResponseWriter, _ *http.Request, _ domain.User) {
 		reply(w, http.StatusNoContent, nil)
 	}))
 	return mux
+}
+
+// Leave room in the gateway's write deadline for the response.
+func dashboardDeadline(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithTimeout(r.Context(), 17*time.Second)
+		defer cancel()
+		next(w, r.WithContext(ctx))
+	}
 }
 
 type dashboardAction func(http.ResponseWriter, *http.Request, domain.User)
@@ -141,16 +155,20 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		return
 	}
 	reply(w, http.StatusOK, struct {
-		Watches            []domain.Watch
-		Locale             string
-		CityID             *int
-		CityName           string
-		MinimumMinutes     int
-		DefaultMinutes     int
-		ReconnectRequired  bool
-		ReconnectEpisodeID string `json:",omitempty"`
-		AccountStatus      storage.LuxMedAccessStatus
-	}{watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
+		SavedLogin             bool
+		HasCredentials         bool
+		CredentialRevision     int64
+		CredentialSaveRevision int64
+		Watches                []domain.Watch
+		Locale                 string
+		CityID                 *int
+		CityName               string
+		MinimumMinutes         int
+		DefaultMinutes         int
+		ReconnectRequired      bool
+		ReconnectEpisodeID     string `json:",omitempty"`
+		AccountStatus          storage.LuxMedAccessStatus
+	}{access.SavedLogin, access.HasCredentials, access.CredentialRevision, access.CredentialSaveRevision, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
 		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.Status})
 }
@@ -228,7 +246,11 @@ func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, user domain.U
 	ctx := r.Context()
 	items, err := d.db.Cities(ctx, 300)
 	if err == nil && len(items) == 0 {
-		items, err = d.browsers[user.TelegramUserID].Client().GetCities(ctx)
+		err = d.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
+			var err error
+			items, err = client.GetCities(ctx)
+			return err
+		})
 		if err == nil {
 			err = d.db.UpsertCities(ctx, items)
 		}
@@ -255,7 +277,7 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 	ctx := r.Context()
 	city, err := d.db.City(ctx, input.CityID)
 	if err == nil {
-		err = d.ensureProcedureCatalog(ctx, city, d.browsers[user.TelegramUserID].Client())
+		err = d.ensureProcedureCatalog(ctx, user, city)
 	}
 	if err != nil {
 		dashboardResult(w, nil, err)
@@ -270,10 +292,11 @@ func (d *dashboard) procedures(w http.ResponseWriter, r *http.Request, user doma
 }
 
 type procedurePicks struct {
-	Referred []domain.Service
-	Recent   []domain.Service
-	Saved    []domain.Service
-	Popular  []domain.Service
+	PortalIncomplete bool `json:",omitempty"`
+	Referred         []domain.Service
+	Recent           []domain.Service
+	Saved            []domain.Service
+	Popular          []domain.Service
 }
 
 func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -287,13 +310,8 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 		dashboardResult(w, nil, err)
 		return
 	}
-	client := d.browsers[user.TelegramUserID].Client()
 	portalCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if err := d.ensureProcedureCatalog(portalCtx, city, client); err != nil {
-		dashboardResult(w, nil, err)
-		return
-	}
 	watches, err := d.db.WatchesByUser(ctx, user.ID)
 	if err != nil {
 		dashboardResult(w, nil, err)
@@ -302,17 +320,36 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 
 	var saved []domain.Procedure
 	for _, watch := range watches {
-		if watch.CityID == city.ID {
+		if watch.CityID == city.ID && watch.ServiceID > 0 {
 			saved = append(saved, domain.Procedure{ID: watch.ServiceID})
 		}
 	}
 
-	// The browser serves one request per account at a time.
-	referred, _ := client.GetReferredProcedures(portalCtx)
-	recent, _ := client.GetRecentProcedures(portalCtx)
-	popular, _ := client.GetPopularProcedures(portalCtx)
-
-	var picks procedurePicks
+	portalErr := d.ensureProcedureCatalog(portalCtx, user, city)
+	var referred, recent, popular []domain.Procedure
+	if !stopRecommendationRequests(portalErr) {
+		err := d.runner.WithLuxMedClient(portalCtx, user, func(client luxmed.Client) error {
+			var err, result error
+			if referrals, ok := client.(interface {
+				GetReferredProcedures(context.Context) ([]domain.Procedure, error)
+			}); ok {
+				referred, err = referrals.GetReferredProcedures(portalCtx)
+				result = errors.Join(result, err)
+				if stopRecommendationRequests(err) {
+					return result
+				}
+			}
+			recent, err = client.GetRecentProcedures(portalCtx)
+			result = errors.Join(result, err)
+			if stopRecommendationRequests(err) {
+				return result
+			}
+			popular, err = client.GetPopularProcedures(portalCtx)
+			return errors.Join(result, err)
+		})
+		portalErr = errors.Join(portalErr, err)
+	}
+	picks := procedurePicks{PortalIncomplete: portalErr != nil}
 	seen := make(map[int]bool)
 	groups := []struct {
 		target     *[]domain.Service
@@ -324,7 +361,8 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 		{&picks.Popular, popular},
 	}
 	for _, group := range groups {
-		if group.target == &picks.Saved && len(picks.Recent) > 0 {
+		isSaved := group.target == &picks.Saved
+		if isSaved && len(picks.Recent) > 0 && !picks.PortalIncomplete {
 			continue
 		}
 		const limit = 4
@@ -332,7 +370,13 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 			if seen[item.ID] {
 				continue
 			}
-			service, err := d.db.Procedure(ctx, city.ID, item.ID)
+			var service domain.Procedure
+			var err error
+			if isSaved {
+				service, err = d.serviceForUser(ctx, user.ID, city.ID, item.ID)
+			} else {
+				service, err = d.db.Procedure(ctx, city.ID, item.ID)
+			}
 			if errors.Is(err, sql.ErrNoRows) {
 				continue
 			}
@@ -350,12 +394,23 @@ func (d *dashboard) procedurePicks(w http.ResponseWriter, r *http.Request, user 
 	reply(w, http.StatusOK, picks)
 }
 
-func (d *dashboard) ensureProcedureCatalog(ctx context.Context, city domain.City, client luxmed.Client) error {
+func stopRecommendationRequests(err error) bool {
+	return errors.Is(err, luxmed.ErrAuthentication) || luxmed.RetryAfter(err) > 0 ||
+		errors.Is(err, luxmed.ErrBrowserBusy) || errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled)
+}
+
+func (d *dashboard) ensureProcedureCatalog(ctx context.Context, user domain.User, city domain.City) error {
 	cached, err := d.db.SearchProceduresPage(ctx, city.ID, "", 1, 0)
 	if err != nil || len(cached) > 0 {
 		return err
 	}
-	items, err := client.GetServices(ctx)
+	var items []domain.Service
+	err = d.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
+		var err error
+		items, err = client.GetServices(ctx)
+		return err
+	})
 	if err != nil {
 		return err
 	}
@@ -366,16 +421,25 @@ func (d *dashboard) ensureProcedureCatalog(ctx context.Context, city domain.City
 	return d.db.UpsertProcedures(ctx, city, procedures)
 }
 
+func (d *dashboard) serviceForUser(ctx context.Context, userID int64, cityID, serviceID int) (domain.Procedure, error) {
+	service, err := d.db.Procedure(ctx, cityID, serviceID)
+	if !errors.Is(err, sql.ErrNoRows) {
+		return service, err
+	}
+	name, err := d.db.SavedWatchServiceName(ctx, userID, cityID, serviceID)
+	return domain.Procedure{ID: serviceID, CityID: cityID, Name: name}, err
+}
+
 func (d *dashboard) providers(w http.ResponseWriter, r *http.Request, user domain.User) {
 	var input catalogInput
 	if !decodeDashboard(w, r, &input) {
 		return
 	}
-	if _, err := d.db.Procedure(r.Context(), input.CityID, input.ServiceID); err != nil {
+	if _, err := d.serviceForUser(r.Context(), user.ID, input.CityID, input.ServiceID); err != nil {
 		dashboardResult(w, nil, err)
 		return
 	}
-	items, err := d.browsers[user.TelegramUserID].Client().GetDoctorsAndFacilities(r.Context(), input.CityID, input.ServiceID)
+	items, err := d.providersForUser(r.Context(), user, input.CityID, input.ServiceID)
 	dashboardResult(w, items, err)
 }
 
@@ -425,9 +489,46 @@ func (d *dashboard) setStatus(w http.ResponseWriter, r *http.Request, user domai
 	dashboardResult(w, nil, d.db.SetUserWatchStatus(r.Context(), user.ID, input.ID, input.Status))
 }
 
+func (d *dashboard) providersForUser(ctx context.Context, user domain.User, cityID, serviceID int) (domain.DoctorsAndFacilities, error) {
+	var providers domain.DoctorsAndFacilities
+	err := d.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
+		var err error
+		providers, err = client.GetDoctorsAndFacilities(ctx, cityID, serviceID)
+		return err
+	})
+	return providers, err
+}
+
+func (d *dashboard) saveCredentials(w http.ResponseWriter, r *http.Request, user domain.User) {
+	var input struct {
+		luxmed.Credentials
+		CredentialRevision     *int64
+		CredentialSaveRevision *int64
+	}
+	if !decodeDashboard(w, r, &input) {
+		return
+	}
+	creds := input.Credentials
+	creds.Login = strings.TrimSpace(creds.Login)
+	if creds.Login == "" || len(creds.Login) > 254 || creds.Password == "" || len(creds.Password) > 1024 {
+		reply(w, http.StatusBadRequest, nil)
+		return
+	}
+	id, ok := credentialAttemptID(r)
+	if !ok {
+		reply(w, http.StatusBadRequest, nil)
+		return
+	}
+	if input.CredentialRevision == nil || *input.CredentialRevision != user.CredentialRevision ||
+		input.CredentialSaveRevision == nil || *input.CredentialSaveRevision != user.CredentialSaveRevision {
+		dashboardResult(w, nil, storage.ErrCredentialsChanged)
+		return
+	}
+	dashboardResult(w, nil, d.saveLogin(r.Context(), user, creds, id))
+}
+
 func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.User) {
-	ctx := r.Context()
-	check, err := d.checkAccount(ctx, user)
+	check, err := d.checkAccount(r.Context(), user)
 	result := struct {
 		State              string `json:"state"`
 		ReconnectRequired  bool
@@ -444,6 +545,9 @@ func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.
 		} else if check.VerificationPending {
 			result.State = "verification_pending"
 		}
+	case errors.Is(err, luxmed.ErrUnavailable):
+		reply(w, http.StatusServiceUnavailable, nil)
+		return
 	case errors.Is(err, luxmed.ErrAuthentication):
 		result.State = "needs_login"
 	case errors.Is(err, luxmed.ErrBrowserBusy):
@@ -456,9 +560,88 @@ func (d *dashboard) account(w http.ResponseWriter, r *http.Request, user domain.
 	reply(w, http.StatusOK, result)
 }
 
-func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User) {
-	if !authorizedUser(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, user.TelegramUserID, time.Now(), d.key) {
+func credentialAttemptID(r *http.Request) (string, bool) {
+	id := r.Header.Get("X-LuxMed-Login-Attempt")
+	if len(id) > 64 {
+		return "", false
+	}
+	for _, c := range id {
+		if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+			return "", false
+		}
+	}
+	return id, true
+}
+
+func dashboardCredentialRevisions(w http.ResponseWriter, r *http.Request) (domain.CredentialRevisions, bool) {
+	var input struct {
+		CredentialRevision     *int64
+		CredentialSaveRevision *int64
+	}
+	if !decodeDashboard(w, r, &input) {
+		return domain.CredentialRevisions{}, false
+	}
+	if input.CredentialRevision == nil || *input.CredentialRevision < 0 ||
+		input.CredentialSaveRevision == nil || *input.CredentialSaveRevision < 0 {
+		dashboardResult(w, nil, storage.ErrCredentialsChanged)
+		return domain.CredentialRevisions{}, false
+	}
+	return domain.CredentialRevisions{
+		CredentialRevision: *input.CredentialRevision, CredentialSaveRevision: *input.CredentialSaveRevision,
+	}, true
+}
+
+func (d *dashboard) forgetCredentials(w http.ResponseWriter, r *http.Request, user domain.User) {
+	revisions, ok := dashboardCredentialRevisions(w, r)
+	if !ok {
+		return
+	}
+	token, ok := credentialAttemptID(r)
+	if !ok {
+		reply(w, http.StatusBadRequest, nil)
+		return
+	}
+	if token != "" {
+		choice := d.db.SelectBrowserLogin(user.TelegramUserID, token, revisions, true)
+		dashboardResult(w, nil, d.db.ChooseBrowserLogin(r.Context(), user, choice))
+		return
+	}
+	if revisions != user.CredentialRevisions() {
+		dashboardResult(w, nil, storage.ErrCredentialsChanged)
+		return
+	}
+	dashboardResult(w, nil, d.db.ForgetCredentials(r.Context(), user))
+}
+
+func (d *dashboard) browserLogin(w http.ResponseWriter, r *http.Request) {
+	id, ok := d.sessions.verify(r.Header.Get("Authorization"), time.Now())
+	if !ok || r.Header.Get("Origin") != d.cfg.Origin ||
+		!authorizedUser(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, id, time.Now(), d.key) {
 		reply(w, http.StatusUnauthorized, nil)
+		return
+	}
+	token, ok := credentialAttemptID(r)
+	if !ok {
+		reply(w, http.StatusBadRequest, nil)
+		return
+	}
+	if d.browsers[id] == nil {
+		reply(w, http.StatusForbidden, nil)
+		return
+	}
+	revisions, ok := dashboardCredentialRevisions(w, r)
+	if !ok {
+		return
+	}
+	attempt := d.db.SelectBrowserLogin(id, token, revisions, false)
+	d.withUser(func(w http.ResponseWriter, r *http.Request, user domain.User) {
+		d.openBrowser(w, r, user, attempt)
+	}, func(*http.Request) (int64, bool) { return id, true })(w, r)
+}
+
+func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user domain.User, attempt *storage.ChromeChoice) {
+	if err := d.db.ChooseBrowserLogin(r.Context(), user, attempt); err != nil {
+		dashboardResult(w, nil, err)
 		return
 	}
 	link, err := d.connect(r.Context(), user.TelegramUserID)
@@ -478,8 +661,13 @@ func decodeDashboard(w http.ResponseWriter, r *http.Request, target any) bool {
 
 func dashboardResult(w http.ResponseWriter, value any, err error) {
 	switch {
+	case errors.Is(err, storage.ErrCredentialsChanged):
+		reply(w, http.StatusPreconditionFailed, nil)
 	case errors.Is(err, sql.ErrNoRows):
 		reply(w, http.StatusNotFound, nil)
+	case errors.Is(err, luxmed.ErrUnavailable):
+		reply(w, http.StatusServiceUnavailable, nil)
+		return
 	case errors.Is(err, luxmed.ErrAuthentication):
 		reply(w, http.StatusConflict, map[string]string{"error": "needs_login"})
 	case errors.Is(err, luxmed.ErrBrowserBusy):
@@ -537,7 +725,7 @@ func (d *dashboard) saveWatch(w http.ResponseWriter, r *http.Request, user domai
 		dashboardResult(w, nil, err)
 		return
 	}
-	service, err := d.db.Procedure(ctx, city.ID, input.ServiceID)
+	service, err := d.serviceForUser(ctx, user.ID, city.ID, input.ServiceID)
 	if err != nil {
 		dashboardResult(w, nil, err)
 		return
@@ -553,7 +741,7 @@ func (d *dashboard) saveWatch(w http.ResponseWriter, r *http.Request, user domai
 			watch.DoctorID, watch.DoctorName, watch.DoctorMode = previous.DoctorID, previous.DoctorName, previous.DoctorMode
 			watch.FacilityIDs, watch.FacilityNames, watch.FacilityMode = previous.FacilityIDs, previous.FacilityNames, previous.FacilityMode
 		} else {
-			data, err := d.browsers[user.TelegramUserID].Client().GetDoctorsAndFacilities(ctx, city.ID, service.ID)
+			data, err := d.providersForUser(ctx, user, city.ID, service.ID)
 			if err != nil {
 				dashboardResult(w, nil, err)
 				return

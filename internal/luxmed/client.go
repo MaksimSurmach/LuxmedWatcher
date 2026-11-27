@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 )
 
 const (
@@ -19,10 +20,7 @@ const (
 	ReferralServicesURL      = "/PatientPortal/NewPortal/Reservation/GetReferralsForReservation"
 )
 
-type Credentials struct {
-	Login    string
-	Password string
-}
+type Credentials = security.Credentials
 
 type SearchResult struct {
 	Appointments []domain.Appointment

@@ -6,13 +6,14 @@ import (
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
 // Control serves the private configuration API for one assigned Telegram user.
-func Control(cfg DashboardConfig, db *storage.DB, browsers map[int64]*luxmed.Browser, userID int64, key string) http.Handler {
+func Control(cfg DashboardConfig, db *storage.DB, browsers map[int64]*luxmed.Browser, userID int64, key string, runner *scheduler.Runner) http.Handler {
 	cfg.Origin = ""
-	d := &dashboard{cfg: cfg, db: db, browsers: browsers}
+	d := &dashboard{cfg: cfg, db: db, browsers: browsers, runner: runner}
 	expected := []byte("Bearer " + key)
 	configured := luxmed.ValidTicketKey(key)
 	mux := http.NewServeMux()

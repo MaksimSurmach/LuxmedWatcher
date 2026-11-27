@@ -11,6 +11,7 @@ import (
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/scheduler"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
@@ -50,7 +51,9 @@ func TestControlScopesReadsAndChangesToAssignedUser(t *testing.T) {
 	ownID, otherID := createWatch(owner, "owner-watch"), createWatch(other, "other-watch")
 	key := strings.Repeat("9a", 32)
 	browsers := map[int64]*luxmed.Browser{10: {}, 20: {}, 30: {}}
-	handler := Control(DashboardConfig{MinimumInterval: 2 * time.Minute}, db, browsers, owner.TelegramUserID, key)
+	runner := scheduler.NewRunner(db, nil, nil, 0, 0, false)
+	runner.UseBrowsers(browsers)
+	handler := Control(DashboardConfig{MinimumInterval: 2 * time.Minute}, db, browsers, owner.TelegramUserID, key, runner)
 	req := func(method, path, token, body string, want int) string {
 		t.Helper()
 		r := httptest.NewRequest(method, path, strings.NewReader(body))
@@ -65,7 +68,7 @@ func TestControlScopesReadsAndChangesToAssignedUser(t *testing.T) {
 	req("GET", "/v1/workspace", "", "", http.StatusUnauthorized)
 	req("GET", "/v1/workspace", strings.Repeat("6b", 32), "", http.StatusUnauthorized)
 	handlerForOwner := handler
-	handler = Control(DashboardConfig{}, db, browsers, blocked.TelegramUserID, key)
+	handler = Control(DashboardConfig{}, db, browsers, blocked.TelegramUserID, key, runner)
 	req("GET", "/v1/workspace", key, "", http.StatusForbidden)
 	handler = handlerForOwner
 	view := req("GET", "/v1/workspace", key, "", http.StatusOK)
@@ -88,6 +91,12 @@ func TestControlScopesReadsAndChangesToAssignedUser(t *testing.T) {
 	watch, err := db.Watch(ctx, ownID)
 	if err != nil || watch.Status != domain.WatchStatusPaused {
 		t.Fatalf("paused watch: %v, %v", watch.Status, err)
+	}
+	status(otherID, "active", http.StatusNotFound)
+	status(ownID, "active", http.StatusNoContent)
+	watch, err = db.Watch(ctx, ownID)
+	if err != nil || watch.Status != domain.WatchStatusActive {
+		t.Fatalf("status API did not resume the Chrome watch locally: %v, %v", watch.Status, err)
 	}
 	user, err := db.UserByTelegramID(ctx, owner.TelegramUserID)
 	if err != nil || user.Locale != "uk" || user.PreferredCityID == nil || *user.PreferredCityID != 1 {

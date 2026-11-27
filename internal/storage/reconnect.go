@@ -40,8 +40,12 @@ const (
 )
 
 type LuxMedAccessSnapshot struct {
-	Status    LuxMedAccessStatus
-	EpisodeID string
+	Status                 LuxMedAccessStatus
+	EpisodeID              string
+	SavedLogin             bool
+	HasCredentials         bool
+	CredentialRevision     int64
+	CredentialSaveRevision int64
 }
 
 const accessStatusSQL = `COALESCE((SELECT status FROM luxmed_access WHERE user_id=$1), '')`
@@ -83,9 +87,17 @@ func (db *DB) WatchesWithReconnectState(ctx context.Context, userID int64) ([]do
 	var requiresTerms, staleSignInError bool
 	err = tx.QueryRowContext(ctx, `
 		SELECT `+reconnectEpisodeSQL+`, `+accessStatusSQL+`,
-			`+hasAccountTermsRequirement("$1")+`, `+hasWatchSignInError("$2", "$3"),
+			`+hasAccountTermsRequirement("$1")+`, `+hasWatchSignInError("$2", "$3")+`,
+			EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login),
+			EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1),
+			credential_revision, credential_save_revision
+		FROM users WHERE id=$1
+		`,
 		userID, domain.WatchStatusActive, domain.WatchStatusPaused,
-	).Scan(&access.EpisodeID, &access.Status, &requiresTerms, &staleSignInError)
+	).Scan(
+		&access.EpisodeID, &access.Status, &requiresTerms, &staleSignInError,
+		&access.SavedLogin, &access.HasCredentials, &access.CredentialRevision, &access.CredentialSaveRevision,
+	)
 	if err != nil {
 		return nil, access, err
 	}
@@ -113,8 +125,27 @@ func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) error {
 		return err
 	}
 	defer tx.Rollback()
+	if err := db.beginLuxMedReconnect(ctx, tx, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (db *DB) BeginLuxMedReconnectForMode(ctx context.Context, owner domain.User) error {
+	return db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
+		return db.beginLuxMedReconnect(ctx, tx, owner.ID)
+	})
+}
+
+func (db *DB) SetLuxMedAccessForMode(ctx context.Context, owner domain.User, status LuxMedAccessStatus, requiresTerms bool) error {
+	return db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
+		return setLuxMedAccessStatus(ctx, tx, owner.ID, status, requiresTerms)
+	})
+}
+
+func (db *DB) beginLuxMedReconnect(ctx context.Context, tx *sql.Tx, userID int64) error {
 	first, end := luxmed.SearchDateBounds(time.Now())
-	_, err = tx.ExecContext(ctx, `
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO luxmed_reconnect (user_id, episode_id)
 		SELECT $1, $3
 		WHERE `+db.hasCurrentReconnectSearch("$2", "$4", "$5")+`
@@ -123,10 +154,7 @@ func (db *DB) BeginLuxMedReconnect(ctx context.Context, userID int64) error {
 	if err != nil {
 		return err
 	}
-	if err := setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessRejected, true); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessRejected, true)
 }
 
 func (db *DB) hasCurrentReconnectSearch(status, first, end string) string {
@@ -153,8 +181,14 @@ type LuxMedVerification struct {
 }
 
 func (db *DB) LuxMedReconnectVerification(ctx context.Context, userID int64) (LuxMedVerification, error) {
+	return luxMedReconnectVerification(ctx, db.sql, userID)
+}
+
+func luxMedReconnectVerification(ctx context.Context, reader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}, userID int64) (LuxMedVerification, error) {
 	var verification LuxMedVerification
-	err := db.sql.QueryRowContext(ctx, `
+	err := reader.QueryRowContext(ctx, `
 		SELECT `+reconnectEpisodeSQL+`,
 		    `+hasAccountTermsRequirement("$1")+` OR `+hasWatchSignInError("$2", "$3")+`,
 		    EXISTS (SELECT 1 FROM watches WHERE user_id=$1 AND status IN ($2, $3))
@@ -174,17 +208,37 @@ const blockedReconnectRetry = 7 * 24 * time.Hour
 
 // On a database error the returned ID identifies the attempted reservation, even if it committed.
 func (db *DB) ClaimLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time) (ReconnectDeliveryClaim, error) {
+	return db.claimLuxMedReconnectDelivery(ctx, userID, now, nil)
+}
+
+func (db *DB) ClaimLuxMedReconnectDeliveryForMode(ctx context.Context, owner domain.User, now time.Time) (ReconnectDeliveryClaim, error) {
+	return db.claimLuxMedReconnectDelivery(ctx, owner.ID, now, &owner)
+}
+
+func (db *DB) claimLuxMedReconnectDelivery(ctx context.Context, userID int64, now time.Time, owner *domain.User) (ReconnectDeliveryClaim, error) {
 	claim := ReconnectDeliveryClaim{ID: rand.Text()}
 	first, end := luxmed.SearchDateBounds(now)
+	args := []any{userID, now.UTC(), claim.ID, domain.WatchStatusActive, first.UTC(), end.UTC()}
+	guard := ""
+	if owner != nil {
+		// Keep the revision check inside the reservation statement. Its claim ID
+		// remains journalable if the database applies the write but reports an error.
+		guard = ` AND EXISTS (SELECT 1 FROM users WHERE id=$1 AND credential_revision=$7 AND status=$8 AND role <> ''`
+		if db.postgres {
+			guard += ` FOR SHARE`
+		}
+		guard += `)`
+		args = append(args, owner.CredentialRevision, domain.UserStatusActive)
+	}
 	err := db.sql.QueryRowContext(ctx, `
 		INSERT INTO luxmed_reconnect_delivery (user_id, attempts, claim_id)
 		SELECT user_id, 1, $3 FROM luxmed_reconnect WHERE user_id=$1 AND NOT notified
-		    AND `+db.hasCurrentReconnectSearch("$4", "$5", "$6")+`
+		    AND `+db.hasCurrentReconnectSearch("$4", "$5", "$6")+guard+`
 		ON CONFLICT (user_id) DO UPDATE SET attempts=luxmed_reconnect_delivery.attempts+1,
 		    retry_at=NULL, claim_id=excluded.claim_id, last_failure_forbidden=FALSE
 		WHERE `+db.dateTimeSQL("luxmed_reconnect_delivery.retry_at")+` <= `+db.dateTimeSQL("$2")+`
 		RETURNING attempts
-	`, userID, now.UTC(), claim.ID, domain.WatchStatusActive, first.UTC(), end.UTC()).Scan(&claim.Attempt)
+	`, args...).Scan(&claim.Attempt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ReconnectDeliveryClaim{}, nil
 	}
@@ -281,8 +335,14 @@ func (db *DB) ResolveLuxMedReconnect(ctx context.Context, userID int64) error {
 	return db.resolveLuxMedReconnect(ctx, userID, true)
 }
 
-func (db *DB) ResolveLuxMedReconnectAfterAccessProbe(ctx context.Context, userID int64) error {
-	return db.resolveLuxMedReconnect(ctx, userID, false)
+func (db *DB) ResolveLuxMedReconnectForMode(ctx context.Context, owner domain.User, requeue bool) error {
+	err := db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
+		return db.resolveLuxMedReconnectTx(ctx, tx, owner.ID, requeue)
+	})
+	if err == nil {
+		db.clearPendingReconnectRejections(owner.ID)
+	}
+	return err
 }
 
 func (db *DB) resolveLuxMedReconnect(ctx context.Context, userID int64, requeue bool) error {

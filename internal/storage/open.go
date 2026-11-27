@@ -21,6 +21,8 @@ type DB struct {
 	sql                *sql.DB
 	postgres           bool
 	reconnectDirectory string
+	credentialOwners   sync.Map // Telegram user ID to *credentialOwner.
+	credentialAttempts sync.Map // credentialAttemptKey to *CredentialAttempt.
 	pendingRejections  sync.Map // reconnectJournalKey to an outcome awaiting a durable write
 }
 
@@ -107,10 +109,24 @@ func (db *DB) Migrate(ctx context.Context) error {
 	if _, err := tx.ExecContext(ctx, ddl); err != nil {
 		return fmt.Errorf("apply storage schema: %w", err)
 	}
+	if db.postgres {
+		if _, err := tx.ExecContext(ctx, `
+			ALTER TABLE users ADD COLUMN IF NOT EXISTS credential_revision BIGINT NOT NULL DEFAULT 0,
+				ADD COLUMN IF NOT EXISTS credential_save_revision BIGINT NOT NULL DEFAULT 0
+		`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE luxmed_accounts ADD COLUMN IF NOT EXISTS use_saved_login BOOLEAN NOT NULL DEFAULT FALSE"); err != nil {
+			return err
+		}
+	}
 	if !db.postgres {
 		for _, column := range []struct{ table, name, definition string }{
 			{"users", "preferred_city_id", "INTEGER"},
 			{"users", "preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
+			{"users", "credential_revision", "BIGINT NOT NULL DEFAULT 0"},
+			{"users", "credential_save_revision", "BIGINT NOT NULL DEFAULT 0"},
+			{"luxmed_accounts", "use_saved_login", "BOOLEAN NOT NULL DEFAULT FALSE"},
 		} {
 			var exists bool
 			err := tx.QueryRowContext(ctx, `

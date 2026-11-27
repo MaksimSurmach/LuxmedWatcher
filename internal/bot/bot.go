@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,18 +39,21 @@ type Config struct {
 }
 
 type Bot struct {
-	api           *tgbotapi.BotAPI
-	db            *storage.DB
-	catalog       *i18n.Catalog
-	cryptor       *security.Cryptor
-	cfg           Config
-	runner        *scheduler.Runner
-	manualChecks  chan struct{}
-	manualWorkers sync.WaitGroup
-	appMenuLocks  sync.Map // User ID to *sync.Mutex.
-	logger        *slog.Logger
-	newClient     func(bool) luxmed.Client
-	flowState     map[int64]*flow
+	api             *tgbotapi.BotAPI
+	db              *storage.DB
+	catalog         *i18n.Catalog
+	cryptor         *security.Cryptor
+	cfg             Config
+	runner          *scheduler.Runner
+	manualChecks    chan struct{}
+	workers         sync.WaitGroup
+	appMenuLocks    sync.Map // User ID to *sync.Mutex.
+	logger          *slog.Logger
+	newClient       func(bool) luxmed.Client
+	flowMu          sync.Mutex
+	flowState       map[int64]*flow
+	credentialFlows map[int64]*flow
+	deleteWarnings  map[int64][]*credentialDeleteWarning
 }
 
 type flowKind string
@@ -59,6 +63,8 @@ const (
 	flowInvite        flowKind = "invite"
 	flowAccountLogin  flowKind = "account_login"
 	flowAccountPass   flowKind = "account_pass"
+	flowAccountCheck  flowKind = "account_verifying"
+	flowAccountRetry  flowKind = "account_retry"
 	flowWatchCity     flowKind = "watch_city"
 	flowCitySearch    flowKind = "city_search"
 	flowWatchService  flowKind = "watch_service"
@@ -75,6 +81,12 @@ const (
 
 type flow struct {
 	Kind                 flowKind
+	cancel               context.CancelFunc
+	verification         *loginVerification
+	notice               *loginNotice
+	retryToken           string
+	retryRevisions       domain.CredentialRevisions
+	deleteWarning        *credentialDeleteWarning
 	Login                string
 	CitySettings         bool
 	ProcedureSearchQuery string
@@ -85,7 +97,8 @@ type flow struct {
 }
 
 func New(api *tgbotapi.BotAPI, db *storage.DB, catalog *i18n.Catalog, cryptor *security.Cryptor, cfg Config, logger *slog.Logger) *Bot {
-	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow), manualChecks: make(chan struct{}, 3),
+	return &Bot{api: api, db: db, catalog: catalog, cryptor: cryptor, cfg: cfg, logger: logger, flowState: make(map[int64]*flow), credentialFlows: make(map[int64]*flow),
+		deleteWarnings: make(map[int64][]*credentialDeleteWarning), manualChecks: make(chan struct{}, 3),
 		newClient: func(raw bool) luxmed.Client { return luxmed.NewHTTPClient(raw) }}
 }
 
@@ -94,7 +107,7 @@ func (b *Bot) SetRunner(runner *scheduler.Runner) {
 }
 
 func (b *Bot) Run(ctx context.Context) error {
-	defer b.manualWorkers.Wait()
+	defer b.workers.Wait()
 	b.registerCommands()
 	config := tgbotapi.NewUpdate(0)
 	config.Timeout = b.cfg.PollTimeout
@@ -243,29 +256,60 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 		(b.cfg.Browsers != nil && b.cfg.Browsers[update.Message.From.ID] == nil) {
 		return
 	}
-	user, err := b.upsertUser(ctx, update.Message)
+	message := update.Message
+	telegramID := message.From.ID
+	defer b.deliverDeleteWarnings(telegramID, b.readyDeleteWarning(telegramID))
+	state := b.getFlow(telegramID)
+	command := b.messageCommand(message, state)
+	if command == "cancel" && b.cancelLogin(ctx, telegramID, state) {
+		return
+	}
+	switch command {
+	case "logout_luxmed":
+		b.db.CancelActiveCredentialAttempt(telegramID)
+	case "connect":
+		b.clearCredentialFlow(telegramID)
+	}
+	credentialMessage := state.receivesCredential(command)
+	if credentialMessage {
+		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(telegramID, message.MessageID)); err != nil {
+			b.logger.Warn("could not delete Telegram credential message")
+			b.stopLoginAfterDeleteFailure(ctx, telegramID, state, i18n.Normalize(message.From.LanguageCode, b.cfg.DefaultLocale))
+			return
+		}
+		if state.Kind == flowAccountCheck {
+			b.retryLoginNotice(telegramID, state)
+			return
+		}
+	}
+	user, err := b.upsertUser(ctx, message)
 	if err != nil {
 		b.logger.Warn("upsert user failed", "err", err)
 		return
 	}
 	if user.Status == domain.UserStatusBlocked {
-		b.clearFlow(user.ID)
+		b.clearFlow(telegramID)
 		b.send(user, b.catalog.T(user.Locale, "errors.blocked"), nil)
 		return
 	}
-	state := b.getFlow(user.ID)
-	if state != nil && state.Kind == flowAccountPass && user.IsActive() && update.Message.Command() != "cancel" {
-		if _, err := b.api.Request(tgbotapi.NewDeleteMessage(update.Message.Chat.ID, update.Message.MessageID)); err != nil {
-			b.logger.Warn("could not delete Telegram credential message")
+	if credentialMessage {
+		if !user.IsActive() {
+			b.clearFlow(telegramID)
+			b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
+			return
 		}
-		b.handleText(ctx, user, update.Message.Text)
+		value := message.Text
+		if state.Kind == flowAccountLogin {
+			value = strings.TrimSpace(value)
+		}
+		b.handleText(ctx, user, value)
 		return
 	}
-	if update.Message.IsCommand() {
-		b.handleCommand(ctx, user, update.Message)
+	if command != "" {
+		b.handleCommand(ctx, user, message, command)
 		return
 	}
-	b.handleText(ctx, user, strings.TrimSpace(update.Message.Text))
+	b.handleText(ctx, user, strings.TrimSpace(message.Text))
 }
 
 func (b *Bot) upsertUser(ctx context.Context, msg *tgbotapi.Message) (domain.User, error) {
@@ -299,8 +343,7 @@ func (b *Bot) upsertUser(ctx context.Context, msg *tgbotapi.Message) (domain.Use
 	return user, nil
 }
 
-func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi.Message) {
-	command := msg.Command()
+func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi.Message, command string) {
 	if !user.IsActive() && command != "start" && command != "language" && command != "menu" && command != "cancel" {
 		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
 		return
@@ -312,9 +355,10 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 			b.tryRedeemInvite(ctx, user, arg)
 			return
 		}
+		b.clearCredentialFlow(user.TelegramUserID)
 		b.showStart(ctx, user, false)
 	case "menu":
-		b.clearFlow(user.ID)
+		b.clearFlow(user.TelegramUserID)
 		b.showStart(ctx, user, false)
 	case "new":
 		b.startWatchFlow(ctx, user)
@@ -335,10 +379,12 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 	case "help":
 		b.send(user, b.catalog.T(user.Locale, "help.text"), mainKeyboard(b.catalog, user.Locale))
 	case "cancel":
-		b.clearFlow(user.ID)
+		if !b.clearCredentialFlow(user.TelegramUserID) {
+			b.clearFlow(user.TelegramUserID)
+		}
 		b.showMenu(user)
 	case "logout_luxmed":
-		b.clearFlow(user.ID)
+		b.clearFlow(user.TelegramUserID)
 		if err := b.db.DeleteLuxMedAccount(ctx, user.ID); err != nil {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
@@ -360,7 +406,7 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 		b.tryRedeemInvite(ctx, user, text)
 		return
 	}
-	state := b.getFlow(user.ID)
+	state := b.getFlow(user.TelegramUserID)
 	if state == nil || state.Kind == flowNone {
 		b.showMenu(user)
 		return
@@ -371,51 +417,18 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 			b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		state.Login = text
-		state.Kind = flowAccountPass
-		b.setFlow(user.ID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.account.password"), nil)
+		next := b.deliverLoginNotice(&loginNotice{
+			user: user, key: "flow.account.password", retry: &flow{Kind: flowAccountPass, Login: text},
+		})
+		b.setFlow(user.TelegramUserID, next)
 	case flowAccountPass:
 		if text == "" || len(text) > 1024 {
 			b.send(user, b.catalog.T(user.Locale, "flow.account.password"), cancelKeyboard(b.catalog, user.Locale))
 			return
 		}
-		client := b.newClient(false)
-		if err := client.Authenticate(ctx, luxmed.Credentials{Login: state.Login, Password: text}); err != nil {
-			key := "errors.auth_failed"
-			if errors.Is(err, luxmed.ErrUnavailable) {
-				key = "errors.luxmed_unavailable"
-			}
-			b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
-			return
-		}
-		encrypted, err := b.cryptor.Encrypt(text)
-		if err != nil {
-			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
-			return
-		}
-		now := time.Now().UTC()
-		save := b.db.SavePendingLuxMedAccount
-		if b.runner != nil {
-			save = b.runner.SavePendingLuxMedAccount
-		}
-		err = save(ctx, domain.LuxMedAccount{
-			UserID:            user.ID,
-			Login:             state.Login,
-			EncryptedPassword: encrypted,
-			LastLoginAt:       &now,
-			Status:            domain.AccountStatusActive,
-		})
-		b.clearFlow(user.ID)
-		if err != nil {
-			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
-			return
-		}
-		key := "flow.account.saved"
-		if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err == nil && required {
-			key = "flow.account.verification_pending"
-		}
-		b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+		b.submitLogin(ctx, user, luxmed.Credentials{Login: state.Login, Password: text})
+	case flowAccountCheck:
+		return
 	case flowWatchCity:
 		b.showCityPicker(ctx, user, state.CitySettings, 0)
 	case flowCitySearch:
@@ -451,22 +464,28 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		(b.cfg.Browsers != nil && b.cfg.Browsers[cb.From.ID] == nil) {
 		return
 	}
-	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+	defer b.deliverDeleteWarnings(cb.From.ID, b.readyDeleteWarning(cb.From.ID))
 	data := cb.Data
+	cancelingLogin := data == "cancel" && b.cancelLogin(ctx, cb.From.ID, b.getFlow(cb.From.ID))
+	attempt := b.selectChrome(cb.From.ID, data)
+	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+	if cancelingLogin {
+		return
+	}
 	if strings.HasPrefix(data, "options:") && strings.Count(data, ":") == 2 {
 		// Only the opening button is on the notification itself. Page buttons carry its message ID.
 		data += ":" + strconv.Itoa(cb.Message.MessageID)
 	}
-	b.handleAction(ctx, cb.From.ID, data)
+	b.handleAction(ctx, cb.From.ID, data, attempt)
 }
 
-func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
+func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, attempt *storage.ChromeChoice) {
 	user, err := b.db.UserByTelegramID(ctx, telegramID)
 	if err != nil {
 		return
 	}
 	if user.Status == domain.UserStatusBlocked {
-		b.clearFlow(user.ID)
+		b.clearFlow(user.TelegramUserID)
 		b.send(user, b.catalog.T(user.Locale, "errors.blocked"), nil)
 		return
 	}
@@ -474,9 +493,10 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
 		return
 	}
-	if !allowsFlowCallback(b.getFlow(user.ID), data) {
+	if !allowsFlowCallback(b.getFlow(user.TelegramUserID), data) {
 		return
 	}
+	credentialMode, revisions := credentialButton(data)
 	switch {
 	case strings.HasPrefix(data, "lang:"):
 		locale := strings.TrimPrefix(data, "lang:")
@@ -489,19 +509,60 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 		}
 		user.Locale = locale
 		if !user.IsActive() {
-			b.setFlow(user.ID, &flow{Kind: flowInvite})
+			b.setFlow(user.TelegramUserID, &flow{Kind: flowInvite})
 			b.send(user, b.catalog.T(user.Locale, "flow.invite.enter"), nil)
 			return
 		}
 		b.SyncAppMenu(ctx, user.ID)
 		b.send(user, b.catalog.T(user.Locale, "flow.language.saved"), mainKeyboard(b.catalog, user.Locale))
 	case data == "menu":
-		b.clearFlow(user.ID)
+		b.clearFlow(user.TelegramUserID)
 		b.showStart(ctx, user, false)
 	case data == "account":
 		b.showConnect(ctx, user)
-	case data == "connect:open":
+	case strings.HasPrefix(data, "login:retry:"):
+		b.retryCredentialLogin(user, strings.TrimPrefix(data, "login:retry:"))
+	case data == "connect:password":
+		if b.cfg.MiniApp != nil {
+			b.clearCredentialFlow(user.TelegramUserID)
+			b.showApp(ctx, user, "settings")
+		} else {
+			b.setFlow(user.TelegramUserID, &flow{Kind: flowAccountLogin})
+			b.send(user, b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
+		}
+	case credentialMode == "open" || credentialMode == "chrome" || credentialMode == "switch":
+		if b.cfg.Browsers[user.TelegramUserID] == nil {
+			return
+		}
+		err := b.db.ChooseBrowserLogin(ctx, user, attempt)
+		if errors.Is(err, storage.ErrCredentialsChanged) {
+			b.showConnect(ctx, user)
+			return
+		}
+		if err != nil {
+			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
+			return
+		}
 		b.showAccount(ctx, user)
+	case credentialMode == "forget":
+		if b.cfg.Browsers[user.TelegramUserID] == nil {
+			return
+		}
+		if revisions == nil || *revisions != user.CredentialRevisions() {
+			b.showConnect(ctx, user)
+			return
+		}
+		err := b.db.ForgetCredentials(ctx, user)
+		if errors.Is(err, storage.ErrCredentialsChanged) {
+			b.showConnect(ctx, user)
+			return
+		}
+		if err != nil {
+			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
+			return
+		}
+		b.clearCredentialFlow(telegramID)
+		b.showConnect(ctx, user)
 	case data == "app":
 		b.showApp(ctx, user, "")
 	case data == "app:history":
@@ -517,13 +578,15 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 	case data == "settings:language":
 		b.showLanguage(user)
 	case data == "settings:city":
-		b.setFlow(user.ID, &flow{Kind: flowWatchCity, CitySettings: true})
+		b.setFlow(user.TelegramUserID, &flow{Kind: flowWatchCity, CitySettings: true})
 		b.showCityPicker(ctx, user, true, 0)
 	case data == "cancel":
-		b.clearFlow(user.ID)
+		if !b.clearCredentialFlow(user.TelegramUserID) {
+			b.clearFlow(user.TelegramUserID)
+		}
 		b.showMenu(user)
 	case data == "city:search" || data == "prefcity:search":
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		state.Kind = flowCitySearch
 		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.city_search"), citySearchKeyboard(b.catalog, user.Locale))
 
@@ -538,28 +601,28 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 	case strings.HasPrefix(data, "city:"):
 		b.handleWatchCity(ctx, user, data)
 	case data == "proc:search":
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		state.Kind = flowWatchSearch
-		b.setFlow(user.ID, state)
+		b.setFlow(user.TelegramUserID, state)
 		b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.service_search"), procedureSearchKeyboard(b.catalog, user.Locale))
 	case data == "proc:popular":
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			b.showPopularProcedures(ctx, user, state)
 		}
 	case data == "proc:all":
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			b.showProcedureLetters(ctx, user, state)
 		}
 	case strings.HasPrefix(data, "procletter:"):
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			b.handleProcedureLetterPage(ctx, user, state, data)
 		}
 
 	case strings.HasPrefix(data, "procsearchpage:"):
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			b.handleProcedureSearchPage(ctx, user, state, data)
 		}
@@ -567,60 +630,60 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 		b.handleProcedure(ctx, user, data)
 
 	case data == "fac:any":
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			state.Watch.FacilityMode = domain.FacilityModeAll
 			state.Watch.FacilityIDs = nil
 			state.Watch.FacilityNames = nil
-			b.setFlow(user.ID, state)
+			b.setFlow(user.TelegramUserID, state)
 			b.showDateStep(user, state)
 		}
 
 	case data == "fac:all":
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			b.showFacilityPage(ctx, user, state, "all", 0)
 		}
 
 	case data == "fac:favs":
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			b.showFacilityPage(ctx, user, state, "favs", 0)
 		}
 
 	case strings.HasPrefix(data, "facpage:"):
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			b.handleFacilityPage(ctx, user, state, data)
 		}
 
 	case strings.HasPrefix(data, "facsel:"):
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			b.handleFacilityToggle(ctx, user, state, data)
 		}
 
 	case data == "facclear":
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			state.Watch.FacilityIDs = nil
 			state.Watch.FacilityNames = nil
 			state.Watch.FacilityMode = ""
-			b.setFlow(user.ID, state)
+			b.setFlow(user.TelegramUserID, state)
 			b.showFacilityPage(ctx, user, state, "all", 0)
 		}
 
 	case data == "facdone":
-		state := b.getFlow(user.ID)
+		state := b.getFlow(user.TelegramUserID)
 		if state != nil {
 			b.finishSelectedFacilities(ctx, user, state)
 		}
 	case strings.HasPrefix(data, "time:"):
-		b.handleTimeCallback(user, b.getFlow(user.ID), data)
+		b.handleTimeCallback(user, b.getFlow(user.TelegramUserID), data)
 	case strings.HasPrefix(data, "date:"):
-		b.handleWatchDate(user, b.getFlow(user.ID), strings.TrimPrefix(data, "date:"))
+		b.handleWatchDate(user, b.getFlow(user.TelegramUserID), strings.TrimPrefix(data, "date:"))
 	case strings.HasPrefix(data, "days:"):
-		b.selectWatchDays(user, b.getFlow(user.ID), strings.TrimPrefix(data, "days:"))
+		b.selectWatchDays(user, b.getFlow(user.TelegramUserID), strings.TrimPrefix(data, "days:"))
 	case strings.HasPrefix(data, "interval:"):
 		value := strings.TrimPrefix(data, "interval:")
 		interval := max(b.cfg.DefaultInterval, b.cfg.MinimumInterval, time.Minute)
@@ -631,13 +694,13 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 			}
 			interval = time.Duration(minutes) * time.Minute
 		}
-		b.previewWatch(user, b.getFlow(user.ID), interval)
+		b.previewWatch(user, b.getFlow(user.TelegramUserID), interval)
 	case strings.HasPrefix(data, "confirm:"):
 		b.finishWatch(ctx, user, strings.TrimPrefix(data, "confirm:"))
 	case strings.HasPrefix(data, "fac:"):
 		b.handleFacility(ctx, user, data)
 	case strings.HasPrefix(data, "doctor:"):
-		b.handleDoctorChoice(ctx, user, b.getFlow(user.ID), strings.TrimPrefix(data, "doctor:"))
+		b.handleDoctorChoice(ctx, user, b.getFlow(user.TelegramUserID), strings.TrimPrefix(data, "doctor:"))
 	case strings.HasPrefix(data, "history:"):
 		b.handleHistoryPage(ctx, user, data)
 	case strings.HasPrefix(data, "options:"):
@@ -653,19 +716,19 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string) {
 }
 
 func (b *Bot) startWatchFlow(ctx context.Context, user domain.User) {
-	if err := b.checkAccount(ctx, user); err != nil {
+	if err := b.checkWatchAccount(ctx, user); err != nil {
 		key := accountCheckMessage(err)
 		markup := b.withAccountRecovery(user, key, mainKeyboard(b.catalog, user.Locale))
 		b.send(user, b.catalog.T(user.Locale, key), markup)
 		return
 	}
 	state := &flow{Kind: flowWatchCity, Watch: domain.Watch{UserID: user.ID, NextDays: 14, DoctorMode: domain.DoctorModeAny, FacilityMode: domain.FacilityModeAll}}
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 	if user.PreferredCityID != nil {
 		state.Watch.CityID = *user.PreferredCityID
 		state.Watch.CityName = user.PreferredCityName
 		state.Kind = flowWatchService
-		b.setFlow(user.ID, state)
+		b.setFlow(user.TelegramUserID, state)
 		b.showProcedureMenu(user, state)
 		return
 	}
@@ -697,7 +760,7 @@ func (b *Bot) showCityPicker(ctx context.Context, user domain.User, settings boo
 
 func (b *Bot) showTimeStep(user domain.User, state *flow) {
 	state.Kind = flowWatchTime
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 
 	b.sendWatchStep(
 		user,
@@ -825,7 +888,7 @@ func (b *Bot) handlePreferredCity(ctx context.Context, user domain.User, data st
 }
 
 func (b *Bot) handleWatchCity(ctx context.Context, user domain.User, data string) {
-	state := b.getFlow(user.ID)
+	state := b.getFlow(user.TelegramUserID)
 	if state == nil {
 		return
 	}
@@ -843,36 +906,25 @@ func (b *Bot) handleWatchCity(ctx context.Context, user domain.User, data string
 	state.Watch.CityID = city.ID
 	state.Watch.CityName = city.Name
 	state.Kind = flowWatchService
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 	b.showProcedureMenu(user, state)
 }
 
 func (b *Bot) showProcedureMenu(user domain.User, state *flow) {
 	state.Kind = flowWatchService
 	state.ProcedureSearchQuery = ""
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.service"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
 }
 
 func (b *Bot) showPopularProcedures(ctx context.Context, user domain.User, state *flow) {
 	state.Kind = flowWatchService
 	state.ProcedureSearchQuery = ""
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 
-	client, err := b.authenticatedLuxMedClient(ctx, user)
-	if err != nil {
-		b.logger.Warn(
-			"authenticate luxmed client for popular procedures failed",
-			"user_id", user.ID,
-			"city_id", state.Watch.CityID,
-			"city_name", state.Watch.CityName,
-			"err", err,
-		)
-		b.send(user, b.catalog.T(user.Locale, "errors.generic"), procedureMenuKeyboard(nil, b.catalog, user.Locale))
-		return
-	}
-
-	popular, err := client.GetPopularProcedures(ctx)
+	popular, err := withLuxMedCatalog(ctx, b, user, func(client luxmed.Client) ([]domain.Procedure, error) {
+		return client.GetPopularProcedures(ctx)
+	})
 	if err != nil {
 		b.logger.Warn(
 			"load popular procedures failed",
@@ -930,13 +982,13 @@ func (b *Bot) showProcedureSearchResults(ctx context.Context, user domain.User, 
 
 	state.Kind = flowWatchSearch
 	state.ProcedureSearchQuery = query
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 
 	b.showProcedureSearchResultsPage(ctx, user, state, query, 0)
 }
 
 func (b *Bot) handleProcedure(ctx context.Context, user domain.User, data string) {
-	state := b.getFlow(user.ID)
+	state := b.getFlow(user.TelegramUserID)
 	if state == nil {
 		return
 	}
@@ -969,7 +1021,7 @@ func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flo
 	}
 
 	state.Kind = flowWatchFacility
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 
 	favorites, err := b.db.FavoriteFacilities(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, 3)
 	if err != nil {
@@ -1001,7 +1053,7 @@ func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flo
 }
 
 func (b *Bot) handleFacility(ctx context.Context, user domain.User, data string) {
-	state := b.getFlow(user.ID)
+	state := b.getFlow(user.TelegramUserID)
 	if state == nil {
 		return
 	}
@@ -1032,7 +1084,7 @@ func (b *Bot) handleFacility(ctx context.Context, user domain.User, data string)
 		b.logger.Warn("save favorite facility failed")
 	}
 
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 	b.showDateStep(user, state)
 }
 
@@ -1043,7 +1095,7 @@ func (b *Bot) handleFacilityText(ctx context.Context, user domain.User, state *f
 		state.Watch.FacilityMode = domain.FacilityModeAll
 		state.Watch.FacilityIDs = nil
 		state.Watch.FacilityNames = nil
-		b.setFlow(user.ID, state)
+		b.setFlow(user.TelegramUserID, state)
 		b.showDateStep(user, state)
 		return
 	}
@@ -1068,7 +1120,7 @@ func (b *Bot) handleFacilityText(ctx context.Context, user domain.User, state *f
 		b.logger.Warn("save favorite facility failed")
 	}
 
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 	b.showDateStep(user, state)
 }
 
@@ -1183,7 +1235,7 @@ func (b *Bot) handleFacilityToggle(ctx context.Context, user domain.User, state 
 		state.Watch.FacilityMode = ""
 	}
 
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 	b.showFacilityPage(ctx, user, state, mode, page)
 }
 
@@ -1194,7 +1246,7 @@ func (b *Bot) finishSelectedFacilities(ctx context.Context, user domain.User, st
 	}
 
 	state.Watch.FacilityMode = domain.FacilityModeSelected
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 
 	b.showDateStep(user, state)
 }
@@ -1215,7 +1267,7 @@ func (b *Bot) findFacilityByID(ctx context.Context, state *flow, id int) (domain
 }
 
 func (b *Bot) sendFacilityOptions(user domain.User, title string, facilities []domain.Facility, markup tgbotapi.InlineKeyboardMarkup) {
-	state := b.getFlow(user.ID)
+	state := b.getFlow(user.TelegramUserID)
 
 	var selectedIDs []int
 	if state != nil {
@@ -1279,11 +1331,9 @@ func (b *Bot) ensureCities(ctx context.Context, user domain.User) ([]domain.City
 	if len(cities) > 0 {
 		return cities, nil
 	}
-	client, err := b.authenticatedLuxMedClient(ctx, user)
-	if err != nil {
-		return nil, err
-	}
-	cities, err = client.GetCities(ctx)
+	cities, err = withLuxMedCatalog(ctx, b, user, func(client luxmed.Client) ([]domain.City, error) {
+		return client.GetCities(ctx)
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -1298,11 +1348,9 @@ func (b *Bot) ensureProcedures(ctx context.Context, user domain.User, state *flo
 		return nil
 	}
 	city := domain.City{ID: state.Watch.CityID, Name: state.Watch.CityName}
-	client, err := b.authenticatedLuxMedClient(ctx, user)
-	if err != nil {
-		return err
-	}
-	catalog, err := client.GetServices(ctx)
+	catalog, err := withLuxMedCatalog(ctx, b, user, func(client luxmed.Client) ([]domain.Service, error) {
+		return client.GetServices(ctx)
+	})
 	if err != nil {
 		return err
 	}
@@ -1382,7 +1430,7 @@ func (b *Bot) showProcedureLetters(ctx context.Context, user domain.User, state 
 
 	state.Kind = flowWatchService
 	state.ProcedureSearchQuery = ""
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 
 	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.service_letter"), procedureLettersKeyboard(letters, b.catalog, user.Locale))
 }
@@ -1502,7 +1550,7 @@ func (b *Bot) showProcedureSearchResultsPage(ctx context.Context, user domain.Us
 
 	state.Kind = flowWatchSearch
 	state.ProcedureSearchQuery = query
-	b.setFlow(user.ID, state)
+	b.setFlow(user.TelegramUserID, state)
 
 	title := b.catalog.T(user.Locale, "flow.watch.service_results")
 
@@ -1528,34 +1576,58 @@ func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domai
 	if len(existing) > 0 {
 		return nil
 	}
-	client, err := b.authenticatedLuxMedClient(ctx, user)
-	if err != nil {
-		return err
-	}
-	data, err := client.GetDoctorsAndFacilities(ctx, city.ID, procedureID)
+	data, err := withLuxMedCatalog(ctx, b, user, func(client luxmed.Client) (domain.DoctorsAndFacilities, error) {
+		return client.GetDoctorsAndFacilities(ctx, city.ID, procedureID)
+	})
 	if err != nil {
 		return err
 	}
 	return b.db.UpsertFacilities(ctx, city, procedureID, data.Facilities)
 }
 
+func withLuxMedCatalog[T any](
+	ctx context.Context,
+	b *Bot,
+	user domain.User,
+	query func(luxmed.Client) (T, error),
+) (T, error) {
+	var result T
+	if b.runner != nil {
+		err := b.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
+			var err error
+			result, err = query(client)
+			return err
+		})
+		return result, err
+	}
+	client, err := b.authenticatedLuxMedClient(ctx, user)
+	if err != nil {
+		return result, err
+	}
+	return query(client)
+}
+
 func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (luxmed.Client, error) {
-	if b.cfg.Browsers != nil {
-		if err := b.checkAccount(ctx, user); err != nil {
+	browser := b.cfg.Browsers[user.TelegramUserID]
+	if b.cfg.Browsers != nil && browser == nil {
+		return nil, luxmed.ErrAuthentication
+	}
+	account, err := b.db.LoginAccount(ctx, user.ID, browser != nil)
+	if errors.Is(err, sql.ErrNoRows) && browser != nil {
+		if err := browser.Check(ctx); err != nil {
 			return nil, err
 		}
 		return b.cfg.Browsers[user.TelegramUserID].Client(), nil
 	}
-	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil {
 		return nil, err
 	}
-	password, err := b.cryptor.Decrypt(account.EncryptedPassword)
+	creds, err := b.cryptor.OpenCredentials(account.UserID, account.EncryptedPassword)
 	if err != nil {
 		return nil, err
 	}
 	client := b.newClient(false)
-	if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
+	if err := client.Authenticate(ctx, creds); err != nil {
 		return nil, err
 	}
 	return client, nil
@@ -1580,7 +1652,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "pause":
 		state = domain.WatchStatusPaused
 	case "resume":
-		if err := b.checkAccount(ctx, user); err != nil {
+		if err := b.checkWatchAccount(ctx, user); err != nil {
 			key := accountCheckMessage(err)
 			markup := b.withAccountRecovery(user, key, watchKeyboard(b.catalog, user.Locale, watch))
 			b.send(user, b.catalog.T(user.Locale, key), markup)
@@ -1592,7 +1664,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "check":
 		select {
 		case b.manualChecks <- struct{}{}:
-			b.manualWorkers.Go(func() {
+			b.workers.Go(func() {
 				defer func() { <-b.manualChecks }()
 				b.checkWatchNow(ctx, user, watch)
 			})
@@ -1613,7 +1685,12 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	default:
 		return
 	}
-	if err := b.db.SetUserWatchStatus(ctx, user.ID, id, state); err != nil {
+	if state == domain.WatchStatusActive {
+		err = b.db.ResumeWatchForMode(ctx, user, id)
+	} else {
+		err = b.db.SetUserWatchStatus(ctx, user.ID, id, state)
+	}
+	if err != nil {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
@@ -1724,7 +1801,7 @@ func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string
 		b.send(user, b.catalog.T(user.Locale, "flow.invite.invalid"), nil)
 		return
 	}
-	b.clearFlow(user.ID)
+	b.clearFlow(user.TelegramUserID)
 	user.Status = domain.UserStatusActive
 	b.showStart(ctx, user, true)
 }
@@ -1748,26 +1825,47 @@ func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
 	b.send(user, b.catalog.T(user.Locale, "flow.invite.code", code), nil)
 }
 
-func (b *Bot) send(user domain.User, text string, markup any) {
+func (b *Bot) send(user domain.User, text string, markup any) bool {
 	msg := tgbotapi.NewMessage(user.TelegramChatID, truncateMessage(text, 4000))
 	if markup != nil {
 		msg.ReplyMarkup = markup
 	}
 	if _, err := b.api.Send(msg); err != nil {
 		b.logger.Warn("send Telegram message failed")
+		return false
 	}
+	return true
 }
 
-func (b *Bot) setFlow(userID int64, state *flow) {
-	b.flowState[userID] = state
+func (b *Bot) setFlow(telegramID int64, state *flow) {
+	b.flowMu.Lock()
+	defer b.flowMu.Unlock()
+	if state != nil {
+		switch state.Kind {
+		case flowAccountLogin, flowAccountPass, flowAccountCheck, flowAccountRetry:
+			b.replaceCredentialFlowLocked(telegramID, state)
+			return
+		}
+	}
+	b.replaceCredentialFlowLocked(telegramID, nil)
+	if state == nil {
+		delete(b.flowState, telegramID)
+		return
+	}
+	b.flowState[telegramID] = state
 }
 
-func (b *Bot) getFlow(userID int64) *flow {
-	return b.flowState[userID]
+func (b *Bot) getFlow(telegramID int64) *flow {
+	b.flowMu.Lock()
+	defer b.flowMu.Unlock()
+	if state := b.credentialFlows[telegramID]; state != nil && state.Kind != flowAccountRetry {
+		return state
+	}
+	return b.flowState[telegramID]
 }
 
-func (b *Bot) clearFlow(userID int64) {
-	delete(b.flowState, userID)
+func (b *Bot) clearFlow(telegramID int64) {
+	b.setFlow(telegramID, nil)
 }
 
 func parseIDName(text string) (int, string, bool) {

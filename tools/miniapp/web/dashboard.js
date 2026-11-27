@@ -55,6 +55,8 @@ let cities;
 let tab = 'home';
 let flashTimer;
 let renderID = 0;
+let passwordSave = null;
+let mountedAccount;
 
 for (const target of document.querySelectorAll('[data-icon]')) target.innerHTML = icon(target.dataset.icon);
 
@@ -73,11 +75,12 @@ function flash(message) {
   flashTimer = setTimeout(() => { announcement.textContent = ''; }, 4000);
 }
 
-async function api(action, data = {}) {
+async function api(action, data = {}, attemptID = '') {
   let response;
   const headers = { 'Content-Type': 'application/json' };
   if (action === 'auth' || action === 'connect') headers['X-Telegram-Init-Data'] = telegram.initData;
   if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
+  if (attemptID) headers['X-LuxMed-Login-Attempt'] = attemptID;
   try {
     response = await fetch(`/api/dashboard/${action}`, {
       method: 'POST', redirect: 'error', cache: 'no-store',
@@ -92,9 +95,10 @@ async function api(action, data = {}) {
   if (response.status === 401) throw new DashboardError('error.reopen');
   if (response.status === 403) throw new DashboardError('error.access_denied');
   if (response.status === 429) throw new DashboardError('error.browser_busy');
+  if (response.status === 409 && action === 'credentials') throw new DashboardError('account.login_failed');
   if (response.status === 409) throw new DashboardError('error.connect_first');
   if (response.status === 400) throw new DashboardError('error.invalid_fields');
-  if (response.status === 404) throw new DashboardError('error.stale');
+  if (response.status === 404 || response.status === 412) throw new DashboardError('error.stale');
   throw new DashboardError('error.unavailable');
 }
 
@@ -131,16 +135,26 @@ function accountSection(compact = false) {
       <p class="account-status" data-state="${account}" role="status">${text(accountStatusKey(account))}</p>
     </div>
     <div class="account-actions">
-      <button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>
+      ${state.SavedLogin ? '' : `<button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>`}
+      ${state.HasCredentials ? `<button type="button" class="secondary" id="forget-credentials">${text(state.SavedLogin ? 'account.forget' : 'account.delete_credentials')}</button>` : ''}
       <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
     </div>
+    ${compact || state.SavedLogin ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
+    <details>
+      <summary>${text(state.SavedLogin ? 'account.change_credentials' : 'account.password_mode')}</summary>
+      <form id="credentials" method="post" class="stack">
+        <label class="field">${text('account.login')}<input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="254" required></label>
+        <label class="field">${text('account.password')}<input name="password" type="password" autocomplete="current-password" maxlength="1024" required></label>
+        <p class="muted">${text('account.encryption')}</p>
+        <button type="submit" class="primary">${text('account.save_credentials')}</button>
+      </form>
+    </details>
     <p class="muted error" data-account-error role="status"></p>
-    ${compact ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
   </section>`;
 }
 
-async function signIn() {
-  const { url } = await api('connect');
+async function signIn(revisions, attemptID, viewID) {
+  const { url } = await api('connect', revisions, attemptID);
   let target;
   try {
     target = new URL(url);
@@ -150,29 +164,144 @@ async function signIn() {
   if (target.origin !== location.origin || target.pathname !== '/') throw new DashboardError('error.link');
   target.searchParams.set('return', 'app');
   target.hash = location.hash;
+  if (viewID !== renderID) return false;
   location.assign(target.href);
+  return true;
+}
+
+function accountModeChanged(latest, displayed) {
+  return latest.SavedLogin !== displayed.SavedLogin ||
+    latest.HasCredentials !== displayed.HasCredentials ||
+    latest.CredentialRevision !== displayed.CredentialRevision ||
+    latest.CredentialSaveRevision !== displayed.CredentialSaveRevision;
+}
+
+function refreshMountedAccount() {
+  if (!mountedAccount || mountedAccount.viewID !== renderID || !mountedAccount.section.isConnected) return;
+  const { section, displayed } = mountedAccount;
+  if (accountModeChanged(state, displayed)) {
+    section.outerHTML = accountSection(section.classList.contains('compact'));
+    bindAccount();
+    return;
+  }
+  const account = state.AccountStatus;
+  const connect = section.querySelector('#connect');
+  if (connect) connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
+  section.dataset.state = account;
+  const status = section.querySelector('.account-status');
+  status.dataset.state = account;
+  status.textContent = t(accountStatusKey(account));
 }
 
 function bindAccount() {
-  const failure = main.querySelector('[data-account-error]');
-  const connect = main.querySelector('#connect');
-  connect.onclick = () => void run(connect, signIn, failure);
-  const check = main.querySelector('#account-check');
+  const viewID = renderID;
+  const section = main.querySelector('.account');
+  const { SavedLogin, HasCredentials, CredentialRevision, CredentialSaveRevision } = state;
+  const revisions = { CredentialRevision, CredentialSaveRevision };
+  const displayed = { SavedLogin, HasCredentials, ...revisions };
+  mountedAccount = { viewID, section, displayed };
+  async function refreshAccount(error) {
+    try {
+      await showAccountSnapshot(await api('load'));
+    } catch (refreshError) {
+      if (!error && viewID === renderID) throw refreshError;
+      flash(errorText(error ?? refreshError));
+      return;
+    }
+    if (error) flash(errorText(error));
+  }
+
+  async function refreshStaleAction(error) {
+    if (error.key !== 'error.stale') throw error;
+    await refreshAccount(error);
+  }
+
+  function displayedAttempt() {
+    if (passwordSave && passwordSave.revision === CredentialRevision && passwordSave.saveRevision === CredentialSaveRevision) {
+      return passwordSave;
+    }
+    return null;
+  }
+
+  async function chooseChrome(action, attempt) {
+    if (attempt) attempt.choosingChrome = true;
+    try {
+      await action(attempt?.id);
+    } catch (error) {
+      if (!['error.stale', 'error.unavailable', 'error.link'].includes(error.key)) throw error;
+      await refreshAccount(error);
+    } finally {
+      if (attempt) {
+        attempt.choosingChrome = false;
+        if (!attempt.saving && passwordSave === attempt) passwordSave = null;
+      }
+    }
+  }
+
+  const failure = section.querySelector('[data-account-error]');
+  const connect = section.querySelector('#connect');
+  if (connect) connect.onclick = () => void run(connect, () => chooseChrome(async (id) => {
+    if (!await signIn(revisions, id, viewID)) await refreshAccount();
+  }, displayedAttempt()), failure);
+
+  const form = section.querySelector('#credentials');
+  form.onsubmit = (event) => {
+    event.preventDefault();
+    if (passwordSave?.saving || passwordSave?.choosingChrome) return;
+    const attempt = {
+      id: crypto.randomUUID(), revision: CredentialRevision, saveRevision: CredentialSaveRevision,
+      saving: true, choosingChrome: false,
+    };
+    passwordSave = attempt;
+    void run(form.querySelector('button'), async () => {
+      try {
+        try {
+          await api('credentials', {
+            Login: form.elements.login.value, Password: form.elements.password.value,
+            CredentialRevision, CredentialSaveRevision,
+          }, attempt.id);
+        } finally {
+          form.elements.password.value = '';
+        }
+        if (!attempt.choosingChrome) await refreshAccount();
+      } catch (error) {
+        if (!attempt.choosingChrome) await refreshStaleAction(error);
+      } finally {
+        attempt.saving = false;
+        if (!attempt.choosingChrome && passwordSave === attempt) passwordSave = null;
+      }
+    }, failure);
+  };
+  const forget = section.querySelector('#forget-credentials');
+  if (forget) forget.onclick = () => void run(forget, () => chooseChrome(async (id) => {
+    await api('forget-credentials', revisions, id);
+    await refreshAccount();
+  }, SavedLogin ? displayedAttempt() : null), failure);
+  const check = section.querySelector('#account-check');
   let refreshTimer;
   let manualCheck = 0;
 
   async function showAccountSnapshot(latest) {
+    if (latest.CredentialRevision < state.CredentialRevision ||
+        latest.CredentialSaveRevision < state.CredentialSaveRevision) return;
+    if (viewID !== renderID) {
+      const {
+        SavedLogin, HasCredentials, CredentialRevision, CredentialSaveRevision,
+        AccountStatus, ReconnectRequired, ReconnectEpisodeID,
+      } = latest;
+      Object.assign(state, {
+        SavedLogin, HasCredentials, CredentialRevision, CredentialSaveRevision,
+        AccountStatus, ReconnectRequired, ReconnectEpisodeID,
+      });
+      refreshMountedAccount();
+      return;
+    }
     applySnapshot(latest);
     if (tab === 'home' || tab === 'watches') {
       await switchTab(tab, { reload: false });
       return;
     }
-    const account = state.AccountStatus;
-    connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
-    main.querySelector('.account').dataset.state = account;
-    const status = main.querySelector('.account-status');
-    status.dataset.state = account;
-    status.textContent = t(accountStatusKey(account));
+    refreshMountedAccount();
   }
 
   function scheduleRefresh() {
@@ -187,7 +316,8 @@ function bindAccount() {
       const revision = manualCheck;
       try {
         const latest = await api('load');
-        if (check.isConnected && revision === manualCheck && latest.AccountStatus !== state.AccountStatus) {
+        if (check.isConnected && revision === manualCheck &&
+            (latest.AccountStatus !== state.AccountStatus || accountModeChanged(latest, displayed))) {
           await showAccountSnapshot(latest);
         }
       } catch (error) {
@@ -348,7 +478,7 @@ function watches() {
     const watch = items.find((item) => item.ID === Number(button.dataset.autobook));
     button.onclick = () => (watch.AutoBook ? setAutoBook(button, watch, false) : autoBookDialog(button, watch));
   }
-  for (const button of main.querySelectorAll('[data-sign-in]')) button.onclick = () => void run(button, signIn);
+  for (const button of main.querySelectorAll('[data-sign-in]')) button.onclick = () => void switchTab('settings');
   const chat = main.querySelector('#check-in-chat');
   if (chat) chat.onclick = () => {
     if (telegram?.close) telegram.close();
@@ -551,7 +681,7 @@ function cityOptions(items, selected, placeholder) {
 async function settingsScreen(id) {
   show(titleFor('settings'), `<div class="stack">
     ${accountSection()}
-    <form class="stack">
+    <form class="stack" id="preferences">
       <section class="card stack" aria-labelledby="preferences-heading">
         <h2 id="preferences-heading">${text('settings.preferences')}</h2>
         <label class="field">${text('settings.default_city')}<select name="city"></select></label>
@@ -563,7 +693,7 @@ async function settingsScreen(id) {
       <p class="muted error" data-error role="status"></p>
       <button type="submit" class="primary">${text('common.save')}</button>
     </form></div>`);
-  const form = main.querySelector('form');
+  const form = main.querySelector('#preferences');
   const error = form.querySelector('[data-error]');
   const loadCities = main.querySelector('#load-cities');
   const selected = { ID: state.CityID, Name: state.CityName };
@@ -752,7 +882,7 @@ async function editor(watch, focusPicks = false) {
     picksStatus.textContent = t(cityID ? 'editor.loading_recommendations' : 'editor.choose_city');
     if (!cityID) return;
     try {
-      const { Referred, Recent, Saved, Popular } = await api('procedure-picks', { CityID: cityID });
+      const { Referred, Recent, Saved, Popular, PortalIncomplete } = await api('procedure-picks', { CityID: cityID });
       if (id !== renderID || request !== picksRequest) return;
       const groups = [
         ['editor.referred_services', Referred],
@@ -772,8 +902,11 @@ async function editor(watch, focusPicks = false) {
         const group = picksList.lastElementChild;
         for (const item of items) group.querySelector(`[data-service="${item.ID}"]`).onclick = () => selectService(item);
       }
-      picksStatus.hidden = picksList.childElementCount > 0;
-      if (!picksStatus.hidden) picksStatus.textContent = t('editor.no_recommendations');
+      picksStatus.hidden = !PortalIncomplete && picksList.childElementCount > 0;
+      if (!picksStatus.hidden) {
+        picksStatus.textContent = t(PortalIncomplete ? 'error.luxmed_unavailable' : 'editor.no_recommendations');
+      }
+      retryPicks.hidden = !PortalIncomplete;
       markSelection();
     } catch (error) {
       if (id !== renderID || request !== picksRequest) return;

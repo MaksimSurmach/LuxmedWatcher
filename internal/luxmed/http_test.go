@@ -252,3 +252,128 @@ func TestSearchReportsPasswordRenewalBeforeUnavailableResponse(t *testing.T) {
 		t.Fatalf("search result=%+v, logins=%d, terms=%d, err=%v", result, logins.Load(), terms.Load(), err)
 	}
 }
+
+func TestLoginResponseWithRetryAfterDefersReauthentication(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusFound} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var logins, searches atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case LoginURL:
+					logins.Add(1)
+					fmt.Fprint(w, `{"succeded":true,"token":"fixture"}`)
+				case XsrfTokenURL:
+					fmt.Fprint(w, `{"token":"fixture"}`)
+				case CitiesURL:
+					if searches.Add(1) == 1 {
+						w.Header().Set("Retry-After", "120")
+						w.Header().Set("Location", "/PatientPortal/NewPortal/Account/Login")
+						w.WriteHeader(status)
+						return
+					}
+					fmt.Fprint(w, `[]`)
+				default:
+					t.Errorf("unexpected request: %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			t.Cleanup(server.Close)
+			client := newHTTPClient(server.URL, false)
+			if err := client.Authenticate(t.Context(), Credentials{Login: "fixture", Password: "fixture"}); err != nil {
+				t.Fatal(err)
+			}
+			_, err := client.GetCities(t.Context())
+			var upstream *HTTPError
+			if !errors.Is(err, ErrUnavailable) || !errors.As(err, &upstream) ||
+				upstream.StatusCode != status || RetryAfter(err) != 2*time.Minute ||
+				logins.Load() != 1 || searches.Load() != 1 {
+				t.Fatalf("deferred login lost the upstream response: logins=%d searches=%d error=%v", logins.Load(), searches.Load(), err)
+			}
+			// The runner can retry after the deadline and the expired token will be replaced.
+			if _, err := client.GetCities(t.Context()); err != nil || logins.Load() != 2 {
+				t.Fatalf("retry did not replace the expired token: logins=%d error=%v", logins.Load(), err)
+			}
+		})
+	}
+}
+
+func TestAuthenticationPreservesRetryAfterFromXSRF(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case LoginURL:
+			fmt.Fprint(w, `{"succeded":true,"token":"fixture"}`)
+		case XsrfTokenURL:
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := newHTTPClient(server.URL, false)
+	err := client.Authenticate(t.Context(), Credentials{Login: "fixture", Password: "fixture"})
+	if !errors.Is(err, ErrUnavailable) || RetryAfter(err) != time.Minute || client.accessToken != "" {
+		t.Fatalf("failed XSRF request lost its cooldown: %v", err)
+	}
+}
+
+func TestLoginUsesRetryAfterBeforeRejectingCredentials(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var throttled atomic.Bool
+			throttled.Store(true)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != LoginURL {
+					t.Errorf("unexpected request: %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+					return
+				}
+				if throttled.Load() {
+					w.Header().Set("Retry-After", "60")
+				}
+				w.WriteHeader(status)
+			}))
+			t.Cleanup(server.Close)
+			client := newHTTPClient(server.URL, false)
+			creds := Credentials{Login: "fixture", Password: "fixture"}
+			err := client.Authenticate(t.Context(), creds)
+			if !errors.Is(err, ErrUnavailable) || errors.Is(err, ErrCredentialsRejected) || RetryAfter(err) != time.Minute {
+				t.Fatalf("temporary login failure was misclassified: %v", err)
+			}
+			throttled.Store(false)
+			if err := client.Authenticate(t.Context(), creds); !errors.Is(err, ErrCredentialsRejected) {
+				t.Fatalf("login rejection without Retry-After: %v", err)
+			}
+		})
+	}
+}
+
+func TestIncompleteSuccessfulLoginDoesNotRejectCredentials(t *testing.T) {
+	var complete atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case LoginURL:
+			if complete.Load() {
+				fmt.Fprint(w, `{"succeded":true,"token":"fixture"}`)
+			} else {
+				fmt.Fprint(w, `{"succeded":true}`)
+			}
+		case XsrfTokenURL:
+			fmt.Fprint(w, `{"token":"fixture"}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	t.Cleanup(server.Close)
+	client := newHTTPClient(server.URL, false)
+	creds := Credentials{Login: "fixture", Password: "synthetic"}
+	err := client.Authenticate(t.Context(), creds)
+	if !errors.Is(err, ErrResponse) || errors.Is(err, ErrAuthentication) {
+		t.Fatalf("incomplete response was treated as a password rejection: %v", err)
+	}
+	complete.Store(true)
+	if err := client.Authenticate(t.Context(), creds); err != nil {
+		t.Fatalf("authentication did not recover with the same credentials: %v", err)
+	}
+}

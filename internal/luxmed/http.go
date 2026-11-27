@@ -25,10 +25,11 @@ const (
 )
 
 var (
-	ErrAuthentication = errors.New("luxmed authentication required or rejected")
-	ErrUnavailable    = errors.New("luxmed temporarily unavailable")
-	ErrBrowserBusy    = errors.New("luxmed browser is busy")
-	ErrResponse       = errors.New("unexpected luxmed response")
+	ErrAuthentication      = errors.New("luxmed authentication required or rejected")
+	ErrCredentialsRejected = fmt.Errorf("luxmed login rejected: %w", ErrAuthentication)
+	ErrUnavailable         = errors.New("luxmed temporarily unavailable")
+	ErrBrowserBusy         = errors.New("luxmed browser is busy")
+	ErrResponse            = errors.New("unexpected luxmed response")
 )
 
 // HTTPError reports an upstream status without including query parameters or response data.
@@ -37,6 +38,25 @@ type HTTPError struct {
 	RetryAfter time.Duration
 	path       string
 	login      bool
+}
+
+// RetryAfter returns the longest upstream retry delay in an error chain.
+func RetryAfter(err error) time.Duration {
+	switch value := err.(type) {
+	case *HTTPError:
+		return value.RetryAfter
+	case interface{ Unwrap() []error }:
+		var delay time.Duration
+		for _, cause := range value.Unwrap() {
+			delay = max(delay, RetryAfter(cause))
+		}
+		return delay
+	default:
+		if cause := errors.Unwrap(err); cause != nil {
+			return RetryAfter(cause)
+		}
+		return 0
+	}
 }
 
 func (e *HTTPError) Error() string {
@@ -81,13 +101,16 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 	c.xsrfToken = ""
 	c.client.Jar, _ = cookiejar.New(nil)
 	if strings.TrimSpace(creds.Login) == "" || creds.Password == "" {
-		return ErrAuthentication
+		return ErrCredentialsRejected
 	}
 	body, _ := json.Marshal(map[string]string{"login": creds.Login, "password": creds.Password})
 	data, err := c.request(ctx, http.MethodPost, LoginURL, body)
+	if RetryAfter(err) > 0 {
+		return errors.Join(ErrUnavailable, err)
+	}
 	var status *HTTPError
 	if errors.As(err, &status) && (status.StatusCode == http.StatusUnauthorized || status.StatusCode == http.StatusForbidden) {
-		return fmt.Errorf("%w: %w", ErrAuthentication, err)
+		return fmt.Errorf("%w: %w", ErrCredentialsRejected, err)
 	}
 	if err != nil {
 		return err
@@ -100,9 +123,9 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 		return fmt.Errorf("luxmed login: %w", ErrResponse)
 	}
 	if !*result.Succeeded {
-		return ErrAuthentication
+		return ErrCredentialsRejected
 	}
-	if result.Token == "" {
+	if strings.TrimSpace(result.Token) == "" {
 		return fmt.Errorf("luxmed login missing token: %w", ErrResponse)
 	}
 
@@ -112,9 +135,9 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 		c.accessToken = ""
 		return ctx.Err()
 	}
-	if errors.Is(err, ErrUnavailable) {
+	if errors.Is(err, ErrUnavailable) || RetryAfter(err) > 0 {
 		c.accessToken = ""
-		return err
+		return errors.Join(ErrUnavailable, err)
 	}
 	// The read-only portal endpoints also work without an XSRF token on older deployments.
 	var xsrf struct {
@@ -161,15 +184,20 @@ func (c *HTTPClient) get(ctx context.Context, endpoint string) ([]byte, error) {
 	if !errors.As(err, &status) || !status.login {
 		return data, err
 	}
-	if err := c.Authenticate(ctx, c.creds); err != nil {
-		return nil, err
+	if status.RetryAfter <= 0 {
+		if err := c.Authenticate(ctx, c.creds); err != nil {
+			return nil, err
+		}
+		data, err = c.getWithRetry(ctx, endpoint)
+		if !errors.As(err, &status) || !status.login {
+			return data, err
+		}
 	}
-	data, err = c.getWithRetry(ctx, endpoint)
-	if errors.As(err, &status) && status.login {
-		c.accessToken = ""
-		return nil, fmt.Errorf("%w: %w", ErrAuthentication, err)
+	c.accessToken = ""
+	if status.RetryAfter > 0 {
+		return nil, errors.Join(ErrUnavailable, err)
 	}
-	return data, err
+	return nil, errors.Join(ErrAuthentication, err)
 }
 
 func (c *HTTPClient) getWithRetry(ctx context.Context, endpoint string) ([]byte, error) {
@@ -209,7 +237,7 @@ func (c *HTTPClient) getWithRetry(ctx context.Context, endpoint string) ([]byte,
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			return nil, ctx.Err()
+			return nil, errors.Join(ctx.Err(), err)
 		case <-timer.C:
 		}
 	}

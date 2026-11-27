@@ -15,22 +15,29 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
 
+var registeredCommands = []struct{ name, descriptionKey string }{
+	{"start", "command.start"},
+	{"app", "button.open_app"},
+	{"connect", "button.connect"},
+	{"new", "button.new_watch"},
+	{"watches", "button.my_watches"},
+	{"history", "button.history"},
+	{"book", "button.book_portal"},
+	{"settings", "button.settings"},
+	{"language", "button.language"},
+	{"menu", "button.menu"},
+	{"help", "command.help"},
+	{"cancel", "button.cancel"},
+}
+
 func (b *Bot) registerCommands() {
 	scope := tgbotapi.NewBotCommandScopeAllPrivateChats()
 	for _, language := range append([]string{""}, i18n.SupportedLocales...) {
-		commands := []tgbotapi.BotCommand{
-			{Command: "start", Description: b.catalog.T(language, "command.start")},
-			{Command: "app", Description: b.catalog.T(language, "button.open_app")},
-			{Command: "connect", Description: b.catalog.T(language, "button.connect")},
-			{Command: "new", Description: b.catalog.T(language, "button.new_watch")},
-			{Command: "watches", Description: b.catalog.T(language, "button.my_watches")},
-			{Command: "history", Description: b.catalog.T(language, "button.history")},
-			{Command: "book", Description: b.catalog.T(language, "button.book_portal")},
-			{Command: "settings", Description: b.catalog.T(language, "button.settings")},
-			{Command: "language", Description: b.catalog.T(language, "button.language")},
-			{Command: "menu", Description: b.catalog.T(language, "button.menu")},
-			{Command: "help", Description: b.catalog.T(language, "command.help")},
-			{Command: "cancel", Description: b.catalog.T(language, "button.cancel")},
+		commands := make([]tgbotapi.BotCommand, 0, len(registeredCommands))
+		for _, command := range registeredCommands {
+			commands = append(commands, tgbotapi.BotCommand{
+				Command: command.name, Description: b.catalog.T(language, command.descriptionKey),
+			})
 		}
 		if _, err := b.api.Request(tgbotapi.NewSetMyCommandsWithScopeAndLanguage(scope, language, commands...)); err != nil {
 			b.logger.Warn("register Telegram bot commands failed", "language", language)
@@ -119,7 +126,7 @@ func (b *Bot) showApp(ctx context.Context, user domain.User, tab string) {
 func (b *Bot) showStart(ctx context.Context, user domain.User, invited bool) {
 	const title = "Luxmed Watcher"
 	if !user.IsActive() {
-		b.setFlow(user.ID, &flow{Kind: flowInvite})
+		b.setFlow(user.TelegramUserID, &flow{Kind: flowInvite})
 		b.sendOnboarding(user, title, b.catalog.T(user.Locale, "flow.invite.enter"), widgetKeyboard(languageKeyboard()))
 		return
 	}
@@ -165,11 +172,25 @@ func (b *Bot) showConnect(ctx context.Context, user domain.User) {
 		b.showAccount(ctx, user)
 		return
 	}
-	b.clearFlow(user.ID)
-	b.sendOnboarding(user, b.catalog.T(user.Locale, "button.connect"), b.catalog.T(user.Locale, "widget.connect"), [][]miniAppButton{
-		{b.actionButton(user, "button.sign_in", "connect:open")},
-		{b.actionButton(user, "button.menu", "menu")},
-	})
+	revisions, saved, stored, err := b.db.BrowserLoginMode(ctx, user.ID)
+	if err != nil {
+		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
+		return
+	}
+	mode, label := "chrome", "button.chrome"
+	if saved {
+		mode, label = "switch", "button.chrome_switch"
+	}
+	action := credentialAction(mode, revisions)
+	actions := [][]miniAppButton{
+		{b.actionButton(user, label, action)},
+		{b.actionButton(user, "button.saved_login", "connect:password")},
+	}
+	if stored {
+		actions = append(actions, []miniAppButton{b.actionButton(user, "button.delete_credentials", credentialAction("forget", revisions))})
+	}
+	actions = append(actions, []miniAppButton{b.actionButton(user, "button.menu", "menu")})
+	b.sendOnboarding(user, b.catalog.T(user.Locale, "button.connect"), b.catalog.T(user.Locale, "widget.login_method"), actions)
 }
 
 func (b *Bot) actionButton(user domain.User, key, action string) miniAppButton {

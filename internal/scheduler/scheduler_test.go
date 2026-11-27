@@ -143,9 +143,17 @@ func TestRunnerSerializesChecksAndRejectsStaleWatch(t *testing.T) {
 func TestRejectedCredentialsAreNotRetried(t *testing.T) {
 	ctx := context.Background()
 	runner, db, watch := testRunner(t, nil)
-	client := &fakeLuxMed{authErr: luxmed.ErrAuthentication}
+	client := &fakeLuxMed{authErr: luxmed.ErrCredentialsRejected}
 	runner.newClient = func(bool) luxmed.Client { return client }
 
+	owner, err := db.UserByID(ctx, watch.UserID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.SaveCredentials(ctx, runner.cryptor, owner, luxmed.Credentials{Login: "saved", Password: "password"}); err != nil {
+		t.Fatal(err)
+	}
+	runner.UseBrowsers(map[int64]*luxmed.Browser{42: {}})
 	for range 2 {
 		if _, err := runner.ManualCheck(ctx, watch); !errors.Is(err, luxmed.ErrAuthentication) {
 			t.Fatalf("check error = %v", err)
@@ -233,11 +241,15 @@ func testRunnerAt(t *testing.T, notifier Notifier, path string) (*Runner, *stora
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Exercise startup of an existing password-only installation.
 	encrypted, err := cryptor.Encrypt("synthetic-password")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := db.SaveVerifiedLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Login: "test", EncryptedPassword: encrypted}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.EncryptLegacyLogins(ctx, cryptor); err != nil {
 		t.Fatal(err)
 	}
 	id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
@@ -851,7 +863,7 @@ func TestPasswordReconnectSerializesWithQueuedWarning(t *testing.T) {
 		return &ReconnectDeliveryRejected{}
 	}}
 	runner, db, watch := testRunner(t, notifier)
-	runner.newClient = func(bool) luxmed.Client { return &fakeLuxMed{authErr: luxmed.ErrAuthentication} }
+	runner.newClient = func(bool) luxmed.Client { return &fakeLuxMed{authErr: luxmed.ErrCredentialsRejected} }
 	account, err := db.LuxMedAccount(ctx, watch.UserID)
 	if err != nil {
 		t.Fatal(err)
@@ -1049,7 +1061,7 @@ func TestConfirmedPartialSearchResolvesReconnect(t *testing.T) {
 				t.Fatal(err)
 			}
 			runner.accounts[watch.UserID] = &accountCheck{
-				login: account.Login, encryptedPassword: account.EncryptedPassword, authenticatedAt: time.Now(),
+				encryptedPassword: account.EncryptedPassword, authenticatedAt: time.Now(),
 				client: &fixedSearchResultClient{
 					result: luxmed.SearchResult{Checked: test.checked, Appointments: appointments},
 					err:    test.searchErr,
@@ -1840,7 +1852,7 @@ func TestPasswordReconnectUsesFallbackIndependentlyOfWarningDelivery(t *testing.
 		authErr   error
 	}{
 		{name: "warning already delivered", delivered: true},
-		{name: "rejected credentials still send a due warning", authErr: luxmed.ErrAuthentication},
+		{name: "rejected credentials still send a due warning", authErr: luxmed.ErrCredentialsRejected},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			ctx := t.Context()
@@ -1991,6 +2003,7 @@ func TestPausedLegacySignInErrorRecoversWithAlternativeProtectedFilter(t *testin
 	}
 	runner.mu.Lock()
 	runner.accounts[good.UserID].next = time.Time{}
+	runner.accounts[good.UserID].retryAfter = time.Time{}
 	runner.mu.Unlock()
 	scheduler.maintainReconnectSessions(ctx)
 	if !slices.Equal(filters, []int{99, 99, 12}) {
@@ -2245,6 +2258,7 @@ func TestEditedRejectedFilterResumesDespiteUnavailableFallback(t *testing.T) {
 			must(db.UpdateWatch(ctx, watch))
 			runner.mu.Lock()
 			runner.accounts[watch.UserID].next = time.Time{}
+			runner.accounts[watch.UserID].retryAfter = time.Time{}
 			runner.mu.Unlock()
 
 			if mode == "scheduled search" {
@@ -2291,6 +2305,7 @@ func TestBrowserReconnectWaitsForConfirmedAuthorizationFailure(t *testing.T) {
 		t.Fatalf("inconclusive session probe triggered a warning: sends=%d err=%v", sends, err)
 	}
 	status.Store(http.StatusUnauthorized)
+	runner.accounts[watch.UserID].retryAfter = time.Time{}
 	if err := runner.renewBrowserSession(ctx, 42, browser); err != nil || sends != 1 {
 		t.Fatalf("confirmed session rejection did not produce a warning: sends=%d err=%v", sends, err)
 	}

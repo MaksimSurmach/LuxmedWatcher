@@ -44,7 +44,7 @@ func (db *DB) UpsertTelegramUser(ctx context.Context, user domain.User) (domain.
 
 func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at
+		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at, credential_revision, credential_save_revision
 		FROM users WHERE telegram_user_id=$1
 	`, telegramID)
 	return scanUser(row)
@@ -52,7 +52,7 @@ func (db *DB) UserByTelegramID(ctx context.Context, telegramID int64) (domain.Us
 
 func (db *DB) UserByID(ctx context.Context, id int64) (domain.User, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at
+		SELECT id, telegram_user_id, telegram_chat_id, telegram_username, display_name, locale, preferred_city_id, preferred_city_name, status, role, created_at, updated_at, last_seen_at, credential_revision, credential_save_revision
 		FROM users WHERE id=$1
 	`, id)
 	return scanUser(row)
@@ -164,33 +164,11 @@ func (db *DB) saveLuxMedAccount(ctx context.Context, account domain.LuxMedAccoun
 	}
 	defer tx.Rollback()
 
-	_, err = tx.ExecContext(ctx, `
-		INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		ON CONFLICT(user_id) DO UPDATE SET
-			login=excluded.login,
-			encrypted_password=excluded.encrypted_password,
-			encrypted_session_data=excluded.encrypted_session_data,
-			session_expires_at=excluded.session_expires_at,
-			last_login_at=excluded.last_login_at,
-			last_login_error=excluded.last_login_error,
-			status=excluded.status
-	`, account.UserID, account.Login, account.EncryptedPassword, account.EncryptedSessionData, nullableTime(account.SessionExpiresAt), nullableTime(account.LastLoginAt), account.LastLoginError, account.Status)
-	if err != nil {
+	if err := upsertLuxMedAccount(ctx, tx, account); err != nil {
 		return err
 	}
-	if verified {
-		if err := db.resolveLuxMedReconnectTx(ctx, tx, account.UserID, true); err != nil {
-			return err
-		}
-	} else {
-		first, end := luxmed.SearchDateBounds(time.Now())
-		if _, err := tx.ExecContext(ctx, `
-			UPDATE watches SET last_checked_at=NULL WHERE user_id=$1 AND status=$2
-				AND `+db.currentSearchWindow("$3", "$4")+`
-		`, account.UserID, domain.WatchStatusActive, first.UTC(), end.UTC()); err != nil {
-			return err
-		}
+	if err := db.finalizeLuxMedAccountSave(ctx, tx, account.UserID, verified); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -201,14 +179,60 @@ func (db *DB) saveLuxMedAccount(ctx context.Context, account domain.LuxMedAccoun
 	return nil
 }
 
+func (db *DB) UpsertLuxMedAccount(ctx context.Context, account domain.LuxMedAccount) error {
+	return upsertLuxMedAccount(ctx, db.sql, account)
+}
+
+type sqlExecutor interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}
+
+type sqlRowReader interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func upsertLuxMedAccount(ctx context.Context, exec sqlExecutor, account domain.LuxMedAccount) error {
+	_, err := exec.ExecContext(ctx, `
+        INSERT INTO luxmed_accounts (user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status, use_saved_login)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		ON CONFLICT(user_id) DO UPDATE SET
+			login=excluded.login,
+			use_saved_login=excluded.use_saved_login,
+			encrypted_password=excluded.encrypted_password,
+			encrypted_session_data=excluded.encrypted_session_data,
+			session_expires_at=excluded.session_expires_at,
+			last_login_at=excluded.last_login_at,
+			last_login_error=excluded.last_login_error,
+			status=excluded.status
+	`, account.UserID, account.Login, account.EncryptedPassword, account.EncryptedSessionData, nullableTime(account.SessionExpiresAt), nullableTime(account.LastLoginAt), account.LastLoginError, account.Status, account.UseSavedLogin)
+	return err
+}
+
+func (db *DB) finalizeLuxMedAccountSave(ctx context.Context, tx *sql.Tx, userID int64, verified bool) error {
+	if verified {
+		return db.resolveLuxMedReconnectTx(ctx, tx, userID, true)
+	}
+	first, end := luxmed.SearchDateBounds(time.Now())
+	_, err := tx.ExecContext(ctx, `
+		UPDATE watches SET last_checked_at=NULL WHERE user_id=$1 AND status=$2
+			AND `+db.currentSearchWindow("$3", "$4")+`
+	`, userID, domain.WatchStatusActive, first.UTC(), end.UTC())
+	return err
+}
+
 func (db *DB) LuxMedAccount(ctx context.Context, userID int64) (domain.LuxMedAccount, error) {
+	return db.LoginAccount(ctx, userID, false)
+}
+
+// Browser installations use saved credentials only after the user explicitly opts in.
+func (db *DB) LoginAccount(ctx context.Context, userID int64, browserConfigured bool) (domain.LuxMedAccount, error) {
 	row := db.sql.QueryRowContext(ctx, `
-		SELECT id, user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status
-		FROM luxmed_accounts WHERE user_id=$1
-	`, userID)
+		SELECT id, user_id, login, encrypted_password, encrypted_session_data, session_expires_at, last_login_at, last_login_error, status, use_saved_login
+		FROM luxmed_accounts WHERE user_id=$1 AND (NOT $2 OR use_saved_login)
+	`, userID, browserConfigured)
 	var account domain.LuxMedAccount
 	var sessionExpiresAt, lastLoginAt sql.NullTime
-	err := row.Scan(&account.ID, &account.UserID, &account.Login, &account.EncryptedPassword, &account.EncryptedSessionData, &sessionExpiresAt, &lastLoginAt, &account.LastLoginError, &account.Status)
+	err := row.Scan(&account.ID, &account.UserID, &account.Login, &account.EncryptedPassword, &account.EncryptedSessionData, &sessionExpiresAt, &lastLoginAt, &account.LastLoginError, &account.Status, &account.UseSavedLogin)
 	if sessionExpiresAt.Valid {
 		account.SessionExpiresAt = &sessionExpiresAt.Time
 	}
@@ -219,25 +243,91 @@ func (db *DB) LuxMedAccount(ctx context.Context, userID int64) (domain.LuxMedAcc
 }
 
 func (db *DB) UpdateLuxMedAccountAuth(ctx context.Context, account domain.LuxMedAccount) error {
-	res, err := db.sql.ExecContext(ctx, `
+	if account.Status != domain.AccountStatusAuthFailed {
+		return updateLuxMedAccountAuth(ctx, db.sql, account)
+	}
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := updateLuxMedAccountAuth(ctx, tx, account); err != nil {
+		return err
+	}
+	if err := setLuxMedAccessStatus(ctx, tx, account.UserID, LuxMedAccessRejected, false); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func updateLuxMedAccountAuth(ctx context.Context, exec interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+}, account domain.LuxMedAccount) error {
+	res, err := exec.ExecContext(ctx, `
 		UPDATE luxmed_accounts SET last_login_at=$1, last_login_error=$2, status=$3
 		WHERE user_id=$4 AND login=$5 AND encrypted_password=$6
 	`, nullableTime(account.LastLoginAt), account.LastLoginError, account.Status, account.UserID, account.Login, account.EncryptedPassword)
 	return requireOneRow(res, err)
 }
 
+func (db *DB) ForgetCredentials(ctx context.Context, owner domain.User) error {
+	revisions := owner.CredentialRevisions()
+	return db.removeCredentials(ctx, owner.ID, &revisions)
+}
+
 func (db *DB) DeleteLuxMedAccount(ctx context.Context, userID int64) error {
+	return db.removeCredentials(ctx, userID, nil)
+}
+
+func (db *DB) removeCredentials(ctx context.Context, userID int64, revisions *domain.CredentialRevisions) error {
+	pauseWatches := revisions == nil
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `DELETE FROM luxmed_accounts WHERE user_id=$1`, userID); err != nil {
+	const invalidate = "UPDATE users SET credential_save_revision=credential_save_revision+1 WHERE id=$1"
+	if revisions == nil {
+		_, err = tx.ExecContext(ctx, invalidate, userID)
+	} else {
+		err = requireOneRow(tx.ExecContext(ctx, invalidate+`
+			AND credential_revision=$2 AND credential_save_revision=$3 AND status=$4 AND role <> ''
+		`, userID, revisions.CredentialRevision, revisions.CredentialSaveRevision, domain.UserStatusActive))
+	}
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrCredentialsChanged
+	}
+	if err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE watches SET status=$1, updated_at=$2 WHERE user_id=$3 AND status=$4`,
-		domain.WatchStatusPaused, time.Now().UTC(), userID, domain.WatchStatusActive); err != nil {
+	var usedSavedLogin bool
+	err = tx.QueryRowContext(ctx, `
+		DELETE FROM luxmed_accounts WHERE user_id=$1 RETURNING use_saved_login
+	`, userID).Scan(&usedSavedLogin)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
+	}
+	if !pauseWatches && !usedSavedLogin {
+		return tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, "UPDATE users SET credential_revision=credential_revision+1 WHERE id=$1", userID); err != nil {
+		return err
+	}
+	if !pauseWatches {
+		if err := db.finalizeLuxMedAccountSave(ctx, tx, userID, false); err != nil {
+			return err
+		}
+		if err := db.setModeAccessStatus(ctx, tx, userID, LuxMedAccessUnchecked); err != nil {
+			return err
+		}
+	}
+	if pauseWatches {
+		if _, err := tx.ExecContext(ctx, `UPDATE watches SET status=$1, updated_at=$2 WHERE user_id=$3 AND status=$4`, domain.WatchStatusPaused, time.Now().UTC(), userID, domain.WatchStatusActive); err != nil {
+			return err
+		}
+		if err := setLuxMedAccessStatus(ctx, tx, userID, LuxMedAccessUnchecked, false); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -296,7 +386,7 @@ func watchesByUser(ctx context.Context, db watchQueryer, userID int64) ([]domain
 	return scanWatches(rows)
 }
 
-func (db *DB) ActiveWatchTelegramIDs(ctx context.Context) ([]int64, error) {
+func (db *DB) ActiveBrowserWatchTelegramIDs(ctx context.Context) ([]int64, error) {
 	return db.activeWatchTelegramIDs(ctx, false, nil)
 }
 
@@ -325,7 +415,7 @@ func (db *DB) activeWatchTelegramIDs(ctx context.Context, reconnectOnly bool, br
 					AND (`+hasAccountTermsRequirement("u.id")+`
 						OR EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status IN ($2, $5) AND `+watchSignInError+`)))
 			))
-				OR (NOT $3 AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status=$2)))
+				OR (NOT $3 AND EXISTS (SELECT 1 FROM watches w WHERE w.user_id=u.id AND w.status=$2) AND NOT EXISTS (SELECT 1 FROM luxmed_accounts a WHERE a.user_id=u.id AND a.use_saved_login)))
 		ORDER BY u.telegram_user_id
 	`, args...)
 	if err != nil {
@@ -389,7 +479,17 @@ func (db *DB) SetWatchStatus(ctx context.Context, id int64, status domain.WatchS
 }
 
 func (db *DB) SetUserWatchStatus(ctx context.Context, userID, id int64, status domain.WatchStatus) error {
-	res, err := db.sql.ExecContext(ctx, `
+	return setUserWatchStatus(ctx, db.sql, userID, id, status)
+}
+
+func (db *DB) ResumeWatchForMode(ctx context.Context, owner domain.User, id int64) error {
+	return db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
+		return setUserWatchStatus(ctx, tx, owner.ID, id, domain.WatchStatusActive)
+	})
+}
+
+func setUserWatchStatus(ctx context.Context, exec sqlExecutor, userID, id int64, status domain.WatchStatus) error {
+	res, err := exec.ExecContext(ctx, `
 		UPDATE watches SET status=$1, updated_at=$2 WHERE id=$3 AND user_id=$4 AND status <> $5
 	`, status, time.Now().UTC(), id, userID, domain.WatchStatusDeleted)
 	return requireOneRow(res, err)
@@ -407,6 +507,16 @@ const markWatchChecked = `
 const watchCheckError = `CASE WHEN $2 THEN '' ELSE $3 END`
 
 func (db *DB) MarkWatchCheckedIfUnchanged(ctx context.Context, watch domain.Watch, success bool, errText string) error {
+	return db.markWatchCheckedIfUnchanged(ctx, db.sql, watch, success, errText)
+}
+
+func (db *DB) MarkWatchCheckedForMode(ctx context.Context, owner domain.User, watch domain.Watch, success bool, errText string) error {
+	return db.withCredentialRevision(ctx, owner, func(tx *sql.Tx) error {
+		return db.markWatchCheckedIfUnchanged(ctx, tx, watch, success, errText)
+	})
+}
+
+func (db *DB) markWatchCheckedIfUnchanged(ctx context.Context, exec sqlExecutor, watch domain.Watch, success bool, errText string) error {
 	// Protected verification clears a sign-in error before writing the search result.
 	// While the error is still present it keeps the account queued for verification.
 	update := markWatchChecked + ` CASE WHEN ` + watchSignInError + ` AND $3 NOT IN ` + signInErrorsSQL +
@@ -418,13 +528,17 @@ func (db *DB) MarkWatchCheckedIfUnchanged(ctx context.Context, watch domain.Watc
 		query = update + ` AND updated_at IN ($6, $7)`
 		args = append(args, watch.UpdatedAt.UTC().String())
 	}
-	return requireOneRow(db.sql.ExecContext(ctx, query, args...))
+	return requireOneRow(exec.ExecContext(ctx, query, args...))
 }
 
 func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {
+	return upsertAppointmentHistory(ctx, db.sql, watchID, app)
+}
+
+func upsertAppointmentHistory(ctx context.Context, reader sqlRowReader, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {
 	if app.LegacyFingerprint != "" {
 		var legacyAddress string
-		err := db.sql.QueryRowContext(ctx, `
+		err := reader.QueryRowContext(ctx, `
 			SELECT address FROM appointment_history WHERE watch_id=$1 AND fingerprint=$2
 		`, watchID, app.LegacyFingerprint).Scan(&legacyAddress)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
@@ -436,7 +550,7 @@ func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app d
 		}
 	}
 	now := time.Now().UTC()
-	row := db.sql.QueryRowContext(ctx, `
+	row := reader.QueryRowContext(ctx, `
 		INSERT INTO appointment_history (
 			watch_id, external_id, fingerprint, date_time, service_id, service_name, doctor_id, doctor_name,
 			facility_id, facility_name, address, city_id, city_name, booking_url, first_seen_at, last_seen_at, seen_count, status, raw_payload
@@ -455,7 +569,11 @@ func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app d
 }
 
 func (db *DB) MarkMissingAppointments(ctx context.Context, watchID int64, seenSince, notifiedBefore time.Time) error {
-	_, err := db.sql.ExecContext(ctx, `
+	return db.markMissingAppointments(ctx, db.sql, watchID, seenSince, notifiedBefore)
+}
+
+func (db *DB) markMissingAppointments(ctx context.Context, exec sqlExecutor, watchID int64, seenSince, notifiedBefore time.Time) error {
+	_, err := exec.ExecContext(ctx, `
 		UPDATE appointment_history SET status=$1,
 			last_notified_at=CASE WHEN `+db.dateTimeSQL("last_notified_at")+` <= `+db.dateTimeSQL("$2")+` THEN NULL ELSE last_notified_at END
 		WHERE watch_id=$3 AND `+db.dateTimeSQL("last_seen_at")+` < `+db.dateTimeSQL("$4")+` AND status <> $5
@@ -911,6 +1029,18 @@ func (db *DB) Procedure(ctx context.Context, cityID int, procedureID int) (domai
 	return proc, err
 }
 
+// SavedWatchServiceName resolves a service using only this user's non-deleted searches.
+func (db *DB) SavedWatchServiceName(ctx context.Context, userID int64, cityID, serviceID int) (string, error) {
+	var name string
+	err := db.sql.QueryRowContext(ctx, `
+		SELECT TRIM(service_name)
+		FROM watches
+		WHERE user_id=$1 AND city_id=$2 AND service_id=$3 AND status<>$4 AND TRIM(service_name)<>''
+		ORDER BY created_at DESC, id DESC LIMIT 1
+	`, userID, cityID, serviceID, domain.WatchStatusDeleted).Scan(&name)
+	return name, err
+}
+
 func (db *DB) UpsertFacilities(ctx context.Context, city domain.City, procedureID int, facilities []domain.Facility) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
@@ -1085,7 +1215,7 @@ type scanner interface {
 func scanUser(row scanner) (domain.User, error) {
 	var u domain.User
 	var preferredCityID sql.NullInt64
-	err := row.Scan(&u.ID, &u.TelegramUserID, &u.TelegramChatID, &u.Username, &u.DisplayName, &u.Locale, &preferredCityID, &u.PreferredCityName, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastSeenAt)
+	err := row.Scan(&u.ID, &u.TelegramUserID, &u.TelegramChatID, &u.Username, &u.DisplayName, &u.Locale, &preferredCityID, &u.PreferredCityName, &u.Status, &u.Role, &u.CreatedAt, &u.UpdatedAt, &u.LastSeenAt, &u.CredentialRevision, &u.CredentialSaveRevision)
 	if preferredCityID.Valid {
 		id := int(preferredCityID.Int64)
 		u.PreferredCityID = &id

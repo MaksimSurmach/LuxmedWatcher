@@ -17,6 +17,7 @@ import (
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
+	"github.com/maksimsurmach/luxmed-watcher/internal/security"
 )
 
 func TestInviteRedeemAndWatchHistory(t *testing.T) {
@@ -256,7 +257,7 @@ func TestDueHistoryAndAccount(t *testing.T) {
 		if len(due) != 0 {
 			t.Fatalf("watch unexpectedly due before its interval: %+v", due)
 		}
-		owners, err := db.ActiveWatchTelegramIDs(ctx)
+		owners, err := db.ActiveBrowserWatchTelegramIDs(ctx)
 		must(err)
 		if len(owners) != 1 || owners[0] != user.TelegramUserID {
 			t.Fatalf("active watch owners between searches = %v", owners)
@@ -341,7 +342,7 @@ func TestDueHistoryAndAccount(t *testing.T) {
 		if updated.Status != domain.WatchStatusPaused {
 			t.Fatalf("watch status after account deletion = %v", updated.Status)
 		}
-		owners, err = db.ActiveWatchTelegramIDs(ctx)
+		owners, err = db.ActiveBrowserWatchTelegramIDs(ctx)
 		must(err)
 		if len(owners) != 0 {
 			t.Fatalf("paused watch owners eligible for renewal = %v", owners)
@@ -692,6 +693,96 @@ func TestUpcomingHistoryPagesNearestFirst(t *testing.T) {
 		}
 		if want := []int{24, 48, 72, -2, -48}; !slices.Equal(got, want) {
 			t.Fatalf("hours from now across pages = %v, want %v", got, want)
+		}
+	})
+}
+
+func TestCredentialMigrationAndModeSwitch(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 123, Role: domain.UserRoleUser, Status: domain.UserStatusActive})
+		must(err)
+		key, err := security.NewCryptor(make([]byte, 32))
+		must(err)
+		password, err := key.Encrypt("old password")
+		must(err)
+		must(db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{UserID: user.ID, Login: "old login", EncryptedPassword: password}))
+		must(db.EncryptLegacyLogins(ctx, key))
+		must(db.EncryptLegacyLogins(ctx, key))
+		a, err := db.LoginAccount(ctx, user.ID, false)
+		must(err)
+		creds, err := key.OpenCredentials(user.ID, a.EncryptedPassword)
+		must(err)
+		if a.Login != "" || creds.Login != "old login" || creds.Password != "old password" {
+			t.Fatal("legacy account migration failed")
+		}
+		if _, err := db.LoginAccount(ctx, user.ID, true); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatal("legacy credentials enabled in Chrome mode")
+		}
+		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		must(err)
+		watchBeforeOpen, err := db.Watch(ctx, id)
+		must(err)
+		must(db.ConfirmBrowserLogin(ctx, user))
+		if err := db.ConfirmBrowserLogin(ctx, user); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("replayed Chrome choice reused the save revision: %v", err)
+		}
+		must(db.MarkWatchCheckedForMode(ctx, user, watchBeforeOpen, true, ""))
+		legacyAfterOpen, err := db.LuxMedAccount(ctx, user.ID)
+		must(err)
+		if legacyAfterOpen.EncryptedPassword != a.EncryptedPassword {
+			t.Fatal("opening Chrome modified migrated credentials")
+		}
+		if _, err := db.SaveCredentials(ctx, key, user, creds); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("late save after opening Chrome: %v", err)
+		}
+		user, err = db.UserByID(ctx, user.ID)
+		must(err)
+		_, err = db.SaveCredentials(ctx, key, user, creds)
+		must(err)
+		current, err := db.UserByID(ctx, user.ID)
+		must(err)
+		if err := db.ForgetCredentials(ctx, user); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("old revision could remove the saved credentials: %v", err)
+		}
+		if err := db.ConfirmBrowserLogin(ctx, current); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("browser link with a saved password: %v", err)
+		}
+		_, err = db.LoginAccount(ctx, user.ID, true)
+		must(err)
+		ids, err := db.ActiveBrowserWatchTelegramIDs(ctx)
+		must(err)
+		if len(ids) != 0 {
+			t.Fatal("password mode scheduled browser renewal")
+		}
+		choice := db.SelectBrowserLogin(user.TelegramUserID, "", current.CredentialRevisions(), true)
+		must(db.ChooseBrowserLogin(ctx, current, choice))
+		if _, err := db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("switching to Chrome did not delete the account: %v", err)
+		}
+		watch, err := db.Watch(ctx, id)
+		must(err)
+		if watch.Status != domain.WatchStatusActive {
+			t.Fatal("switching mode paused the watch")
+		}
+		if _, err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("late save after switching to Chrome: %v", err)
+		}
+		current, err = db.UserByID(ctx, user.ID)
+		must(err)
+		must(db.ConfirmBrowserLogin(ctx, current))
+		if _, err := db.SaveCredentials(ctx, key, current, creds); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("late save after choosing Chrome: %v", err)
+		}
+		ids, err = db.ActiveBrowserWatchTelegramIDs(ctx)
+		must(err)
+		if len(ids) != 1 || ids[0] != user.TelegramUserID {
+			t.Fatal("browser renewal did not resume")
 		}
 	})
 }
@@ -1134,4 +1225,326 @@ func TestWatchesAndReconnectStateStayConsistentDuringRecovery(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
+}
+
+func TestChromeSelectionRestoresMigratedLoginAfterOverlappingSave(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42, Status: domain.UserStatusActive})
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, err := security.NewCryptor(make([]byte, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		legacy := domain.LuxMedAccount{UserID: user.ID, EncryptedPassword: "migrated fixture"}
+		if err := db.UpsertLuxMedAccount(ctx, legacy); err != nil {
+			t.Fatal(err)
+		}
+		id, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		creds := security.Credentials{Login: "fixture", Password: "candidate"}
+		attempt, probe, err := beginCredentialAttempt(db, ctx, key, user, creds, "first")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer attempt.Finish()
+		if _, err := db.SaveCredentialAttempt(probe, attempt); err != nil {
+			t.Fatal(err)
+		}
+		current, err := db.UserByID(ctx, user.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ChooseBrowserLogin(ctx, current, db.SelectBrowserLogin(user.TelegramUserID, "other", user.CredentialRevisions(), false)); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("unrelated or stale tab undid the login: %v", err)
+		}
+		if err := db.ChooseBrowserLogin(ctx, current, db.SelectBrowserLogin(user.TelegramUserID, "first", user.CredentialRevisions(), false)); err != nil {
+			t.Fatal(err)
+		}
+		a, err := db.LuxMedAccount(ctx, user.ID)
+		if err != nil || a.UseSavedLogin || a.EncryptedPassword != legacy.EncryptedPassword {
+			t.Fatalf("migrated credentials not restored: mode=%v err=%v", a.UseSavedLogin, err)
+		}
+		if _, err := db.SaveCredentials(ctx, key, user, creds); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("old verification was allowed to save again: %v", err)
+		}
+		watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+		if err != nil || len(watches) != 1 || watches[0].ID != id ||
+			watches[0].Status != domain.WatchStatusActive || access.Status != LuxMedAccessPending {
+			t.Fatalf("Chrome switch lost search state: watches=%+v access=%+v err=%v", watches, access, err)
+		}
+	})
+}
+
+func TestCredentialTransitionsKeepModeAccessAndWatchesTogether(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42, Status: domain.UserStatusActive})
+		must(err)
+		_, err = db.CreateWatch(ctx, domain.Watch{UserID: user.ID, Status: domain.WatchStatusActive})
+		must(err)
+		key, err := security.NewCryptor(make([]byte, 32))
+		must(err)
+		creds := security.Credentials{Login: "fixture", Password: "synthetic"}
+		must(db.ResolveLuxMedReconnect(ctx, user.ID))
+
+		// Chrome accepts a cancellation while the verification is still outstanding.
+		pending, _, err := beginCredentialAttempt(db, ctx, key, user, creds, "pending")
+		must(err)
+		defer pending.Finish()
+		must(db.ChooseBrowserLogin(ctx, user, db.SelectBrowserLogin(user.TelegramUserID, "pending", user.CredentialRevisions(), false)))
+		if _, err := db.SaveCredentialAttempt(ctx, pending); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("late completion crossed a Chrome choice: %v", err)
+		}
+		user, err = db.UserByID(ctx, user.ID)
+		must(err)
+		_, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+		must(err)
+		if access.SavedLogin || access.HasCredentials || access.Status != LuxMedAccessConnected {
+			t.Fatalf("opening existing Chrome changed that mode: %+v", access)
+		}
+
+		// Two candidates can share a starting revision. Only the one that actually
+		// wrote the ciphertext may be rolled back by its matching Chrome click.
+		other, _, err := beginCredentialAttempt(db, ctx, key, user, creds, "other")
+		must(err)
+		other.Finish()
+		winner, probe, err := beginCredentialAttempt(db, ctx, key, user, creds, "winner")
+		must(err)
+		defer winner.Finish()
+		_, err = db.SaveCredentialAttempt(probe, winner)
+		must(err)
+		user, err = db.UserByID(ctx, user.ID)
+		must(err)
+		if err := db.ChooseBrowserLogin(ctx, user, db.SelectBrowserLogin(user.TelegramUserID, "other", user.CredentialRevisions(), false)); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("wrong candidate undid the current login: %v", err)
+		}
+		_, access, err = db.WatchesWithReconnectState(ctx, user.ID)
+		must(err)
+		if !access.SavedLogin || !access.HasCredentials || access.Status != LuxMedAccessPending {
+			t.Fatalf("new password mode did not require protected verification: %+v", access)
+		}
+		must(db.ResolveLuxMedReconnect(ctx, user.ID))
+		must(db.DeleteLuxMedAccount(ctx, user.ID))
+		watches, access, err := db.WatchesWithReconnectState(ctx, user.ID)
+		must(err)
+		if access.SavedLogin || access.HasCredentials || access.Status != LuxMedAccessUnchecked ||
+			len(watches) != 1 || watches[0].Status != domain.WatchStatusPaused {
+			t.Fatalf("logout returned stale mode, access or watches: %+v %+v", access, watches)
+		}
+		if _, err := db.SaveCredentialAttempt(ctx, winner); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("completed login was allowed to undo logout: %v", err)
+		}
+	})
+}
+
+func beginCredentialAttempt(
+	db *DB, ctx context.Context, key *security.Cryptor, user domain.User, creds security.Credentials, id string,
+) (*CredentialAttempt, context.Context, error) {
+	attempt, err := db.StartCredentialAttempt(ctx, user, id)
+	if err != nil {
+		return nil, ctx, err
+	}
+	if err := db.PrepareCredentialAttempt(attempt.Context(), key, user, creds, attempt); err != nil {
+		attempt.Finish()
+		return nil, ctx, err
+	}
+	return attempt, attempt.Context(), nil
+}
+
+func TestEarlierChromeChoiceCannotOverrideNewerPasswordIntent(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 42, Status: domain.UserStatusActive})
+		if err != nil {
+			t.Fatal(err)
+		}
+		key, err := security.NewCryptor(make([]byte, 32))
+		if err != nil {
+			t.Fatal(err)
+		}
+		creds := security.Credentials{Login: "fixture", Password: "synthetic"}
+		old, _, err := beginCredentialAttempt(db, ctx, key, user, creds, "old")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer old.Finish()
+		firstChoice := db.SelectBrowserLogin(user.TelegramUserID, "", user.CredentialRevisions(), false)
+		newer, probe, err := beginCredentialAttempt(db, ctx, key, user, creds, "new")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer newer.Finish()
+		for _, choice := range []*ChromeChoice{firstChoice, db.SelectBrowserLogin(user.TelegramUserID, "old", user.CredentialRevisions(), false)} {
+			if err := db.ChooseBrowserLogin(ctx, user, choice); !errors.Is(err, ErrCredentialsChanged) {
+				t.Fatalf("earlier Chrome intent overrode the later save: %v", err)
+			}
+		}
+		if _, err := db.SaveCredentialAttempt(probe, newer); err != nil {
+			t.Fatal(err)
+		}
+		newer.Finish()
+		current, err := db.UserByID(ctx, user.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := db.ChooseBrowserLogin(ctx, current, db.SelectBrowserLogin(user.TelegramUserID, "", user.CredentialRevisions(), false)); !errors.Is(err, ErrCredentialsChanged) {
+			t.Fatalf("stale third window could roll back a completed login: %v", err)
+		}
+	})
+}
+
+func TestExplicitChromeSwitchOrdersAgainstPasswordReplacement(t *testing.T) {
+	for _, scenario := range []string{"verifying", "linked commit", "unlinked commit", "different commit"} {
+		t.Run(scenario, func(t *testing.T) {
+			testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+				must := func(err error) {
+					t.Helper()
+					if err != nil {
+						t.Fatal(err)
+					}
+				}
+				owner, err := db.UpsertTelegramUser(ctx, domain.User{
+					TelegramUserID: 42, Status: domain.UserStatusActive, Role: domain.UserRoleUser,
+				})
+				must(err)
+				key, err := security.NewCryptor(make([]byte, 32))
+				must(err)
+				creds := security.Credentials{Login: "fixture", Password: "original"}
+				_, err = db.SaveCredentials(ctx, key, owner, creds)
+				must(err)
+				owner, err = db.UserByID(ctx, owner.ID)
+				must(err)
+				watchID, err := db.CreateWatch(ctx, domain.Watch{UserID: owner.ID, Status: domain.WatchStatusActive})
+				must(err)
+				creds.Password = "replacement"
+				attempt, probe, err := beginCredentialAttempt(db, ctx, key, owner, creds, "replacement")
+				must(err)
+				defer attempt.Finish()
+
+				switch scenario {
+				case "linked commit", "unlinked commit":
+					_, err := db.SaveCredentialAttempt(probe, attempt)
+					must(err)
+					attempt.Finish()
+				case "different commit":
+					_, err := db.SaveCredentials(ctx, key, owner, creds)
+					must(err)
+				}
+
+				current, err := db.UserByID(ctx, owner.ID)
+				must(err)
+				var id string
+				if scenario == "linked commit" || scenario == "different commit" {
+					id = "replacement"
+				}
+				choice := db.SelectBrowserLogin(owner.TelegramUserID, id, owner.CredentialRevisions(), true)
+				err = db.ChooseBrowserLogin(ctx, current, choice)
+				if scenario == "unlinked commit" || scenario == "different commit" {
+					if !errors.Is(err, ErrCredentialsChanged) {
+						t.Fatalf("switch affected a different ciphertext: %v", err)
+					}
+					_, err := db.LoginAccount(ctx, owner.ID, true)
+					must(err)
+					return
+				}
+				must(err)
+				if _, err := db.LuxMedAccount(ctx, owner.ID); !errors.Is(err, sql.ErrNoRows) {
+					t.Fatalf("switch retained a saved record: %v", err)
+				}
+				if _, err := db.SaveCredentialAttempt(ctx, attempt); !errors.Is(err, ErrCredentialsChanged) {
+					t.Fatalf("replacement changed Chrome after the switch: %v", err)
+				}
+				watch, err := db.Watch(ctx, watchID)
+				must(err)
+				if watch.Status != domain.WatchStatusActive {
+					t.Fatalf("switch changed the watch to %s", watch.Status)
+				}
+			})
+		})
+	}
+}
+
+func TestChromeChoiceCanCaptureReplacementWaitingForDatabase(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	db, err := Open(ctx, filepath.Join(t.TempDir(), "waiting.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	user, err := db.UpsertTelegramUser(ctx, domain.User{
+		TelegramUserID: 42, Status: domain.UserStatusActive, Role: domain.UserRoleUser,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key, err := security.NewCryptor(make([]byte, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds := security.Credentials{Login: "fixture", Password: "old"}
+	if _, err := db.SaveCredentials(ctx, key, user, creds); err != nil {
+		t.Fatal(err)
+	}
+	user, err = db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	creds.Password = "replacement"
+	attempt, _, err := beginCredentialAttempt(db, ctx, key, user, creds, "replacement")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer attempt.Finish()
+	conn, err := db.sql.Conn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	waitCount := db.sql.Stats().WaitCount
+	saved := make(chan error, 1)
+	go func() {
+		// Let the write win this ordering even after the click signals cancellation.
+		_, err := db.SaveCredentialAttempt(ctx, attempt)
+		attempt.Finish()
+		saved <- err
+	}()
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for db.sql.Stats().WaitCount == waitCount {
+		select {
+		case <-ticker.C:
+		case <-ctx.Done():
+			t.Fatal("replacement did not wait for the database")
+		}
+	}
+	choice := db.SelectBrowserLogin(user.TelegramUserID, "", user.CredentialRevisions(), true)
+	if !errors.Is(attempt.Context().Err(), context.Canceled) {
+		t.Fatal("Chrome did not cancel the attempt waiting for the database")
+	}
+	if err := conn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-saved; err != nil {
+		t.Fatal(err)
+	}
+	current, err := db.UserByID(ctx, user.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ChooseBrowserLogin(ctx, current, choice); err != nil {
+		t.Fatalf("Chrome did not replace the captured save: %v", err)
+	}
+	if _, err := db.LuxMedAccount(ctx, user.ID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("captured replacement survived the Chrome choice: %v", err)
+	}
 }
