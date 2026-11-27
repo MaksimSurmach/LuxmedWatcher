@@ -165,6 +165,54 @@ func TestRejectedCredentialsAreNotRetried(t *testing.T) {
 	}
 }
 
+func TestScheduledCheckRecoversOnlyRecognizableLegacyLoginOutages(t *testing.T) {
+	for _, tc := range []struct {
+		lastError string
+		wantRetry bool
+	}{
+		{"luxmed authentication failed: 503 Service Unavailable", true},
+		{`Post "https://portalpacjenta.luxmed.pl/PatientPortal/Account/LogIn": context deadline exceeded`, true},
+		{"luxmed_authentication", false},
+		{"luxmed authentication failed: 401 Unauthorized", false},
+		{"unrecognized upstream error", false},
+	} {
+		t.Run(tc.lastError, func(t *testing.T) {
+			ctx := t.Context()
+			runner, db, watch := testRunner(t, nil)
+			account, err := db.LuxMedAccount(ctx, watch.UserID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			account.Status, account.LastLoginError = domain.AccountStatusAuthFailed, tc.lastError
+			if err := db.UpsertLuxMedAccount(ctx, account); err != nil {
+				t.Fatal(err)
+			}
+			client := &fakeLuxMed{search: func(context.Context) ([]domain.Appointment, error) { return nil, nil }}
+			runner.newClient = func(bool) luxmed.Client { return client }
+
+			s := New(db, runner, time.Minute, time.Hour, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			var checks sync.WaitGroup
+			s.tick(ctx, &checks, make(chan struct{}, 1))
+			checks.Wait()
+			checked, err := db.Watch(ctx, watch.ID)
+			if err != nil || checked.LastCheckedAt == nil {
+				t.Fatalf("scheduled check did not run: %v", err)
+			}
+			account, err = db.LuxMedAccount(ctx, watch.UserID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantRetry {
+				if client.logins != 1 || account.Status != domain.AccountStatusActive || account.LastLoginError != "" {
+					t.Fatalf("temporary failure did not recover: logins=%d status=%s", client.logins, account.Status)
+				}
+			} else if client.logins != 0 || account.Status != domain.AccountStatusAuthFailed {
+				t.Fatalf("unconfirmed legacy failure retried: logins=%d status=%s", client.logins, account.Status)
+			}
+		})
+	}
+}
+
 func TestSundayFilterUsesWarsawTime(t *testing.T) {
 	slot := domain.Appointment{DateTime: time.Date(2026, 6, 6, 22, 30, 0, 0, time.UTC)}
 	window := []domain.TimeWindow{{Weekday: 7, From: "00:00", To: "01:00"}}

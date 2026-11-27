@@ -75,7 +75,7 @@
   "flow.account.login": "В этой установке данные входа проходят через Telegram. Отправьте логин LUX MED для проверки и сохранения логина и пароля в зашифрованном виде или нажмите /cancel.",
   "flow.account.delete_failed": "Вход остановлен. Telegram не удалил ваше сообщение. Удалите его в чате.",
   "flow.account.delete_failed_saved": "Реквизиты LUX MED уже сохранены. Telegram не удалил ваше сообщение. Удалите его в чате.",
-  "flow.account.password": "Отправьте пароль LUX MED.",
+  "flow.account.password": "Отправьте пароль LUX MED. Бот проверит его после удаления вашего сообщения.",
   "flow.account.removed": "Аккаунт LUX MED отключён. Поиски приостановлены.",
   "flow.account.canceled": "Вход отменён. Эта попытка не сохранила реквизиты.",
   "flow.account.retry_hint": "Нажмите кнопку, чтобы начать новый вход.",

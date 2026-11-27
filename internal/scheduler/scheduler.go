@@ -10,6 +10,7 @@ import (
 	"math/rand/v2"
 	"net/http"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -822,10 +823,29 @@ func retryWithAnotherFilter(err error) bool {
 	return errors.Is(err, luxmed.ErrResponse)
 }
 
+// Older versions stored raw login errors and marked even outages as auth_failed.
+// Retry only recognizable transient failures from the old login endpoint.
+func legacyTemporaryLoginFailure(message string) bool {
+	if status, ok := strings.CutPrefix(message, "luxmed authentication failed: "); ok {
+		switch status {
+		case "408 Request Timeout", "429 Too Many Requests", "500 Internal Server Error",
+			"502 Bad Gateway", "503 Service Unavailable", "504 Gateway Timeout":
+			return true
+		}
+	}
+	const postLogin = `Post "https://portalpacjenta.luxmed.pl/PatientPortal/Account/LogIn": `
+	detail, ok := strings.CutPrefix(message, postLogin)
+	return ok && (detail == "context deadline exceeded" ||
+		strings.HasSuffix(detail, "(Client.Timeout exceeded while awaiting headers)") ||
+		strings.HasSuffix(detail, ": i/o timeout") || strings.HasSuffix(detail, ": connect: connection refused"))
+}
+
 func (r *Runner) passwordClient(ctx context.Context, account domain.LuxMedAccount, state *accountCheck) (luxmed.Client, error) {
 	if account.Status == domain.AccountStatusAuthFailed {
 		state.client = nil
-		return nil, luxmed.ErrAuthentication
+		if !legacyTemporaryLoginFailure(account.LastLoginError) {
+			return nil, luxmed.ErrAuthentication
+		}
 	}
 	if state.client == nil || state.encryptedPassword != account.EncryptedPassword || time.Since(state.authenticatedAt) > 15*time.Minute {
 		state.client = nil

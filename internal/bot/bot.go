@@ -490,7 +490,6 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 		return
 	}
 	if !user.IsActive() && !strings.HasPrefix(data, "lang:") && data != "settings:language" && data != "cancel" {
-		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
 		return
 	}
 	if !allowsFlowCallback(b.getFlow(user.TelegramUserID), data) {
