@@ -5,6 +5,7 @@ import (
 	"html"
 	"strings"
 	"time"
+	_ "time/tzdata"
 	"unicode/utf8"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -14,6 +15,16 @@ import (
 const notificationBudget = 3900
 
 const appointmentTimeLayout = "2006-01-02 15:04"
+
+// warsaw is LuxMed's clock: slot times arrive in it, so stored UTC times are shown in it too.
+// The embedded tzdata keeps this working on the alpine runtime image, which ships no zoneinfo.
+var warsaw = func() *time.Location {
+	loc, err := time.LoadLocation("Europe/Warsaw")
+	if err != nil {
+		return time.UTC
+	}
+	return loc
+}()
 
 // translate is catalog.T bound to the reader's locale.
 type translate func(key string, args ...any) string

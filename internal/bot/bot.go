@@ -72,6 +72,7 @@ func (b *Bot) SetRunner(runner *scheduler.Runner) {
 }
 
 func (b *Bot) Run(ctx context.Context) error {
+	b.registerCommands()
 	updateConfig := tgbotapi.NewUpdate(0)
 	updateConfig.Timeout = b.cfg.PollTimeout
 	updates := b.api.GetUpdatesChan(updateConfig)
@@ -204,7 +205,9 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 		b.showWatches(ctx, user)
 	case "history":
 		b.showHistory(ctx, user)
-	case "settings", "language":
+	case "settings":
+		b.send(user, b.catalog.T(user.Locale, "settings.title"), settingsKeyboard(b.catalog, user.Locale))
+	case "language":
 		b.send(user, b.catalog.T(user.Locale, "flow.language.choose"), languageKeyboard())
 	case "help":
 		b.send(user, b.catalog.T(user.Locale, "help.text"), mainKeyboard(b.catalog, user.Locale))
@@ -561,7 +564,7 @@ func (b *Bot) handleTimeText(ctx context.Context, user domain.User, state *flow,
 
 func (b *Bot) finishTimeStep(ctx context.Context, user domain.User, state *flow) {
 	b.setFlow(user.ID, state)
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard(b.catalog, user.Locale))
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard(b.catalog, user.Locale, b.cfg.MinimumInterval))
 	_ = ctx
 }
 
@@ -1723,7 +1726,7 @@ func (b *Bot) sendWatchCard(ctx context.Context, user domain.User, watch domain.
 	count, _ := b.db.CountHistoryForWatch(ctx, watch.ID)
 	last := "-"
 	if watch.LastCheckedAt != nil {
-		last = watch.LastCheckedAt.Format(appointmentTimeLayout)
+		last = watch.LastCheckedAt.In(warsaw).Format(appointmentTimeLayout)
 	}
 	text := b.catalog.T(user.Locale, "watch.list.item", esc(watch.Name), watch.Status, last, count)
 	b.sendHTML(user, text, watchKeyboard(b.catalog, user.Locale, watch))
@@ -1747,7 +1750,9 @@ func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string
 	_ = b.db.SetUserActive(ctx, user.ID, domain.UserRoleUser)
 	b.clearFlow(user.ID)
 	user.Status = domain.UserStatusActive
-	b.send(user, b.catalog.T(user.Locale, "flow.invite.accepted"), mainKeyboard(b.catalog, user.Locale))
+	b.send(user, b.catalog.T(user.Locale, "flow.invite.accepted"), tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.account"), "account"),
+	)))
 }
 
 func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
@@ -1766,7 +1771,24 @@ func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
-	b.send(user, b.catalog.T(user.Locale, "admin.invite_code", code), nil)
+	b.send(user, b.catalog.T(user.Locale, "admin.invite_code", fmt.Sprintf("https://t.me/%s?start=%s", b.api.Self.UserName, code)), nil)
+}
+
+// registerCommands fills Telegram's / menu in each supported language.
+func (b *Bot) registerCommands() {
+	for _, locale := range []string{"en", "pl", "ru"} {
+		var commands []tgbotapi.BotCommand
+		for _, name := range []string{"new", "watches", "history", "settings", "help", "cancel"} {
+			commands = append(commands, tgbotapi.BotCommand{Command: name, Description: b.catalog.T(locale, "command."+name)})
+		}
+		language := locale
+		if locale == "en" {
+			language = "" // default for every language without its own list
+		}
+		if _, err := b.api.Request(tgbotapi.NewSetMyCommandsWithScopeAndLanguage(tgbotapi.NewBotCommandScopeDefault(), language, commands...)); err != nil {
+			b.logger.Warn("set bot commands failed", "locale", locale, "err", err)
+		}
+	}
 }
 
 func (b *Bot) tr(user domain.User) translate {

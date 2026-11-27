@@ -45,3 +45,24 @@ func TestAppointmentsHTMLEscapesAndFitsBudget(t *testing.T) {
 		t.Fatalf("expected overflow tail line")
 	}
 }
+
+// Interval buttons never offer less than the server minimum; it would be silently raised.
+func TestIntervalKeyboardRespectsMinimum(t *testing.T) {
+	cat, err := i18n.Load("en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	labels := func(min time.Duration) []string {
+		var out []string
+		for _, b := range intervalKeyboard(cat, "en", min).InlineKeyboard[0] {
+			out = append(out, b.Text)
+		}
+		return out
+	}
+	if got := strings.Join(labels(4*time.Minute), ","); got != "5 min,10 min" {
+		t.Fatalf("min 4m: got %s", got)
+	}
+	if got := strings.Join(labels(15*time.Minute), ","); got != "15 min" {
+		t.Fatalf("min 15m: got %s", got)
+	}
+}

@@ -2,6 +2,7 @@ package bot
 
 import (
 	"fmt"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -46,15 +47,19 @@ func cancelKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarku
 	)
 }
 
-func intervalKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
-	return tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.interval_minutes", 2), "interval:120"),
-			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.interval_minutes", 3), "interval:180"),
-			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.interval_minutes", 5), "interval:300"),
-			tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.interval_minutes", 10), "interval:600"),
-		),
-	)
+// intervalKeyboard offers only intervals the server will honour, so nothing is silently raised.
+func intervalKeyboard(c *i18n.Catalog, locale string, minimum time.Duration) tgbotapi.InlineKeyboardMarkup {
+	var row []tgbotapi.InlineKeyboardButton
+	for _, minutes := range []int{2, 3, 5, 10} {
+		if time.Duration(minutes)*time.Minute >= minimum {
+			row = append(row, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.interval_minutes", minutes), fmt.Sprintf("interval:%d", minutes*60)))
+		}
+	}
+	if len(row) == 0 {
+		minutes := int(minimum.Minutes())
+		row = append(row, tgbotapi.NewInlineKeyboardButtonData(c.T(locale, "button.interval_minutes", minutes), fmt.Sprintf("interval:%d", int(minimum.Seconds()))))
+	}
+	return tgbotapi.NewInlineKeyboardMarkup(row)
 }
 
 func timeWindowKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMarkup {
