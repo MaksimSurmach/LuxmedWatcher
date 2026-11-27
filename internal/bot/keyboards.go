@@ -30,16 +30,16 @@ func settingsKeyboard(c *i18n.Catalog, locale string) tgbotapi.InlineKeyboardMar
 	)
 }
 
-func languageKeyboard() tgbotapi.InlineKeyboardMarkup {
+func languageKeyboard(c *i18n.Catalog) tgbotapi.InlineKeyboardMarkup {
 	return tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Polski", "lang:pl"),
-			tgbotapi.NewInlineKeyboardButtonData("English", "lang:en"),
-			tgbotapi.NewInlineKeyboardButtonData("Русский", "lang:ru"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T("pl", "language.name"), "lang:pl"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T("en", "language.name"), "lang:en"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T("ru", "language.name"), "lang:ru"),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Беларуская", "lang:be"),
-			tgbotapi.NewInlineKeyboardButtonData("Українська", "lang:uk"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T("be", "language.name"), "lang:be"),
+			tgbotapi.NewInlineKeyboardButtonData(c.T("uk", "language.name"), "lang:uk"),
 		),
 	)
 }

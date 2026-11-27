@@ -1,4 +1,7 @@
 {
+  "language.name": "Беларуская",
+  "input.all": "усе",
+  "input.any": "любое",
   "button.chrome": "Увайсці праз Chrome",
   "button.chrome_switch": "Перайсці на Chrome і выдаліць даныя ўваходу",
   "button.saved_login": "Захаваць лагін і пароль",
