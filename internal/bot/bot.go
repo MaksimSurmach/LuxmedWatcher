@@ -293,7 +293,12 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	}
 	data := cb.Data
 	toast := ""
-	if strings.HasPrefix(data, "watch:check:") {
+	// Flow state lives in memory; after a restart or Cancel these buttons point at nothing.
+	expired := isFlowCallback(data) && b.getFlow(user.ID) == nil
+	switch {
+	case expired:
+		toast = b.catalog.T(user.Locale, "toast.expired")
+	case strings.HasPrefix(data, "watch:check:"):
 		toast = b.catalog.T(user.Locale, "toast.checking")
 	}
 	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, toast))
@@ -301,6 +306,14 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	// otherwise the account flow becomes a free LuxMed credential checker.
 	if !user.IsActive() && !strings.HasPrefix(data, "lang:") {
 		return
+	}
+	if expired {
+		b.showMenu(user)
+		return
+	}
+	if replacesMessage(data) {
+		// Paging and toggles redraw the whole list; drop the old copy instead of stacking them.
+		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(user.TelegramChatID, cb.Message.MessageID))
 	}
 	switch {
 	case strings.HasPrefix(data, "lang:"):
@@ -550,6 +563,25 @@ func (b *Bot) finishTimeStep(ctx context.Context, user domain.User, state *flow)
 	b.setFlow(user.ID, state)
 	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard(b.catalog, user.Locale))
 	_ = ctx
+}
+
+// isFlowCallback reports callbacks that only make sense inside a live watch-creation flow.
+func isFlowCallback(data string) bool {
+	for _, prefix := range []string{"city:", "proc", "fac", "time:", "interval:"} {
+		if strings.HasPrefix(data, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func replacesMessage(data string) bool {
+	for _, prefix := range []string{"facpage:", "facsel:", "facclear", "procletter:", "procsearchpage:", "city:page:", "prefcity:page:"} {
+		if strings.HasPrefix(data, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseTimeWindow(text string) (domain.TimeWindow, bool) {
@@ -1644,11 +1676,18 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	switch parts[1] {
 	case "pause":
 		_ = b.db.SetWatchStatus(ctx, id, domain.WatchStatusPaused)
-		b.send(user, b.catalog.T(user.Locale, "watch.paused"), mainKeyboard(b.catalog, user.Locale))
+		b.send(user, b.catalog.T(user.Locale, "watch.paused"), tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.resume"), fmt.Sprintf("watch:resume:%d", id)),
+		)))
 	case "resume":
 		_ = b.db.SetWatchStatus(ctx, id, domain.WatchStatusActive)
 		b.send(user, b.catalog.T(user.Locale, "watch.resumed"), mainKeyboard(b.catalog, user.Locale))
 	case "delete":
+		b.send(user, b.catalog.T(user.Locale, "watch.delete_confirm", watch.Name), tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.delete"), fmt.Sprintf("watch:deleteyes:%d", id)),
+			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.keep"), fmt.Sprintf("watch:show:%d", id)),
+		)))
+	case "deleteyes":
 		_ = b.db.SetWatchStatus(ctx, id, domain.WatchStatusDeleted)
 		b.send(user, b.catalog.T(user.Locale, "watch.deleted"), mainKeyboard(b.catalog, user.Locale))
 	case "check":

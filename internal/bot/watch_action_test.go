@@ -2,6 +2,8 @@ package bot
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"testing"
@@ -9,6 +11,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 	"github.com/maksimsurmach/luxmed-watcher/internal/storage"
 )
 
@@ -36,7 +39,7 @@ func TestWatchActionRejectsOtherUsersWatch(t *testing.T) {
 	}
 
 	b := &Bot{db: db}
-	for _, action := range []string{"pause", "delete", "resume", "show"} {
+	for _, action := range []string{"pause", "delete", "deleteyes", "resume", "show"} {
 		b.handleWatchAction(ctx, attacker, "watch:"+action+":"+strconv.FormatInt(id, 10))
 	}
 
@@ -69,5 +72,46 @@ func TestCallbackIgnoredBeforeInvite(t *testing.T) {
 
 	if state := b.getFlow(pending.ID); state != nil {
 		t.Fatalf("pending user entered flow %q", state.Kind)
+	}
+}
+
+// Delete asks first; only the confirmation button removes the watch.
+func TestDeleteNeedsConfirmation(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.Open(ctx, t.TempDir()+"/test.sqlite")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	cat, err := i18n.Load("en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 4, TelegramChatID: 4, Locale: "en", Status: domain.UserStatusActive, Role: domain.UserRoleUser})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := db.CreateWatch(ctx, domain.Watch{UserID: owner.ID, Name: "w", Status: domain.WatchStatusActive, CheckIntervalSeconds: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &tgbotapi.BotAPI{Client: http.DefaultClient}
+	api.SetAPIEndpoint("http://127.0.0.1:1/bot%s/%s")
+	b := &Bot{db: db, api: api, catalog: cat, logger: slog.New(slog.NewTextHandler(io.Discard, nil)), flowState: map[int64]*flow{}}
+	status := func() domain.WatchStatus {
+		w, err := db.Watch(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return w.Status
+	}
+
+	b.handleWatchAction(ctx, owner, "watch:delete:"+strconv.FormatInt(id, 10))
+	if got := status(); got != domain.WatchStatusActive {
+		t.Fatalf("delete without confirmation changed status to %q", got)
+	}
+	b.handleWatchAction(ctx, owner, "watch:deleteyes:"+strconv.FormatInt(id, 10))
+	if got := status(); got != domain.WatchStatusDeleted {
+		t.Fatalf("confirmed delete left status %q", got)
 	}
 }
