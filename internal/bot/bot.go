@@ -1288,7 +1288,7 @@ func (b *Bot) sendFacilityOptions(user domain.User, title string, facilities []d
 			label += ", " + facility.Address
 		}
 
-		lines = append(lines, fmt.Sprintf("%s %d. %s\n   ID: %d", prefix, i+1, label, facility.ID))
+		lines = append(lines, fmt.Sprintf("%s %d. %s", prefix, i+1, label))
 	}
 
 	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)
@@ -1562,7 +1562,7 @@ func (b *Bot) sendProcedureOptions(user domain.User, title string, items []domai
 	lines = append(lines, strings.TrimSpace(title))
 
 	for i, proc := range items {
-		lines = append(lines, fmt.Sprintf("%d. %s\n   ID: %d", i+1, proc.Name, proc.ID))
+		lines = append(lines, fmt.Sprintf("%d. %s", i+1, proc.Name))
 	}
 
 	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)
