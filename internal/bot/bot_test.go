@@ -1579,7 +1579,7 @@ func TestCredentialDeleteWarningFollowsInFlightLoginResult(t *testing.T) {
 				t.Fatal("login result did not start sending")
 			}
 			loginMessage(b, ctx, user, "repeated fixture", 1)
-			if current := b.getFlow(user.TelegramUserID); current == nil || !current.warningPending || sends.Load() != 1 {
+			if current := b.getFlow(user.TelegramUserID); current == nil || current.deleteWarning == nil || sends.Load() != 1 {
 				t.Fatal("deletion warning passed the earlier login result")
 			}
 			loginMessage(b, ctx, user, "another fixture", 2)
@@ -1698,5 +1698,73 @@ func TestCredentialDeleteWarningRetriesAfterStartingNewSearch(t *testing.T) {
 	if warnings.Load() != 2 || deletes.Load() != 1 || b.readyDeleteWarning(user.TelegramUserID) != nil ||
 		b.getFlow(user.TelegramUserID) != search {
 		t.Fatal("warning retry deleted ordinary text, changed the search, or remained queued after delivery")
+	}
+}
+
+func TestCredentialDeleteFailureDuringWarningNeedsAnotherWarning(t *testing.T) {
+	ctx := t.Context()
+	var deletes, warnings atomic.Int32
+	firstStarted := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	unblockFirst := sync.OnceFunc(func() { close(releaseFirst) })
+	unblockSecond := sync.OnceFunc(func() { close(releaseSecond) })
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/deleteMessage"):
+			if deletes.Add(1) <= 2 {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+		case strings.Contains(r.FormValue("text"), "Delete it in the chat"):
+			switch warnings.Add(1) {
+			case 1:
+				close(firstStarted)
+				<-releaseFirst
+			case 2:
+				close(secondStarted)
+				<-releaseSecond
+			}
+		}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+	})
+	defer func() {
+		unblockFirst()
+		unblockSecond()
+		b.workers.Wait()
+	}()
+	user := createUser(t, b, 42, domain.UserStatusActive)
+	started := make(chan context.Context, 1)
+	b.newClient = func(bool) luxmed.Client { return cancelableLoginClient{started: started} }
+	b.submitLogin(ctx, user, luxmed.Credentials{Login: "fixture", Password: "synthetic"})
+	await := func(signal <-chan struct{}, failure string) {
+		t.Helper()
+		select {
+		case <-signal:
+		case <-time.After(5 * time.Second):
+			t.Fatal(failure)
+		}
+	}
+	select {
+	case <-started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("verification did not start")
+	}
+	loginMessage(b, ctx, user, "first fixture", 1)
+	await(firstStarted, "first warning did not start")
+	loginMessage(b, ctx, user, "second fixture", 2)
+	unblockFirst()
+	await(secondStarted, "second deletion failure did not get a warning")
+
+	loginMessage(b, ctx, user, "third fixture", 3)
+	if deletes.Load() != 3 {
+		t.Fatal("password protection ended before the second warning was delivered")
+	}
+	unblockSecond()
+	b.workers.Wait()
+	loginMessage(b, ctx, user, "ordinary text", 4)
+	if deletes.Load() != 3 || warnings.Load() != 2 || b.getFlow(user.TelegramUserID) != nil {
+		t.Fatal("password protection did not end after both warnings were delivered")
 	}
 }

@@ -118,20 +118,38 @@ func (b *Bot) retryLoginNotice(telegramID int64, state *flow) {
 }
 
 type credentialDeleteWarning struct {
-	user    domain.User
-	flow    *flow
-	key     string // Set after the previous login replies finish, under flowMu.
-	sending bool   // Protected by flowMu.
+	user      domain.User
+	flow      *flow
+	key       string // Set after the previous login replies finish, under flowMu.
+	sending   bool   // Protected by flowMu.
+	failures  uint64 // Protected by flowMu.
+	delivered bool   // Protected by flowMu.
 }
 
 func (b *Bot) stopLoginAfterDeleteFailure(ctx context.Context, telegramID int64, previous *flow, locale string) {
-	if previous.warningPending {
+	if warning := previous.deleteWarning; warning != nil {
+		b.flowMu.Lock()
+		warning.failures++
+		requeue := warning.delivered
+		// The previous send can finish while Telegram is processing this deletion.
+		if requeue {
+			warning.delivered = false
+			b.deleteWarnings[telegramID] = append(b.deleteWarnings[telegramID], warning)
+			if b.credentialFlows[telegramID] == nil {
+				b.replaceCredentialFlowLocked(telegramID, previous)
+			}
+		}
+		b.flowMu.Unlock()
+		if requeue {
+			b.deliverDeleteWarnings(telegramID, warning)
+		}
 		return
 	}
-	state := &flow{Kind: flowAccountCheck, warningPending: true}
 	warning := &credentialDeleteWarning{
-		user: domain.User{TelegramChatID: telegramID, Locale: locale}, flow: state,
+		user: domain.User{TelegramChatID: telegramID, Locale: locale}, failures: 1,
 	}
+	state := &flow{Kind: flowAccountCheck, deleteWarning: warning}
+	warning.flow = state
 	verification := previous.verification
 	b.flowMu.Lock()
 	// Cancel before waiting for any already-started Telegram response.
@@ -195,7 +213,7 @@ func (b *Bot) deliverDeleteWarnings(telegramID int64, warning *credentialDeleteW
 			return
 		}
 		warning.sending = true
-		key := warning.key
+		key, covered := warning.key, warning.failures
 		b.flowMu.Unlock()
 
 		sent := b.send(warning.user, b.catalog.T(warning.user.Locale, key), nil)
@@ -206,6 +224,11 @@ func (b *Bot) deliverDeleteWarnings(telegramID int64, warning *credentialDeleteW
 			b.flowMu.Unlock()
 			return
 		}
+		if warning.failures != covered {
+			b.flowMu.Unlock()
+			continue
+		}
+		warning.delivered = true
 		queue = b.deleteWarnings[telegramID]
 		if b.credentialFlows[telegramID] == warning.flow {
 			b.replaceCredentialFlowLocked(telegramID, nil)

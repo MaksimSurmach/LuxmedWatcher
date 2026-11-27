@@ -152,7 +152,7 @@ function accountSection(compact = false) {
   </section>`;
 }
 
-async function signIn(revisions, attemptID) {
+async function signIn(revisions, attemptID, viewID) {
   const { url } = await api('connect', revisions, attemptID);
   let target;
   try {
@@ -163,15 +163,24 @@ async function signIn(revisions, attemptID) {
   if (target.origin !== location.origin || target.pathname !== '/') throw new DashboardError('error.link');
   target.searchParams.set('return', 'app');
   target.hash = location.hash;
+  if (viewID !== renderID) return false;
   location.assign(target.href);
+  return true;
 }
 
 function bindAccount() {
+  const viewID = renderID;
   const { SavedLogin, CredentialRevision, CredentialSaveRevision } = state;
   const revisions = { CredentialRevision, CredentialSaveRevision };
   async function refreshAccount(error) {
-    await switchTab(tab, { reload: true });
-    flash(errorText(error));
+    try {
+      await showAccountSnapshot(await api('load'));
+    } catch (refreshError) {
+      if (!error && viewID === renderID) throw refreshError;
+      flash(errorText(error ?? refreshError));
+      return;
+    }
+    if (error) flash(errorText(error));
   }
 
   async function refreshStaleAction(error) {
@@ -203,8 +212,9 @@ function bindAccount() {
 
   const failure = main.querySelector('[data-account-error]');
   const connect = main.querySelector('#connect');
-  if (connect) connect.onclick = () => void run(connect, () =>
-    chooseChrome((id) => signIn(revisions, id), displayedAttempt()), failure);
+  if (connect) connect.onclick = () => void run(connect, () => chooseChrome(async (id) => {
+    if (!await signIn(revisions, id, viewID)) await refreshAccount();
+  }, displayedAttempt()), failure);
 
   const form = main.querySelector('#credentials');
   form.onsubmit = (event) => {
@@ -225,7 +235,7 @@ function bindAccount() {
         } finally {
           form.elements.password.value = '';
         }
-        if (!attempt.choosingChrome) await switchTab(tab);
+        if (!attempt.choosingChrome) await refreshAccount();
       } catch (error) {
         if (!attempt.choosingChrome) await refreshStaleAction(error);
       } finally {
@@ -237,7 +247,7 @@ function bindAccount() {
   const forget = main.querySelector('#forget-credentials');
   if (forget) forget.onclick = () => void run(forget, () => chooseChrome(async (id) => {
     await api('forget-credentials', revisions, id);
-    await switchTab(tab);
+    await refreshAccount();
   }, SavedLogin ? displayedAttempt() : null), failure);
   const check = main.querySelector('#account-check');
   let refreshTimer;
@@ -249,6 +259,19 @@ function bindAccount() {
     latest.CredentialSaveRevision !== state.CredentialSaveRevision;
 
   async function showAccountSnapshot(latest) {
+    if (latest.CredentialRevision < state.CredentialRevision ||
+        latest.CredentialSaveRevision < state.CredentialSaveRevision) return;
+    if (viewID !== renderID) {
+      const {
+        SavedLogin, HasCredentials, CredentialRevision, CredentialSaveRevision,
+        AccountStatus, ReconnectRequired, ReconnectEpisodeID,
+      } = latest;
+      Object.assign(state, {
+        SavedLogin, HasCredentials, CredentialRevision, CredentialSaveRevision,
+        AccountStatus, ReconnectRequired, ReconnectEpisodeID,
+      });
+      return;
+    }
     const redraw = modeChanged(latest);
     applySnapshot(latest);
     if (tab === 'home' || tab === 'watches') {

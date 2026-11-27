@@ -83,7 +83,7 @@ type flow struct {
 	cancel               context.CancelFunc
 	verification         *loginVerification
 	notice               *loginNotice
-	warningPending       bool
+	deleteWarning        *credentialDeleteWarning
 	Login                string
 	CitySettings         bool
 	ProcedureSearchQuery string
