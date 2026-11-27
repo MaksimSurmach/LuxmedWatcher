@@ -63,6 +63,10 @@ func NewHTTPClient(rawPayloads bool) *HTTPClient {
 	}
 }
 
+// ErrAuthRejected means LuxMed refused the login and password, as opposed to a
+// network or server failure that is worth retrying.
+var ErrAuthRejected = errors.New("luxmed rejected credentials")
+
 func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error {
 	c.creds = creds
 	body, _ := json.Marshal(map[string]string{"login": creds.Login, "password": creds.Password})
@@ -91,7 +95,10 @@ func (c *HTTPClient) Authenticate(ctx context.Context, creds Credentials) error 
 		if result.ErrorMessage == "" {
 			result.ErrorMessage = resp.Status
 		}
-		return fmt.Errorf("luxmed authentication failed: %s", result.ErrorMessage)
+		if resp.StatusCode >= http.StatusInternalServerError {
+			return fmt.Errorf("luxmed authentication failed: %s", result.ErrorMessage)
+		}
+		return fmt.Errorf("%w: %s", ErrAuthRejected, result.ErrorMessage)
 	}
 	c.accessToken = result.Token
 	if token, err := c.fetchXSRFToken(ctx); err == nil {

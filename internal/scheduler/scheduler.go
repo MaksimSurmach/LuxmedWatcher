@@ -2,9 +2,11 @@ package scheduler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -15,6 +17,7 @@ import (
 
 type Notifier interface {
 	NotifyAppointments(ctx context.Context, user domain.User, watch domain.Watch, histories []domain.AppointmentHistory, totalFound int) (int, error)
+	NotifyAuthFailed(user domain.User)
 }
 
 type Runner struct {
@@ -40,14 +43,16 @@ func NewRunner(db *storage.DB, cryptor *security.Cryptor, notifier Notifier, coo
 }
 
 func (r *Runner) CheckWatch(ctx context.Context, watch domain.Watch) error {
-	user, err := r.db.UserByTelegramID(ctx, 0)
-	if err == nil {
-		_ = user
-	}
 	account, err := r.db.LuxMedAccount(ctx, watch.UserID)
 	if err != nil {
 		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, "luxmed account not configured")
 		return fmt.Errorf("load luxmed account: %w", err)
+	}
+	// Prefix check: older auth_failed rows may hold transient errors and deserve one more try.
+	if account.Status == domain.AccountStatusAuthFailed && strings.HasPrefix(account.LastLoginError, luxmed.ErrAuthRejected.Error()) {
+		// Retrying a rejected password every interval risks a LuxMed lockout; wait for the user to reconnect.
+		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, "luxmed login rejected, reconnect account")
+		return nil
 	}
 	password, err := r.cryptor.Decrypt(account.EncryptedPassword)
 	if err != nil {
@@ -56,9 +61,15 @@ func (r *Runner) CheckWatch(ctx context.Context, watch domain.Watch) error {
 	}
 	client := r.newClient(r.rawPayloads)
 	if err := client.Authenticate(ctx, luxmed.Credentials{Login: account.Login, Password: password}); err != nil {
-		account.Status = domain.AccountStatusAuthFailed
-		account.LastLoginError = err.Error()
-		_ = r.db.UpsertLuxMedAccount(ctx, account)
+		if errors.Is(err, luxmed.ErrAuthRejected) {
+			account.Status = domain.AccountStatusAuthFailed
+			account.LastLoginError = err.Error()
+			_ = r.db.UpsertLuxMedAccount(ctx, account)
+			// ponytail: concurrent checks of one user's watches can each alert once; dedupe if it shows up.
+			if user, userErr := r.userByID(ctx, watch.UserID); userErr == nil {
+				r.notifier.NotifyAuthFailed(user)
+			}
+		}
 		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, err.Error())
 		return err
 	}
@@ -76,7 +87,7 @@ func (r *Runner) CheckWatch(ctx context.Context, watch domain.Watch) error {
 
 	apps = filterAppointmentsByTimeWindows(apps, watch.TimeWindows)
 
-	user, err = r.userByID(ctx, watch.UserID)
+	user, err := r.userByID(ctx, watch.UserID)
 	if err != nil {
 		_ = r.db.MarkWatchChecked(ctx, watch.ID, false, err.Error())
 		return err

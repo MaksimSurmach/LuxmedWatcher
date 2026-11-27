@@ -31,7 +31,7 @@
   "errors.no_account": "Connect your LuxMed account first.",
   "errors.no_watches": "You do not have watches yet.",
   "flow.account.login": "Send your LuxMed login.",
-  "flow.account.password": "Send your LuxMed password.",
+  "flow.account.password": "Send your LuxMed password. It is stored encrypted, and I delete your message right away.",
   "flow.account.saved": "LuxMed account saved.",
   "flow.city_not_found": "No city found. Try another spelling.",
   "flow.city_results": "Choose a city from the search results.",

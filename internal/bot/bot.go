@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -119,6 +120,13 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	return sent.MessageID, err
 }
 
+// NotifyAuthFailed tells the user LuxMed rejected their saved login, with a way to fix it.
+func (b *Bot) NotifyAuthFailed(user domain.User) {
+	b.send(user, b.catalog.T(user.Locale, "errors.auth_failed"), tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.account"), "account")),
+	))
+}
+
 func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	if update.CallbackQuery != nil {
 		b.handleCallback(ctx, update.CallbackQuery)
@@ -135,6 +143,10 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	if update.Message.IsCommand() {
 		b.handleCommand(ctx, user, update.Message)
 		return
+	}
+	if state := b.getFlow(user.ID); state != nil && (state.Kind == flowAccountLogin || state.Kind == flowAccountPass) {
+		// Credentials must not stay in Telegram's chat history.
+		_, _ = b.api.Request(tgbotapi.NewDeleteMessage(update.Message.Chat.ID, update.Message.MessageID))
 	}
 	b.handleText(ctx, user, strings.TrimSpace(update.Message.Text))
 }
@@ -223,19 +235,31 @@ func (b *Bot) handleText(ctx context.Context, user domain.User, text string) {
 		state.Login = text
 		state.Kind = flowAccountPass
 		b.setFlow(user.ID, state)
-		b.send(user, b.catalog.T(user.Locale, "flow.account.password"), nil)
+		b.send(user, b.catalog.T(user.Locale, "flow.account.password"), cancelKeyboard(b.catalog, user.Locale))
 	case flowAccountPass:
+		authErr := luxmed.NewHTTPClient(false).Authenticate(ctx, luxmed.Credentials{Login: state.Login, Password: text})
+		if errors.Is(authErr, luxmed.ErrAuthRejected) {
+			state.Kind = flowAccountLogin
+			b.setFlow(user.ID, state)
+			b.send(user, b.catalog.T(user.Locale, "errors.auth_failed")+"\n\n"+b.catalog.T(user.Locale, "flow.account.login"), cancelKeyboard(b.catalog, user.Locale))
+			return
+		}
 		encrypted, err := b.cryptor.Encrypt(text)
 		if err != nil {
 			b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 			return
 		}
-		now := time.Now().UTC()
+		// A network failure here still saves: the scheduler re-checks the login on every run.
+		var lastLogin *time.Time
+		if authErr == nil {
+			now := time.Now().UTC()
+			lastLogin = &now
+		}
 		err = b.db.UpsertLuxMedAccount(ctx, domain.LuxMedAccount{
 			UserID:            user.ID,
 			Login:             state.Login,
 			EncryptedPassword: encrypted,
-			LastLoginAt:       &now,
+			LastLoginAt:       lastLogin,
 			Status:            domain.AccountStatusActive,
 		})
 		b.clearFlow(user.ID)

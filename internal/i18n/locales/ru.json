@@ -31,7 +31,7 @@
   "errors.no_account": "Сначала подключите аккаунт LuxMed.",
   "errors.no_watches": "У вас пока нет поисков.",
   "flow.account.login": "Отправьте логин LuxMed.",
-  "flow.account.password": "Отправьте пароль LuxMed.",
+  "flow.account.password": "Отправьте пароль LuxMed. Он хранится в зашифрованном виде, а ваше сообщение я сразу удалю.",
   "flow.account.saved": "Аккаунт LuxMed сохранен.",
   "flow.city_not_found": "Город не найден. Попробуйте другое написание.",
   "flow.city_results": "Выберите город из результатов поиска.",

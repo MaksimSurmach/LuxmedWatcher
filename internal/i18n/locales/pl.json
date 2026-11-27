@@ -31,7 +31,7 @@
   "errors.no_account": "Najpierw podłącz konto LuxMed.",
   "errors.no_watches": "Nie masz jeszcze obserwacji.",
   "flow.account.login": "Wyślij login LuxMed.",
-  "flow.account.password": "Wyślij hasło LuxMed.",
+  "flow.account.password": "Wyślij hasło LuxMed. Jest przechowywane w formie zaszyfrowanej, a Twoją wiadomość od razu usuwam.",
   "flow.account.saved": "Konto LuxMed zapisane.",
   "flow.city_not_found": "Nie znaleziono miasta. Spróbuj innej pisowni.",
   "flow.city_results": "Wybierz miasto z wyników wyszukiwania.",
