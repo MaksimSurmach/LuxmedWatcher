@@ -56,6 +56,7 @@ let tab = 'home';
 let flashTimer;
 let renderID = 0;
 let passwordSave = null;
+let mountedAccount;
 
 for (const target of document.querySelectorAll('[data-icon]')) target.innerHTML = icon(target.dataset.icon);
 
@@ -168,10 +169,37 @@ async function signIn(revisions, attemptID, viewID) {
   return true;
 }
 
+function accountModeChanged(latest, displayed) {
+  return latest.SavedLogin !== displayed.SavedLogin ||
+    latest.HasCredentials !== displayed.HasCredentials ||
+    latest.CredentialRevision !== displayed.CredentialRevision ||
+    latest.CredentialSaveRevision !== displayed.CredentialSaveRevision;
+}
+
+function refreshMountedAccount() {
+  if (!mountedAccount || mountedAccount.viewID !== renderID || !mountedAccount.section.isConnected) return;
+  const { section, displayed } = mountedAccount;
+  if (accountModeChanged(state, displayed)) {
+    section.outerHTML = accountSection(section.classList.contains('compact'));
+    bindAccount();
+    return;
+  }
+  const account = state.AccountStatus;
+  const connect = section.querySelector('#connect');
+  if (connect) connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
+  section.dataset.state = account;
+  const status = section.querySelector('.account-status');
+  status.dataset.state = account;
+  status.textContent = t(accountStatusKey(account));
+}
+
 function bindAccount() {
   const viewID = renderID;
-  const { SavedLogin, CredentialRevision, CredentialSaveRevision } = state;
+  const section = main.querySelector('.account');
+  const { SavedLogin, HasCredentials, CredentialRevision, CredentialSaveRevision } = state;
   const revisions = { CredentialRevision, CredentialSaveRevision };
+  const displayed = { SavedLogin, HasCredentials, ...revisions };
+  mountedAccount = { viewID, section, displayed };
   async function refreshAccount(error) {
     try {
       await showAccountSnapshot(await api('load'));
@@ -210,13 +238,13 @@ function bindAccount() {
     }
   }
 
-  const failure = main.querySelector('[data-account-error]');
-  const connect = main.querySelector('#connect');
+  const failure = section.querySelector('[data-account-error]');
+  const connect = section.querySelector('#connect');
   if (connect) connect.onclick = () => void run(connect, () => chooseChrome(async (id) => {
     if (!await signIn(revisions, id, viewID)) await refreshAccount();
   }, displayedAttempt()), failure);
 
-  const form = main.querySelector('#credentials');
+  const form = section.querySelector('#credentials');
   form.onsubmit = (event) => {
     event.preventDefault();
     if (passwordSave?.saving || passwordSave?.choosingChrome) return;
@@ -244,19 +272,14 @@ function bindAccount() {
       }
     }, failure);
   };
-  const forget = main.querySelector('#forget-credentials');
+  const forget = section.querySelector('#forget-credentials');
   if (forget) forget.onclick = () => void run(forget, () => chooseChrome(async (id) => {
     await api('forget-credentials', revisions, id);
     await refreshAccount();
   }, SavedLogin ? displayedAttempt() : null), failure);
-  const check = main.querySelector('#account-check');
+  const check = section.querySelector('#account-check');
   let refreshTimer;
   let manualCheck = 0;
-
-  const modeChanged = (latest) => latest.SavedLogin !== state.SavedLogin ||
-    latest.HasCredentials !== state.HasCredentials ||
-    latest.CredentialRevision !== state.CredentialRevision ||
-    latest.CredentialSaveRevision !== state.CredentialSaveRevision;
 
   async function showAccountSnapshot(latest) {
     if (latest.CredentialRevision < state.CredentialRevision ||
@@ -270,25 +293,15 @@ function bindAccount() {
         SavedLogin, HasCredentials, CredentialRevision, CredentialSaveRevision,
         AccountStatus, ReconnectRequired, ReconnectEpisodeID,
       });
+      refreshMountedAccount();
       return;
     }
-    const redraw = modeChanged(latest);
     applySnapshot(latest);
     if (tab === 'home' || tab === 'watches') {
       await switchTab(tab, { reload: false });
       return;
     }
-    if (redraw) {
-      main.querySelector('.account').outerHTML = accountSection();
-      bindAccount();
-      return;
-    }
-    const account = state.AccountStatus;
-    if (connect) connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
-    main.querySelector('.account').dataset.state = account;
-    const status = main.querySelector('.account-status');
-    status.dataset.state = account;
-    status.textContent = t(accountStatusKey(account));
+    refreshMountedAccount();
   }
 
   function scheduleRefresh() {
@@ -304,7 +317,7 @@ function bindAccount() {
       try {
         const latest = await api('load');
         if (check.isConnected && revision === manualCheck &&
-            (latest.AccountStatus !== state.AccountStatus || modeChanged(latest))) {
+            (latest.AccountStatus !== state.AccountStatus || accountModeChanged(latest, displayed))) {
           await showAccountSnapshot(latest);
         }
       } catch (error) {
