@@ -83,8 +83,10 @@
   "notification.watch": "Поиск: %s",
   "settings.city_saved": "Город сохранен: %s.",
   "settings.title": "Настройки",
+  "toast.checking": "Проверяю. Если появятся новые записи, пришлю сообщение.",
   "watch.deleted": "Поиск удален.",
   "watch.list.item": "<b>%s</b>\nСтатус: %s\nПоследняя проверка: %s\nНайдено: %d",
   "watch.paused": "Поиск поставлен на паузу.",
-  "watch.resumed": "Поиск возобновлен."
+  "watch.resumed": "Поиск возобновлен.",
+  "weekdays.short": "Вс,Пн,Вт,Ср,Чт,Пт,Сб"
 }

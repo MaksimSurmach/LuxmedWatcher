@@ -83,8 +83,10 @@
   "notification.watch": "Obserwacja: %s",
   "settings.city_saved": "Miasto zapisane: %s.",
   "settings.title": "Ustawienia",
+  "toast.checking": "Sprawdzam. Dostaniesz wiadomość, jeśli pojawią się nowe terminy.",
   "watch.deleted": "Obserwacja usunięta.",
   "watch.list.item": "<b>%s</b>\nStatus: %s\nOstatnie sprawdzenie: %s\nZnaleziono: %d",
   "watch.paused": "Obserwacja wstrzymana.",
-  "watch.resumed": "Obserwacja wznowiona."
+  "watch.resumed": "Obserwacja wznowiona.",
+  "weekdays.short": "Nd,Pn,Wt,Śr,Cz,Pt,Sb"
 }

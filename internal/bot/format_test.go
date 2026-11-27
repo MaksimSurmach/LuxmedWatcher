@@ -32,7 +32,7 @@ func TestAppointmentsHTMLEscapesAndFitsBudget(t *testing.T) {
 	if strings.Contains(got, "<Jan>") || strings.Contains(got, "a<b") {
 		t.Fatalf("raw data not escaped:\n%s", got)
 	}
-	if !strings.Contains(got, "<b>1. 2026-12-03 09:30</b>") {
+	if !strings.Contains(got, "<b>1. Thu 03.12 09:30</b>") {
 		t.Fatalf("missing bold time line:\n%s", got)
 	}
 	if n := utf8.RuneCountInString(got); n > 4096 {

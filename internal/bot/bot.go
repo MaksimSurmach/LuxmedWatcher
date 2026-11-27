@@ -103,7 +103,7 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		totalFound = shown
 	}
 
-	messageText := appointmentsHTML(func(key string, args ...any) string { return b.catalog.T(user.Locale, key, args...) }, watch, histories, totalFound)
+	messageText := appointmentsHTML(b.tr(user), watch, histories, totalFound)
 
 	first := histories[0]
 	msg := tgbotapi.NewMessage(user.TelegramChatID, messageText)
@@ -292,7 +292,11 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		return
 	}
 	data := cb.Data
-	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
+	toast := ""
+	if strings.HasPrefix(data, "watch:check:") {
+		toast = b.catalog.T(user.Locale, "toast.checking")
+	}
+	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, toast))
 	// Callback data is client-controlled: until invited, only language choice is allowed,
 	// otherwise the account flow becomes a free LuxMed credential checker.
 	if !user.IsActive() && !strings.HasPrefix(data, "lang:") {
@@ -1692,7 +1696,7 @@ func (b *Bot) showHistory(ctx context.Context, user domain.User) {
 		b.send(user, b.catalog.T(user.Locale, "history.empty"), mainKeyboard(b.catalog, user.Locale))
 		return
 	}
-	b.sendHTML(user, historyHTML(items), mainKeyboard(b.catalog, user.Locale))
+	b.sendHTML(user, historyHTML(b.tr(user), items), mainKeyboard(b.catalog, user.Locale))
 }
 
 func (b *Bot) tryRedeemInvite(ctx context.Context, user domain.User, code string) {
@@ -1724,6 +1728,10 @@ func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
 		return
 	}
 	b.send(user, b.catalog.T(user.Locale, "admin.invite_code", code), nil)
+}
+
+func (b *Bot) tr(user domain.User) translate {
+	return func(key string, args ...any) string { return b.catalog.T(user.Locale, key, args...) }
 }
 
 func (b *Bot) send(user domain.User, text string, markup any) {

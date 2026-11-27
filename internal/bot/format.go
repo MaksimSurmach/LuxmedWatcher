@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"html"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
@@ -14,19 +15,35 @@ const notificationBudget = 3900
 
 const appointmentTimeLayout = "2006-01-02 15:04"
 
+// translate is catalog.T bound to the reader's locale.
+type translate func(key string, args ...any) string
+
 // esc makes user and LuxMed data safe inside Telegram HTML.
 var esc = html.EscapeString
 
+// slotTime renders "Pt 12.12 14:30": people plan by weekday, and slots are at most weeks away.
+func slotTime(t translate, when time.Time) string {
+	days := strings.Split(t("weekdays.short"), ",")
+	if len(days) != 7 {
+		return when.Format("02.01 15:04")
+	}
+	return days[when.Weekday()] + " " + when.Format("02.01 15:04")
+}
+
 // appointmentHTML is the one shape every appointment takes: the time leads in bold
 // because it is what the reader scans for, the service trails as quiet metadata.
-func appointmentHTML(prefix string, h domain.AppointmentHistory) string {
+func appointmentHTML(t translate, prefix string, h domain.AppointmentHistory) string {
+	place := esc(h.FacilityName)
+	if h.Address != "" {
+		place += ", " + esc(h.Address)
+	}
 	return fmt.Sprintf("<b>%s%s</b>\n%s\n%s\n<i>%s</i>",
-		prefix, h.DateTime.Format(appointmentTimeLayout), esc(h.DoctorName), esc(h.FacilityName), esc(h.ServiceName))
+		prefix, slotTime(t, h.DateTime), esc(h.DoctorName), place, esc(h.ServiceName))
 }
 
 // appointmentsHTML renders the found-appointments notification. Items that would
 // overflow the budget are dropped whole, so a cut never lands inside a tag.
-func appointmentsHTML(t func(key string, args ...any) string, watch domain.Watch, histories []domain.AppointmentHistory, totalFound int) string {
+func appointmentsHTML(t translate, watch domain.Watch, histories []domain.AppointmentHistory, totalFound int) string {
 	var text strings.Builder
 	fmt.Fprintf(&text, "<b>%s</b>\n\n", esc(t("notification.appointment_found.title")))
 	text.WriteString(t("notification.count", totalFound) + "\n")
@@ -37,7 +54,7 @@ func appointmentsHTML(t func(key string, args ...any) string, watch domain.Watch
 	}
 	shown := 0
 	for i, h := range histories {
-		item := "\n\n" + appointmentHTML(fmt.Sprintf("%d. ", i+1), h)
+		item := "\n\n" + appointmentHTML(t, fmt.Sprintf("%d. ", i+1), h)
 		if utf8.RuneCountInString(text.String())+utf8.RuneCountInString(item) > notificationBudget {
 			break
 		}
@@ -50,10 +67,10 @@ func appointmentsHTML(t func(key string, args ...any) string, watch domain.Watch
 	return text.String()
 }
 
-func historyHTML(items []domain.AppointmentHistory) string {
+func historyHTML(t translate, items []domain.AppointmentHistory) string {
 	lines := make([]string, 0, len(items))
 	for _, h := range items {
-		lines = append(lines, appointmentHTML("", h))
+		lines = append(lines, appointmentHTML(t, "", h))
 	}
 	return strings.Join(lines, "\n\n")
 }

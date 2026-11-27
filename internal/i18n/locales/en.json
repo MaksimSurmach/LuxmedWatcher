@@ -83,8 +83,10 @@
   "notification.watch": "Watch: %s",
   "settings.city_saved": "City saved: %s.",
   "settings.title": "Settings",
+  "toast.checking": "Checking now. You'll get a message if new slots appear.",
   "watch.deleted": "Watch deleted.",
   "watch.list.item": "<b>%s</b>\nStatus: %s\nLast check: %s\nFound: %d",
   "watch.paused": "Watch paused.",
-  "watch.resumed": "Watch resumed."
+  "watch.resumed": "Watch resumed.",
+  "weekdays.short": "Sun,Mon,Tue,Wed,Thu,Fri,Sat"
 }
