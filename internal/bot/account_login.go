@@ -101,10 +101,17 @@ type loginNotice struct {
 func (b *Bot) deliverLoginNotice(notice *loginNotice) *flow {
 	user := notice.user
 	markup := mainKeyboard(b.catalog, user.Locale)
-	if notice.retry != nil {
+	message := b.catalog.T(user.Locale, notice.key)
+	if notice.retry != nil && notice.retry.Kind == flowAccountRetry {
+		button := tgbotapi.NewInlineKeyboardButtonData(
+			b.catalog.T(user.Locale, "button.try_again"), "login:retry:"+notice.retry.retryToken,
+		)
+		markup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(button))
+		message += "\n\n" + b.catalog.T(user.Locale, "flow.account.retry_hint")
+	} else if notice.retry != nil {
 		markup = cancelKeyboard(b.catalog, user.Locale)
 	}
-	if b.send(user, b.catalog.T(user.Locale, notice.key), markup) {
+	if b.send(user, message, markup) {
 		return notice.retry
 	}
 	return &flow{Kind: flowAccountCheck, notice: notice}
@@ -114,6 +121,37 @@ func (b *Bot) retryLoginNotice(telegramID int64, state *flow) {
 	if state.notice != nil && b.getFlow(telegramID) == state {
 		next := b.deliverLoginNotice(state.notice)
 		b.finishLogin(telegramID, state, next, false)
+	}
+}
+
+func (b *Bot) retryCredentialLogin(user domain.User, token string) {
+	telegramID := user.TelegramUserID
+	b.flowMu.Lock()
+	current := b.credentialFlows[telegramID]
+	var retry *flow
+	if current != nil {
+		switch {
+		case current.Kind == flowAccountRetry:
+			retry = current
+		case current.verification != nil && current.verification.cancelDone == nil:
+			retry = current.verification.retry
+		case current.notice != nil:
+			retry = current.notice.retry
+		}
+	}
+	if retry == nil || retry.Kind != flowAccountRetry || retry.retryToken != token ||
+		retry.retryRevisions != user.CredentialRevisions() {
+		b.flowMu.Unlock()
+		b.send(user, b.catalog.T(user.Locale, "flow.account.retry_expired"), nil)
+		return
+	}
+	next := &flow{Kind: flowAccountLogin}
+	b.replaceCredentialFlowLocked(telegramID, next)
+	b.flowMu.Unlock()
+
+	result := b.deliverLoginNotice(&loginNotice{user: user, key: "flow.account.login", retry: next})
+	if result != next {
+		b.finishLogin(telegramID, next, result, false)
 	}
 }
 
@@ -250,6 +288,7 @@ type loginVerification struct {
 	done       chan struct{}
 	err        error         // Published by closing done.
 	cancelDone chan struct{} // Protected by flowMu.
+	retry      *flow
 }
 
 func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed.Credentials) {
@@ -264,7 +303,10 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 		b.send(user, b.catalog.T(user.Locale, key), cancelKeyboard(b.catalog, user.Locale))
 		return
 	}
-	verification := &loginVerification{user: user, done: make(chan struct{})}
+	verification := &loginVerification{
+		user: user, done: make(chan struct{}),
+		retry: &flow{Kind: flowAccountRetry, retryToken: randomCode(), retryRevisions: user.CredentialRevisions()},
+	}
 	pending := &flow{Kind: flowAccountCheck, cancel: cancel, verification: verification}
 	b.setFlow(user.TelegramUserID, pending)
 	b.workers.Go(func() {
@@ -294,7 +336,7 @@ func (b *Bot) submitLogin(parent context.Context, user domain.User, creds luxmed
 				key = "watch.browser_busy"
 			}
 			retry = b.deliverLoginNotice(&loginNotice{
-				user: user, key: key, retry: &flow{Kind: flowAccountPass, Login: creds.Login},
+				user: user, key: key, retry: verification.retry,
 			})
 			return
 		}

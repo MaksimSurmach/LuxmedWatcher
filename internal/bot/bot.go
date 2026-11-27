@@ -64,6 +64,7 @@ const (
 	flowAccountLogin  flowKind = "account_login"
 	flowAccountPass   flowKind = "account_pass"
 	flowAccountCheck  flowKind = "account_verifying"
+	flowAccountRetry  flowKind = "account_retry"
 	flowWatchCity     flowKind = "watch_city"
 	flowCitySearch    flowKind = "city_search"
 	flowWatchService  flowKind = "watch_service"
@@ -83,6 +84,8 @@ type flow struct {
 	cancel               context.CancelFunc
 	verification         *loginVerification
 	notice               *loginNotice
+	retryToken           string
+	retryRevisions       domain.CredentialRevisions
 	deleteWarning        *credentialDeleteWarning
 	Login                string
 	CitySettings         bool
@@ -517,6 +520,8 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 		b.showStart(ctx, user, false)
 	case data == "account":
 		b.showConnect(ctx, user)
+	case strings.HasPrefix(data, "login:retry:"):
+		b.retryCredentialLogin(user, strings.TrimPrefix(data, "login:retry:"))
 	case data == "connect:password":
 		if b.cfg.MiniApp != nil {
 			b.clearCredentialFlow(user.TelegramUserID)
@@ -1837,7 +1842,7 @@ func (b *Bot) setFlow(telegramID int64, state *flow) {
 	defer b.flowMu.Unlock()
 	if state != nil {
 		switch state.Kind {
-		case flowAccountLogin, flowAccountPass, flowAccountCheck:
+		case flowAccountLogin, flowAccountPass, flowAccountCheck, flowAccountRetry:
 			b.replaceCredentialFlowLocked(telegramID, state)
 			return
 		}
@@ -1853,7 +1858,7 @@ func (b *Bot) setFlow(telegramID int64, state *flow) {
 func (b *Bot) getFlow(telegramID int64) *flow {
 	b.flowMu.Lock()
 	defer b.flowMu.Unlock()
-	if state := b.credentialFlows[telegramID]; state != nil {
+	if state := b.credentialFlows[telegramID]; state != nil && state.Kind != flowAccountRetry {
 		return state
 	}
 	return b.flowState[telegramID]

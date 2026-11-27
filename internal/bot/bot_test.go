@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -190,8 +191,14 @@ func TestPasswordLoginDuringCooldownSavesCredentialsAndQueuesOnlyActiveSearches(
 	if required, err := b.db.LuxMedReconnectRequired(ctx, user.ID); err != nil || !required {
 		t.Fatalf("failed login closed reconnect episode: required=%v, err=%v", required, err)
 	}
+	retry := b.credentialFlows[user.TelegramUserID]
+	if retry == nil || retry.Kind != flowAccountRetry {
+		t.Fatal("failed login did not offer a retry")
+	}
 	b.newClient = func(bool) luxmed.Client { return authClient{} }
-	b.handleText(ctx, user, "example password")
+	b.handleAction(ctx, user.TelegramUserID, "login:retry:"+retry.retryToken, nil)
+	loginMessage(b, ctx, user, "example", 1)
+	loginMessage(b, ctx, user, "example password", 2)
 	b.workers.Wait()
 	account, err := b.db.LuxMedAccount(ctx, user.ID)
 	if err != nil || account.Status != domain.AccountStatusActive || account.EncryptedPassword == "example password" {
@@ -1309,13 +1316,23 @@ func TestTelegramLoginKeepsScrubbingUntilResultDelivery(t *testing.T) {
 					t.Fatal("failed delivery did not keep sensitive input protected")
 				}
 				loginMessage(b, ctx, user, "second fixture", 3)
-				if deleted.Load() != 2 || b.getFlow(user.TelegramUserID) != pending.notice.retry {
-					t.Fatal("repeated password was not scrubbed or notice retry did not restore the right flow")
+				if deleted.Load() != 2 || b.getFlow(user.TelegramUserID) != nil {
+					t.Fatal("repeated password was not scrubbed or notice retry left credential input active")
 				}
-				if outcome != "authentication notice failure" {
-					loginMessage(b, ctx, user, "ordinary message", 4)
-					if deleted.Load() != 2 {
-						t.Fatal("delivered notice kept intercepting ordinary messages")
+				loginMessage(b, ctx, user, "ordinary message", 4)
+				if deleted.Load() != 2 {
+					t.Fatal("delivered notice kept intercepting ordinary messages")
+				}
+				if outcome == "authentication notice failure" {
+					action := "login:retry:" + pending.notice.retry.retryToken
+					b.handleAction(ctx, user.TelegramUserID, action, nil)
+					restarted := b.getFlow(user.TelegramUserID)
+					if restarted == nil || restarted.Kind != flowAccountLogin {
+						t.Fatal("valid retry did not start fresh credential input")
+					}
+					b.handleAction(ctx, user.TelegramUserID, action, nil)
+					if b.getFlow(user.TelegramUserID) != restarted {
+						t.Fatal("replayed retry replaced the new login flow")
 					}
 				}
 			case "restart after failed notice":
@@ -1766,5 +1783,96 @@ func TestCredentialDeleteFailureDuringWarningNeedsAnotherWarning(t *testing.T) {
 	loginMessage(b, ctx, user, "ordinary text", 4)
 	if deletes.Load() != 3 || warnings.Load() != 2 || b.getFlow(user.TelegramUserID) != nil {
 		t.Fatal("password protection did not end after both warnings were delivered")
+	}
+}
+
+func TestDelayedLoginRetryCannotReopenAfterLeaving(t *testing.T) {
+	for _, transition := range []string{"/connect", "/logout_luxmed", "new", "Chrome callback", "Chrome widget", "Mini App save"} {
+		t.Run(transition, func(t *testing.T) {
+			ctx := t.Context()
+			viewer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/viewer" {
+					t.Errorf("unexpected browser request: %s", r.URL.Path)
+				}
+				fmt.Fprintf(w, `{"ticket":%q}`, strings.Repeat("a", 64))
+			}))
+			t.Cleanup(viewer.Close)
+			sending := make(chan string, 1)
+			release := make(chan struct{})
+			unblock := sync.OnceFunc(func() { close(release) })
+			b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+				if strings.Contains(r.FormValue("text"), "Login failed") {
+					var markup tgbotapi.InlineKeyboardMarkup
+					if err := json.Unmarshal([]byte(r.FormValue("reply_markup")), &markup); err != nil ||
+						len(markup.InlineKeyboard) == 0 || len(markup.InlineKeyboard[0]) == 0 {
+						t.Error("login failure did not offer an explicit retry")
+					} else if action := markup.InlineKeyboard[0][0].CallbackData; action != nil {
+						sending <- *action
+					}
+					<-release
+				}
+				fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
+			})
+			defer func() {
+				unblock()
+				b.workers.Wait()
+			}()
+			user := createUser(t, b, 42, domain.UserStatusActive)
+			browser, err := luxmed.NewBrowser(viewer.URL, "http://localhost:18769")
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.cfg.Browsers = map[int64]*luxmed.Browser{user.TelegramUserID: browser}
+			if err := b.db.UpsertCities(ctx, []domain.City{{ID: 7, Name: "Fixture"}}); err != nil {
+				t.Fatal(err)
+			}
+			creds := luxmed.Credentials{Login: "fixture", Password: "synthetic"}
+			if _, err := b.db.SaveCredentials(ctx, b.cryptor, user, creds); err != nil {
+				t.Fatal(err)
+			}
+			user, err = b.db.UserByID(ctx, user.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.newClient = func(bool) luxmed.Client { return authClient{err: luxmed.ErrAuthentication} }
+			b.submitLogin(ctx, user, creds)
+			var retry string
+			select {
+			case retry = <-sending:
+			case <-time.After(5 * time.Second):
+				t.Fatal("login failure response did not start")
+			}
+			from := &tgbotapi.User{ID: user.TelegramUserID}
+			chat := &tgbotapi.Chat{ID: user.TelegramChatID, Type: "private"}
+			switch transition {
+			case "/connect", "/logout_luxmed":
+				loginMessage(b, ctx, user, transition, 1)
+			case "new":
+				b.handleAction(ctx, user.TelegramUserID, "new", nil)
+			case "Chrome callback":
+				b.handleCallback(ctx, &tgbotapi.CallbackQuery{
+					ID: "chrome", Data: credentialAction("switch", user.CredentialRevisions()), From: from,
+					Message: &tgbotapi.Message{MessageID: 1, Chat: chat},
+				})
+			case "Chrome widget":
+				query := &widgetQuery{
+					ID: "chrome", MessageID: 1, Data: credentialAction("switch", user.CredentialRevisions()),
+					From: from, Chat: chat,
+				}
+				query.Type.Type = "data"
+				b.handleWidgetQuery(ctx, query)
+			case "Mini App save":
+				if _, err := b.db.SaveCredentials(ctx, b.cryptor, user, creds); err != nil {
+					t.Fatal(err)
+				}
+			}
+			unblock()
+			b.workers.Wait()
+			current := b.getFlow(user.TelegramUserID)
+			b.handleAction(ctx, user.TelegramUserID, retry, nil)
+			if observed := b.getFlow(user.TelegramUserID); observed != current || observed.receivesCredential("") {
+				t.Fatal("a delayed retry restarted password collection")
+			}
+		})
 	}
 }
