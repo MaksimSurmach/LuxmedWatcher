@@ -26,14 +26,14 @@ func appointmentHTML(prefix string, h domain.AppointmentHistory) string {
 
 // appointmentsHTML renders the found-appointments notification. Items that would
 // overflow the budget are dropped whole, so a cut never lands inside a tag.
-func appointmentsHTML(title string, watch domain.Watch, histories []domain.AppointmentHistory, totalFound int) string {
+func appointmentsHTML(t func(key string, args ...any) string, watch domain.Watch, histories []domain.AppointmentHistory, totalFound int) string {
 	var text strings.Builder
-	fmt.Fprintf(&text, "<b>%s</b>\n\n", esc(title))
-	fmt.Fprintf(&text, "Найдено терминов: <b>%d</b>\n", totalFound)
+	fmt.Fprintf(&text, "<b>%s</b>\n\n", esc(t("notification.appointment_found.title")))
+	text.WriteString(t("notification.count", totalFound) + "\n")
 	if strings.TrimSpace(watch.Name) != "" {
-		fmt.Fprintf(&text, "Наблюдение: %s\n", esc(watch.Name))
+		text.WriteString(t("notification.watch", esc(watch.Name)) + "\n")
 	} else {
-		fmt.Fprintf(&text, "Услуга: %s, город: %s\n", esc(watch.ServiceName), esc(watch.CityName))
+		text.WriteString(t("notification.service_city", esc(watch.ServiceName), esc(watch.CityName)) + "\n")
 	}
 	shown := 0
 	for i, h := range histories {
@@ -45,7 +45,7 @@ func appointmentsHTML(title string, watch domain.Watch, histories []domain.Appoi
 		shown++
 	}
 	if rest := totalFound - shown; rest > 0 {
-		fmt.Fprintf(&text, "\n\n<i>И ещё %d терминов не показано. Открой LuxMed, чтобы посмотреть полный список.</i>", rest)
+		text.WriteString("\n\n<i>" + t("notification.more", rest) + "</i>")
 	}
 	return text.String()
 }

@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
+	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
 )
 
 func TestAppointmentsHTMLEscapesAndFitsBudget(t *testing.T) {
@@ -21,7 +22,12 @@ func TestAppointmentsHTMLEscapesAndFitsBudget(t *testing.T) {
 		histories[i] = h
 	}
 
-	got := appointmentsHTML("Found", domain.Watch{Name: "a<b"}, histories, 50)
+	cat, err := i18n.Load("en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := func(key string, args ...any) string { return cat.T("en", key, args...) }
+	got := appointmentsHTML(tr, domain.Watch{Name: "a<b"}, histories, 50)
 
 	if strings.Contains(got, "<Jan>") || strings.Contains(got, "a<b") {
 		t.Fatalf("raw data not escaped:\n%s", got)
@@ -35,7 +41,7 @@ func TestAppointmentsHTMLEscapesAndFitsBudget(t *testing.T) {
 	if strings.Count(got, "<b>") != strings.Count(got, "</b>") || strings.Count(got, "<i>") != strings.Count(got, "</i>") {
 		t.Fatalf("unbalanced tags:\n%s", got)
 	}
-	if !strings.Contains(got, "И ещё") {
+	if !strings.Contains(got, "more not shown") {
 		t.Fatalf("expected overflow tail line")
 	}
 }

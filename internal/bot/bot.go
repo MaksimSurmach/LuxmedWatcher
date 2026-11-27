@@ -103,7 +103,7 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		totalFound = shown
 	}
 
-	messageText := appointmentsHTML(b.catalog.T(user.Locale, "notification.appointment_found.title"), watch, histories, totalFound)
+	messageText := appointmentsHTML(func(key string, args ...any) string { return b.catalog.T(user.Locale, key, args...) }, watch, histories, totalFound)
 
 	first := histories[0]
 	msg := tgbotapi.NewMessage(user.TelegramChatID, messageText)
@@ -496,7 +496,7 @@ func (b *Bot) showTimeStep(user domain.User, state *flow) {
 
 	b.send(
 		user,
-		"Шаг 4/5: выберите время приёма.\n\nМожно выбрать готовый вариант или написать диапазон, например: 09:00-13:00.",
+		b.catalog.T(user.Locale, "flow.watch.time"),
 		timeWindowKeyboard(b.catalog, user.Locale),
 	)
 }
@@ -516,7 +516,7 @@ func (b *Bot) handleTimeCallback(ctx context.Context, user domain.User, state *f
 	case "workday":
 		state.Watch.TimeWindows = []domain.TimeWindow{{From: "09:00", To: "18:00"}}
 	default:
-		b.send(user, "Выберите время кнопкой или напишите диапазон, например: 09:00-13:00", timeWindowKeyboard(b.catalog, user.Locale))
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.time_invalid"), timeWindowKeyboard(b.catalog, user.Locale))
 		return
 	}
 
@@ -534,7 +534,7 @@ func (b *Bot) handleTimeText(ctx context.Context, user domain.User, state *flow,
 
 	window, ok := parseTimeWindow(text)
 	if !ok {
-		b.send(user, "Не понял время. Напишите диапазон в формате 09:00-13:00 или выберите кнопку.", timeWindowKeyboard(b.catalog, user.Locale))
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.time_invalid"), timeWindowKeyboard(b.catalog, user.Locale))
 		return
 	}
 
@@ -544,7 +544,7 @@ func (b *Bot) handleTimeText(ctx context.Context, user domain.User, state *flow,
 
 func (b *Bot) finishTimeStep(ctx context.Context, user domain.User, state *flow) {
 	b.setFlow(user.ID, state)
-	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard())
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.interval"), intervalKeyboard(b.catalog, user.Locale))
 	_ = ctx
 }
 
@@ -674,14 +674,14 @@ func (b *Bot) showProcedureMenu(ctx context.Context, user domain.User, state *fl
 	)
 
 	if len(recent) > 0 {
-		title := b.catalog.T(user.Locale, "flow.watch.service") + "\n\nПоследние процедуры:"
+		title := b.catalog.T(user.Locale, "flow.watch.service") + "\n\n" + b.catalog.T(user.Locale, "flow.watch.service_recent")
 		b.sendProcedureOptions(user, title, recent, procedureResultsKeyboard(recent, "", "", b.catalog, user.Locale))
 		return
 	}
 
 	b.send(
 		user,
-		b.catalog.T(user.Locale, "flow.watch.service")+"\n\nНапишите часть названия процедуры, откройте популярные процедуры или обзор A-Z.",
+		b.catalog.T(user.Locale, "flow.watch.service")+"\n\n"+b.catalog.T(user.Locale, "flow.watch.service_hint"),
 		procedureMenuKeyboard(nil, b.catalog, user.Locale),
 	)
 }
@@ -819,7 +819,7 @@ func (b *Bot) showPopularProcedures(ctx context.Context, user domain.User, state
 		"popular_count", len(popular),
 	)
 
-	title := "Популярные процедуры LuxMed:"
+	title := b.catalog.T(user.Locale, "flow.watch.service_popular")
 	b.sendProcedureOptions(user, title, popular, procedureResultsKeyboard(popular, "", "", b.catalog, user.Locale))
 }
 
@@ -885,7 +885,7 @@ func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flo
 	}
 
 	if len(favorites) > 0 {
-		title := b.catalog.T(user.Locale, "flow.watch.facility") + "\n\nИзбранные клиники:"
+		title := b.catalog.T(user.Locale, "flow.watch.facility") + "\n\n" + b.catalog.T(user.Locale, "facility.title_favorites") + ":"
 		b.sendFacilityOptions(
 			user,
 			title,
@@ -897,7 +897,7 @@ func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flo
 
 	b.send(
 		user,
-		b.catalog.T(user.Locale, "flow.watch.facility")+"\n\nМожно выбрать все клиники в городе или открыть список и выбрать несколько.",
+		b.catalog.T(user.Locale, "flow.watch.facility")+"\n\n"+b.catalog.T(user.Locale, "flow.watch.facility_hint"),
 		facilityMenuKeyboard(nil, b.catalog, user.Locale),
 	)
 }
@@ -1003,11 +1003,11 @@ func (b *Bot) showFacilityPage(ctx context.Context, user domain.User, state *flo
 	switch mode {
 	case "favs":
 		facilities, err = b.db.FavoriteFacilitiesPage(ctx, user.ID, state.Watch.CityID, state.Watch.ServiceID, pageSize+1, offset)
-		title = "Избранные клиники"
+		title = b.catalog.T(user.Locale, "facility.title_favorites")
 	default:
 		mode = "all"
 		facilities, err = b.db.FacilitiesPage(ctx, state.Watch.CityID, state.Watch.ServiceID, pageSize+1, offset)
-		title = "Клиники"
+		title = b.catalog.T(user.Locale, "facility.title_all")
 	}
 
 	if err != nil || len(facilities) == 0 {
@@ -1035,15 +1035,15 @@ func (b *Bot) showFacilityPage(ctx context.Context, user domain.User, state *flo
 		nextCallback = fmt.Sprintf("facpage:%s:%d", mode, page+1)
 	}
 
-	text := fmt.Sprintf(
-		"%s. Показаны %d–%d.\n\nНажмите номера клиник, которые хотите выбрать. Потом нажмите “Готово”.",
+	text := b.catalog.T(user.Locale,
+		"flow.watch.facility_page",
 		title,
 		offset+1,
 		offset+len(facilities),
 	)
 
 	if len(state.Watch.FacilityIDs) > 0 {
-		text += fmt.Sprintf("\n\nВыбрано клиник: %d.", len(state.Watch.FacilityIDs))
+		text += "\n\n" + b.catalog.T(user.Locale, "flow.watch.facility_selected", len(state.Watch.FacilityIDs))
 	}
 
 	b.sendFacilityOptions(
@@ -1097,7 +1097,7 @@ func (b *Bot) handleFacilityToggle(ctx context.Context, user domain.User, state 
 
 func (b *Bot) finishSelectedFacilities(ctx context.Context, user domain.User, state *flow) {
 	if len(state.Watch.FacilityIDs) == 0 {
-		b.send(user, "Выберите хотя бы одну клинику или нажмите “Все клиники в городе”.", facilityMenuKeyboard(nil, b.catalog, user.Locale))
+		b.send(user, b.catalog.T(user.Locale, "flow.watch.facility_none_selected"), facilityMenuKeyboard(nil, b.catalog, user.Locale))
 		return
 	}
 
@@ -1407,7 +1407,7 @@ func (b *Bot) showProcedureLetters(ctx context.Context, user domain.User, state 
 	state.ProcedureSearchQuery = ""
 	b.setFlow(user.ID, state)
 
-	b.send(user, "Выберите первую букву процедуры.", procedureLettersKeyboard(letters, b.catalog, user.Locale))
+	b.send(user, b.catalog.T(user.Locale, "flow.watch.service_letters"), procedureLettersKeyboard(letters, b.catalog, user.Locale))
 }
 
 func (b *Bot) handleProcedureLetterPage(ctx context.Context, user domain.User, state *flow, data string) {
@@ -1466,8 +1466,8 @@ func (b *Bot) showProcedureLetterPage(ctx context.Context, user domain.User, sta
 		nextCallback = fmt.Sprintf("procletter:%s:%d", letter, page+1)
 	}
 
-	title := fmt.Sprintf(
-		"Процедуры на букву %s. Показаны %d–%d.\n\nНажмите номер под сообщением или напишите новый поисковый запрос.",
+	title := b.catalog.T(user.Locale,
+		"flow.watch.service_letter_page",
 		letter,
 		offset+1,
 		offset+len(procedures),
@@ -1537,8 +1537,8 @@ func (b *Bot) showProcedureSearchResultsPage(ctx context.Context, user domain.Us
 	state.ProcedureSearchQuery = query
 	b.setFlow(user.ID, state)
 
-	title := fmt.Sprintf(
-		"Результаты поиска по “%s”. Показаны %d–%d.\n\nНажмите номер под сообщением или напишите новый поисковый запрос.",
+	title := b.catalog.T(user.Locale,
+		"flow.watch.service_search_page",
 		query,
 		offset+1,
 		offset+len(procedures),
@@ -1723,7 +1723,7 @@ func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
 		b.send(user, b.catalog.T(user.Locale, "errors.generic"), nil)
 		return
 	}
-	b.send(user, "Invite code: "+code, nil)
+	b.send(user, b.catalog.T(user.Locale, "admin.invite_code", code), nil)
 }
 
 func (b *Bot) send(user domain.User, text string, markup any) {
