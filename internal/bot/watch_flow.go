@@ -20,6 +20,8 @@ func allowsFlowCallback(state *flow, data string) bool {
 		kind, settingsCity = state.Kind, state.CitySettings
 	}
 	switch {
+	case strings.HasPrefix(data, "back:"):
+		return state != nil && data == "back:"+string(state.Kind)
 	case strings.HasPrefix(data, "prefcity:"):
 		return (kind == flowWatchCity || kind == flowCitySearch) && settingsCity
 	case strings.HasPrefix(data, "city:"):
@@ -298,6 +300,42 @@ func (b *Bot) editWatch(ctx context.Context, user domain.User, watch domain.Watc
 }
 
 func (b *Bot) sendWatchStep(user domain.User, text string, markup tgbotapi.InlineKeyboardMarkup) {
+	text, markup = b.watchStepContent(user, text, markup)
+	b.sendWatchMessage(user, text, markup)
+}
+
+func (b *Bot) sendWatchMessage(user domain.User, text string, markup tgbotapi.InlineKeyboardMarkup) {
+	if messageID, ok := b.sendMessage(user, text, markup); ok {
+		if state := b.getFlow(user.TelegramUserID); state != nil {
+			state.lastWatchMessageID = messageID
+		}
+	}
+}
+
+type watchPageMessageKey struct{}
+
+func isWatchPageAction(data string) bool {
+	for _, prefix := range []string{"city:page:", "prefcity:page:", "procletter:", "procsearchpage:", "facpage:", "facsel:"} {
+		if strings.HasPrefix(data, prefix) {
+			return true
+		}
+	}
+	return data == "facclear"
+}
+
+func (b *Bot) sendWatchPage(ctx context.Context, user domain.User, text string, markup tgbotapi.InlineKeyboardMarkup) {
+	text, markup = b.watchStepContent(user, text, markup)
+	if messageID, ok := ctx.Value(watchPageMessageKey{}).(int); ok {
+		edit := tgbotapi.NewEditMessageTextAndMarkup(user.TelegramChatID, messageID, truncateMessage(text, 4000), markup)
+		_, err := b.api.Request(edit)
+		if err == nil || strings.Contains(err.Error(), "message is not modified") {
+			return
+		}
+	}
+	b.sendWatchMessage(user, text, markup)
+}
+
+func (b *Bot) watchStepContent(user domain.User, text string, markup tgbotapi.InlineKeyboardMarkup) (string, tgbotapi.InlineKeyboardMarkup) {
 	state := b.getFlow(user.TelegramUserID)
 	if state != nil {
 		var step int
@@ -330,7 +368,7 @@ func (b *Bot) sendWatchStep(user domain.User, text string, markup tgbotapi.Inlin
 			text = b.catalog.T(user.Locale, "flow.watch.step", step) + "\n\n" + text
 		}
 	}
-	b.send(user, text, markup)
+	return text, markup
 }
 
 func (b *Bot) backWatch(ctx context.Context, user domain.User, from string) {

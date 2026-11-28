@@ -76,6 +76,44 @@ func createUser(t *testing.T, b *Bot, id int64, status domain.UserStatus) domain
 	return user
 }
 
+func TestCityPagesEditTheCurrentPickerAndRejectStaleButtons(t *testing.T) {
+	type request struct{ method, text, messageID string }
+	requests := make(chan request, 20)
+	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
+		requests <- request{filepath.Base(r.URL.Path), r.FormValue("text"), r.FormValue("message_id")}
+		fmt.Fprint(w, `{"ok":true,"result":{"message_id":70}}`)
+	})
+	ctx := t.Context()
+	user := createUser(t, b, 33, domain.UserStatusActive)
+	if err := b.db.UpsertCities(ctx, []domain.City{{ID: 1, Name: "Warszawa"}}); err != nil {
+		t.Fatal(err)
+	}
+	b.setFlow(user.TelegramUserID, &flow{Kind: flowWatchCity, lastWatchMessageID: 42})
+	click := func(messageID int) {
+		t.Helper()
+		b.handleCallback(ctx, &tgbotapi.CallbackQuery{
+			ID: "page", Data: "city:page:0", From: &tgbotapi.User{ID: user.TelegramUserID},
+			Message: &tgbotapi.Message{MessageID: messageID, Chat: &tgbotapi.Chat{ID: user.TelegramUserID, Type: "private"}},
+		})
+	}
+	click(42)
+	ack, edit := <-requests, <-requests
+	if ack.method != "answerCallbackQuery" || edit.method != "editMessageText" || edit.messageID != "42" {
+		t.Fatalf("page delivery: %+v %+v", ack, edit)
+	}
+	click(41)
+	ack, menu := <-requests, <-requests
+	if ack.text != b.catalog.T(user.Locale, "watch.step_expired") || menu.method != "sendMessage" || b.getFlow(user.TelegramUserID).lastWatchMessageID != 42 {
+		t.Fatalf("stale button disturbed the current picker: %+v %+v", ack, menu)
+	}
+	b.clearFlow(user.TelegramUserID)
+	click(42)
+	ack, menu = <-requests, <-requests
+	if ack.text != b.catalog.T(user.Locale, "watch.step_expired") || menu.method != "sendMessage" {
+		t.Fatalf("missing expiry notice or menu after cancel: %+v %+v", ack, menu)
+	}
+}
+
 func TestWatchActionsRequireActiveOwnerInPrivateChat(t *testing.T) {
 	ctx := context.Background()
 	b := testBot(t)
@@ -85,23 +123,50 @@ func TestWatchActionsRequireActiveOwnerInPrivateChat(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	callback := func(actor domain.User, chat *tgbotapi.Chat) {
+	private := func(user domain.User) *tgbotapi.Chat { return &tgbotapi.Chat{ID: user.TelegramUserID, Type: "private"} }
+	callback := func(actor domain.User, chat *tgbotapi.Chat, data string) {
 		b.handleCallback(ctx, &tgbotapi.CallbackQuery{
-			ID: "test", Data: fmt.Sprintf("watch:delete:%d", id),
-			From: &tgbotapi.User{ID: actor.TelegramUserID}, Message: &tgbotapi.Message{Chat: chat},
+			ID: "test", Data: data, From: &tgbotapi.User{ID: actor.TelegramUserID}, Message: &tgbotapi.Message{Chat: chat},
 		})
 	}
-	callback(other, &tgbotapi.Chat{ID: other.TelegramUserID, Type: "private"})
-	callback(owner, &tgbotapi.Chat{ID: -55, Type: "group"})
-	watch, err := b.db.Watch(ctx, id)
-	if err != nil || watch.Status != domain.WatchStatusActive {
-		t.Fatalf("unauthorized callback changed watch: status=%s, err=%v", watch.Status, err)
+	status := func(want domain.WatchStatus) {
+		t.Helper()
+		watch, err := b.db.Watch(ctx, id)
+		if err != nil || watch.Status != want {
+			t.Fatalf("watch status = %s, want %s; error: %v", watch.Status, want, err)
+		}
 	}
-	callback(owner, &tgbotapi.Chat{ID: owner.TelegramUserID, Type: "private"})
-	watch, err = b.db.Watch(ctx, id)
-	if err != nil || watch.Status != domain.WatchStatusDeleted {
-		t.Fatalf("owner callback did not delete watch: status=%s, err=%v", watch.Status, err)
+	request := fmt.Sprintf("watch:delete:%d", id)
+	callback(owner, private(owner), request)
+	status(domain.WatchStatusActive)
+	challenge, ok := b.deletePrompts.Load(owner.TelegramUserID)
+	if !ok {
+		t.Fatal("missing confirmation")
 	}
+	confirmed := "watch:deleteyes:" + challenge.(string)
+	callback(other, private(other), confirmed)
+	callback(owner, &tgbotapi.Chat{ID: -55, Type: "group"}, confirmed)
+	status(domain.WatchStatusActive)
+	callback(owner, private(owner), "watch:keep:"+challenge.(string))
+	callback(owner, private(owner), confirmed)
+	status(domain.WatchStatusActive)
+	callback(owner, private(owner), request)
+	challenge, _ = b.deletePrompts.Load(owner.TelegramUserID)
+	callback(owner, private(owner), "cancel")
+	callback(owner, private(owner), "watch:deleteyes:"+challenge.(string))
+	status(domain.WatchStatusActive)
+	callback(owner, private(owner), request)
+	challenge, _ = b.deletePrompts.Load(owner.TelegramUserID)
+	b.handleUpdate(ctx, tgbotapi.Update{Message: &tgbotapi.Message{
+		Chat: private(owner), From: &tgbotapi.User{ID: owner.TelegramUserID}, Text: "/cancel",
+		Entities: []tgbotapi.MessageEntity{{Type: "bot_command", Length: 7}},
+	}})
+	callback(owner, private(owner), "watch:deleteyes:"+challenge.(string))
+	status(domain.WatchStatusActive)
+	callback(owner, private(owner), request)
+	challenge, _ = b.deletePrompts.Load(owner.TelegramUserID)
+	callback(owner, private(owner), "watch:deleteyes:"+challenge.(string))
+	status(domain.WatchStatusDeleted)
 }
 
 type authClient struct {

@@ -54,6 +54,7 @@ type Bot struct {
 	flowState       map[int64]*flow
 	credentialFlows map[int64]*flow
 	deleteWarnings  map[int64][]*credentialDeleteWarning
+	deletePrompts   sync.Map // Telegram user ID to the outstanding watch deletion challenge.
 }
 
 type flowKind string
@@ -89,6 +90,7 @@ type flow struct {
 	deleteWarning        *credentialDeleteWarning
 	Login                string
 	CitySettings         bool
+	lastWatchMessageID   int
 	ProcedureSearchQuery string
 	CatalogLoaded        bool
 	Doctors              []domain.Doctor
@@ -261,8 +263,11 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	defer b.deliverDeleteWarnings(telegramID, b.readyDeleteWarning(telegramID))
 	state := b.getFlow(telegramID)
 	command := b.messageCommand(message, state)
-	if command == "cancel" && b.cancelLogin(ctx, telegramID, state) {
-		return
+	if command == "cancel" {
+		b.deletePrompts.Delete(telegramID)
+		if b.cancelLogin(ctx, telegramID, state) {
+			return
+		}
 	}
 	switch command {
 	case "logout_luxmed":
@@ -466,8 +471,23 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	}
 	defer b.deliverDeleteWarnings(cb.From.ID, b.readyDeleteWarning(cb.From.ID))
 	data := cb.Data
+	if data == "cancel" {
+		b.deletePrompts.Delete(cb.From.ID)
+	}
 	cancelingLogin := data == "cancel" && b.cancelLogin(ctx, cb.From.ID, b.getFlow(cb.From.ID))
 	attempt := b.selectChrome(cb.From.ID, data)
+	current := b.getFlow(cb.From.ID)
+	staleSource := current != nil && cb.Message.MessageID > 0 && cb.Message.MessageID < current.lastWatchMessageID && !allowsFlowCallback(nil, data)
+	if staleSource || !allowsFlowCallback(current, data) {
+		user, err := b.db.UserByTelegramID(ctx, cb.From.ID)
+		if err == nil && user.IsActive() {
+			_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, b.catalog.T(user.Locale, "watch.step_expired")))
+			if current == nil || current.lastWatchMessageID > 0 {
+				b.showMenu(user)
+			}
+			return
+		}
+	}
 	if strings.HasPrefix(data, "watch:check:") {
 		toast := b.handleAction(ctx, cb.From.ID, data, attempt)
 		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, toast))
@@ -480,6 +500,9 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	if strings.HasPrefix(data, "options:") && strings.Count(data, ":") == 2 {
 		// Only the opening button is on the notification itself. Page buttons carry its message ID.
 		data += ":" + strconv.Itoa(cb.Message.MessageID)
+	}
+	if isWatchPageAction(data) && cb.Message.MessageID > 0 {
+		ctx = context.WithValue(ctx, watchPageMessageKey{}, cb.Message.MessageID)
 	}
 	b.handleAction(ctx, cb.From.ID, data, attempt)
 }
@@ -760,7 +783,7 @@ func (b *Bot) showCityPicker(ctx context.Context, user domain.User, settings boo
 	if settings {
 		prefix = "prefcity:"
 	}
-	b.sendWatchStep(user, b.catalog.T(user.Locale, "flow.watch.city"), cityKeyboard(cities, prefix, page, page > 0, hasNext, b.catalog, user.Locale))
+	b.sendWatchPage(ctx, user, b.catalog.T(user.Locale, "flow.watch.city"), cityKeyboard(cities, prefix, page, page > 0, hasNext, b.catalog, user.Locale))
 }
 
 func (b *Bot) showTimeStep(user domain.User, state *flow) {
@@ -975,7 +998,7 @@ func (b *Bot) showPopularProcedures(ctx context.Context, user domain.User, state
 	)
 
 	title := b.catalog.T(user.Locale, "button.popular_procedures")
-	b.sendProcedureOptions(user, title, popular, procedureResultsKeyboard(popular, "", "", b.catalog, user.Locale))
+	b.sendProcedureOptions(ctx, user, title, popular, procedureResultsKeyboard(popular, "", "", b.catalog, user.Locale))
 }
 
 func (b *Bot) showProcedureSearchResults(ctx context.Context, user domain.User, state *flow, query string) {
@@ -1041,7 +1064,7 @@ func (b *Bot) showFacilityMenu(ctx context.Context, user domain.User, state *flo
 
 	if len(favorites) > 0 {
 		title := b.catalog.T(user.Locale, "flow.watch.facility_favorites")
-		b.sendFacilityOptions(
+		b.sendFacilityOptions(ctx,
 			user,
 			title,
 			favorites,
@@ -1193,7 +1216,7 @@ func (b *Bot) showFacilityPage(ctx context.Context, user domain.User, state *flo
 	}
 
 	text := title + "\n" + b.catalog.T(user.Locale, "flow.watch.facility_selection", len(state.Watch.FacilityIDs))
-	b.sendFacilityOptions(
+	b.sendFacilityOptions(ctx,
 		user,
 		text,
 		facilities,
@@ -1271,7 +1294,7 @@ func (b *Bot) findFacilityByID(ctx context.Context, state *flow, id int) (domain
 	return domain.Facility{}, fmt.Errorf("facility %d not found", id)
 }
 
-func (b *Bot) sendFacilityOptions(user domain.User, title string, facilities []domain.Facility, markup tgbotapi.InlineKeyboardMarkup) {
+func (b *Bot) sendFacilityOptions(ctx context.Context, user domain.User, title string, facilities []domain.Facility, markup tgbotapi.InlineKeyboardMarkup) {
 	state := b.getFlow(user.TelegramUserID)
 
 	var selectedIDs []int
@@ -1296,7 +1319,7 @@ func (b *Bot) sendFacilityOptions(user domain.User, title string, facilities []d
 		lines = append(lines, fmt.Sprintf("%s %d. %s", prefix, i+1, label))
 	}
 
-	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)
+	b.sendWatchPage(ctx, user, strings.Join(lines, "\n\n"), markup)
 }
 
 func facilityIDSelected(ids []int, id int) bool {
@@ -1496,7 +1519,7 @@ func (b *Bot) showProcedureLetterPage(ctx context.Context, user domain.User, sta
 
 	title := b.catalog.T(user.Locale, "flow.watch.service_letter_results", letter)
 
-	b.sendProcedureOptions(user, title, procedures, procedureResultsKeyboard(procedures, previousCallback, nextCallback, b.catalog, user.Locale))
+	b.sendProcedureOptions(ctx, user, title, procedures, procedureResultsKeyboard(procedures, previousCallback, nextCallback, b.catalog, user.Locale))
 }
 
 func (b *Bot) handleProcedureSearchPage(ctx context.Context, user domain.User, state *flow, data string) {
@@ -1559,10 +1582,10 @@ func (b *Bot) showProcedureSearchResultsPage(ctx context.Context, user domain.Us
 
 	title := b.catalog.T(user.Locale, "flow.watch.service_results")
 
-	b.sendProcedureOptions(user, title, procedures, procedureResultsKeyboard(procedures, previousCallback, nextCallback, b.catalog, user.Locale))
+	b.sendProcedureOptions(ctx, user, title, procedures, procedureResultsKeyboard(procedures, previousCallback, nextCallback, b.catalog, user.Locale))
 }
 
-func (b *Bot) sendProcedureOptions(user domain.User, title string, items []domain.Procedure, markup tgbotapi.InlineKeyboardMarkup) {
+func (b *Bot) sendProcedureOptions(ctx context.Context, user domain.User, title string, items []domain.Procedure, markup tgbotapi.InlineKeyboardMarkup) {
 	var lines []string
 	lines = append(lines, strings.TrimSpace(title))
 
@@ -1570,7 +1593,7 @@ func (b *Bot) sendProcedureOptions(user domain.User, title string, items []domai
 		lines = append(lines, fmt.Sprintf("%d. %s", i+1, proc.Name))
 	}
 
-	b.sendWatchStep(user, strings.Join(lines, "\n\n"), markup)
+	b.sendWatchPage(ctx, user, strings.Join(lines, "\n\n"), markup)
 }
 
 func (b *Bot) ensureFacilities(ctx context.Context, user domain.User, city domain.City, procedureID int) error {
@@ -1640,7 +1663,11 @@ func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (
 
 func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data string) (toast string) {
 	parts := strings.Split(data, ":")
-	if !user.IsActive() || len(parts) != 3 {
+	if !user.IsActive() || (len(parts) != 3 && len(parts) != 4) {
+		return
+	}
+	confirmation := parts[1] == "deleteyes" || parts[1] == "keep"
+	if confirmation != (len(parts) == 4) {
 		return
 	}
 	id, err := strconv.ParseInt(parts[2], 10, 64)
@@ -1665,6 +1692,22 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 		}
 		state = domain.WatchStatusActive
 	case "delete":
+		challenge := fmt.Sprintf("%d:%s", id, randomCode())
+		b.deletePrompts.Store(user.TelegramUserID, challenge)
+		b.send(user, b.catalog.T(user.Locale, "watch.delete_confirm", procedures.WatchTitle(watch)), tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.keep"), "watch:keep:"+challenge),
+			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.delete"), "watch:deleteyes:"+challenge),
+		)))
+		return
+	case "keep", "deleteyes":
+		if !b.deletePrompts.CompareAndDelete(user.TelegramUserID, parts[2]+":"+parts[3]) {
+			b.send(user, b.catalog.T(user.Locale, "watch.step_expired"), mainKeyboard(b.catalog, user.Locale))
+			return
+		}
+		if parts[1] == "keep" {
+			b.showWatch(ctx, user, watch)
+			return
+		}
 		state = domain.WatchStatusDeleted
 	case "check":
 		if watch.Status != domain.WatchStatusActive {
@@ -1705,7 +1748,14 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 		return
 	}
 	key := map[domain.WatchStatus]string{domain.WatchStatusPaused: "watch.paused", domain.WatchStatusActive: "watch.resumed", domain.WatchStatusDeleted: "watch.deleted"}[state]
-	b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+	markup := mainKeyboard(b.catalog, user.Locale)
+	if state == domain.WatchStatusPaused {
+		markup = tgbotapi.NewInlineKeyboardMarkup(tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.resume"), fmt.Sprintf("watch:resume:%d", id)),
+			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.my_watches"), "watches"),
+		))
+	}
+	b.send(user, b.catalog.T(user.Locale, key), markup)
 	return ""
 }
 
@@ -1837,15 +1887,21 @@ func (b *Bot) createInvite(ctx context.Context, user domain.User, args string) {
 }
 
 func (b *Bot) send(user domain.User, text string, markup any) bool {
+	_, ok := b.sendMessage(user, text, markup)
+	return ok
+}
+
+func (b *Bot) sendMessage(user domain.User, text string, markup any) (int, bool) {
 	msg := tgbotapi.NewMessage(user.TelegramChatID, truncateMessage(text, 4000))
 	if markup != nil {
 		msg.ReplyMarkup = markup
 	}
-	if _, err := b.api.Send(msg); err != nil {
+	sent, err := b.api.Send(msg)
+	if err != nil {
 		b.logger.Warn("send Telegram message failed")
-		return false
+		return 0, false
 	}
-	return true
+	return sent.MessageID, true
 }
 
 func (b *Bot) setFlow(telegramID int64, state *flow) {
