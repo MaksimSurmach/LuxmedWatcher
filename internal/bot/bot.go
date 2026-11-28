@@ -295,7 +295,7 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	if credentialMessage {
 		if !user.IsActive() {
 			b.clearFlow(telegramID)
-			b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
+			b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard(b.catalog))
 			return
 		}
 		value := message.Text
@@ -345,7 +345,7 @@ func (b *Bot) upsertUser(ctx context.Context, msg *tgbotapi.Message) (domain.Use
 
 func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi.Message, command string) {
 	if !user.IsActive() && command != "start" && command != "language" && command != "menu" && command != "cancel" {
-		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard())
+		b.send(user, b.catalog.T(user.Locale, "errors.invite_required"), languageKeyboard(b.catalog))
 		return
 	}
 	switch command {
@@ -793,7 +793,7 @@ func (b *Bot) handleTimeCallback(user domain.User, state *flow, data string) {
 func (b *Bot) handleTimeText(user domain.User, state *flow, text string) {
 	text = strings.TrimSpace(strings.ToLower(text))
 
-	if text == "" || text == "any" || text == "все" || text == "любое" {
+	if text == "" || b.catalog.MatchesInput(text, "input.all") || b.catalog.MatchesInput(text, "input.any") {
 		state.Watch.TimeWindows = nil
 		b.showDaysStep(user, state)
 		return
@@ -1090,7 +1090,7 @@ func (b *Bot) handleFacility(ctx context.Context, user domain.User, data string)
 func (b *Bot) handleFacilityText(ctx context.Context, user domain.User, state *flow, text string) {
 	text = strings.TrimSpace(text)
 
-	if strings.EqualFold(text, "all") || strings.EqualFold(text, "все") {
+	if b.catalog.MatchesInput(text, "input.all") {
 		state.Watch.FacilityMode = domain.FacilityModeAll
 		state.Watch.FacilityIDs = nil
 		state.Watch.FacilityNames = nil

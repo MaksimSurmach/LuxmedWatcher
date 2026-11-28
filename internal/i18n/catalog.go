@@ -90,3 +90,13 @@ func (c *Catalog) ValidateSameKeys() error {
 	}
 	return nil
 }
+
+// MatchesInput accepts typed shortcuts even after the user switches languages.
+func (c *Catalog) MatchesInput(text, key string) bool {
+	for _, locale := range SupportedLocales {
+		if value := c.messages[locale][key]; value != "" && strings.EqualFold(value, text) {
+			return true
+		}
+	}
+	return false
+}

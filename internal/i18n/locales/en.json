@@ -1,4 +1,7 @@
 {
+  "language.name": "English",
+  "input.all": "all",
+  "input.any": "any",
   "button.chrome": "Sign in with Chrome",
   "button.chrome_switch": "Switch to Chrome and delete saved credentials",
   "button.saved_login": "Save login and password",

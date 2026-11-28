@@ -1,4 +1,7 @@
 {
+  "language.name": "Українська",
+  "input.all": "усі",
+  "input.any": "будь-яке",
   "button.chrome": "Увійти через Chrome",
   "button.chrome_switch": "Перейти на Chrome і видалити дані входу",
   "button.saved_login": "Зберегти логін і пароль",

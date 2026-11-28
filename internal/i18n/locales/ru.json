@@ -1,4 +1,7 @@
 {
+  "language.name": "Русский",
+  "input.all": "все",
+  "input.any": "любое",
   "button.chrome": "Войти через Chrome",
   "button.chrome_switch": "Перейти на Chrome и удалить данные входа",
   "button.saved_login": "Сохранить логин и пароль",
