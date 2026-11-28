@@ -58,6 +58,10 @@ let apiToken;
 let cities;
 let cityRequest;
 let tab = 'history';
+// A coupon in a chat widget opens the app with startapp=slot-<id>-<Warsaw day>:
+// that day loads first and the time's booking sheet opens once.
+const [, wantedID, wantedDay] = /^slot-(\d+)-(\d{4}-\d{2}-\d{2})$/.exec(telegram?.initDataUnsafe?.start_param ?? '') ?? [];
+let wantedSlot = Number(wantedID ?? 0);
 let flashTimer;
 let renderID = 0;
 let passwordSave = null;
@@ -643,7 +647,7 @@ function pending(label) {
   return `<div class="pending-mark" role="status"><span class="pending-label">${text(label)}</span></div>`;
 }
 
-let selectedHistoryDay = 'first';
+let selectedHistoryDay = wantedDay ?? 'first';
 let refreshHistory;
 
 async function historyScreen(id) {
@@ -764,6 +768,9 @@ async function historyScreen(id) {
     }
   };
   await loadDay(selectedHistoryDay);
+  const wanted = wantedSlot && slots.find(item => item.ID === wantedSlot);
+  wantedSlot = 0;
+  if (wanted && id === renderID && Date.parse(wanted.DateTime) > Date.now()) bookingDialog(wanted);
 }
 
 window.setInterval(() => refreshHistory?.(), 60_000);

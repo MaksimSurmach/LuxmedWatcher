@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"io"
 	"log/slog"
 	"net/http"
@@ -514,20 +515,20 @@ func TestHistoryExplainsUnavailableTimes(t *testing.T) {
 		{
 			name:    "appointment time passed",
 			offset:  -24 * time.Hour,
-			message: "This appointment time has passed.",
+			message: ">Past</span>",
 		},
 		{
 			name:    "future time missing from results",
 			offset:  24 * time.Hour,
 			missing: true,
-			message: "This time no longer appears in search results. Check other times.",
+			message: ">Gone</span>",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := t.Context()
 			var sends atomic.Int32
 			b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path != "/botfake/sendMessage" {
+				if r.URL.Path != "/botfake/sendWidget" {
 					t.Errorf("unexpected Telegram method: %s", r.URL.Path)
 					return
 				}
@@ -536,7 +537,7 @@ func TestHistoryExplainsUnavailableTimes(t *testing.T) {
 					t.Error(err)
 					return
 				}
-				if text := r.Form.Get("text"); !strings.Contains(text, tc.message) {
+				if text := r.Form.Get("html"); !strings.Contains(text, tc.message) || !strings.Contains(text, "coupon void") || strings.Contains(text, "<a class") {
 					t.Errorf("message %q does not contain %q", text, tc.message)
 				}
 				if markup := r.Form.Get("reply_markup"); strings.Contains(markup, luxmed.ReservationPageURL) {
@@ -593,7 +594,7 @@ func TestWatchWithExpiredSessionOffersSignIn(t *testing.T) {
 	ctx := t.Context()
 	var sends atomic.Int32
 	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/botfake/sendMessage" {
+		if r.URL.Path != "/botfake/sendWidget" {
 			t.Errorf("unexpected Telegram method: %s", r.URL.Path)
 			return
 		}
@@ -602,12 +603,12 @@ func TestWatchWithExpiredSessionOffersSignIn(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		text := r.Form.Get("text")
-		if !strings.Contains(text, "Sign-in required.") || strings.Contains(text, "luxmed_authentication") {
+		text := r.Form.Get("html")
+		if !strings.Contains(text, "Sign-in required.") || !strings.Contains(text, "coupon pass problem") || strings.Contains(text, "luxmed_authentication") {
 			t.Errorf("unexpected message: %q", text)
 		}
-		markup := r.Form.Get("reply_markup")
-		if !strings.Contains(markup, "Sign in to LUX MED") || !strings.Contains(markup, "account") {
+		markup := r.Form.Get("html")
+		if !strings.Contains(markup, "Sign in to LUX MED") || !strings.Contains(markup, `data-callback="account"`) {
 			t.Errorf("missing sign-in action: %s", markup)
 		}
 		fmt.Fprint(w, `{"ok":true,"result":{"message_id":99}}`)
@@ -1106,7 +1107,7 @@ func TestTelegramRoutesCommandsDuringPasswordVerification(t *testing.T) {
 		switch r.FormValue("text") {
 		case b.catalog.T("en", "errors.no_watches"):
 			watches.Store(true)
-		case b.catalog.T("en", "help.text"):
+		case "<b>Luxmed Watcher</b>\n\n" + html.EscapeString(b.catalog.T("en", "help.text")):
 			help.Store(true)
 		}
 		if strings.Contains(r.FormValue("reply_markup"), "connect:chrome:") {

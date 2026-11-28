@@ -44,23 +44,25 @@ func TestAppointmentWidgetDelivery(t *testing.T) {
 				if err := r.ParseForm(); err != nil {
 					t.Error(err)
 				}
-				if r.Form.Get("parse_mode") != "HTML" || !strings.Contains(r.Form.Get("reply_markup"), "watch:pause:30") || !strings.Contains(r.Form.Get("reply_markup"), "watch:check:30") {
+				controls := r.Form.Get("reply_markup") + r.Form.Get("html")
+				if r.Form.Get("parse_mode") != "HTML" || !strings.Contains(controls, "watch:pause:30") || !strings.Contains(controls, "watch:check:30") {
 					t.Errorf("missing HTML parse mode or pause control in %s", r.Form.Encode())
 				}
 				switch r.URL.Path {
 				case "/botfake/sendWidget":
 					widgetSends++
 					markup := r.Form.Get("html")
-					for _, part := range []string{"<style>", "--tg-theme-button-color", "TelegramWidget.request", "booking-hint", "app:history", "A &lt; B", "&lt;script&gt;", luxmed.ReservationPageURL} {
+					for _, part := range []string{"<style>", `<a class="open"`, "booking-hint", `data-callback="app:history"`, "&lt;script&gt;", `href="` + luxmed.ReservationPageURL} {
 						if !strings.Contains(markup, part) {
 							t.Errorf("missing %q in widget HTML", part)
 						}
 					}
-					if strings.Count(r.Form.Get("caption"), "Street 12") != 1 || r.Form.Get("allow_queries") != "true" {
-						t.Error("widget lacks a readable caption or querying is disabled")
+					if r.Form.Get("reply_markup") != "" || r.Form.Get("show_caption_above_media") != "true" ||
+						!strings.Contains(r.Form.Get("caption"), "A &lt; B") || r.Form.Get("allow_queries") != "true" {
+						t.Error("widget keeps a keyboard, or lacks a caption header or querying")
 					}
-					if strings.Count(markup, "Street 12") != 1 {
-						t.Error("widget must render the address once")
+					if strings.Count(markup, "<small>Street 12</small>") != 1 {
+						t.Error("coupon must show the address once")
 					}
 					var compressed bytes.Buffer
 					zipper, err := zlib.NewWriterLevel(&compressed, zlib.BestCompression)
@@ -122,7 +124,7 @@ func TestPollWidgetQueriesAndReuseLanguageAction(t *testing.T) {
 			}
 			fmt.Fprint(w, `{"ok":true,"result":[
 				{"update_id":20,"widget_query":{"id":"wrong-chat","from":{"id":101},"chat":{"id":202,"type":"private"},"message_id":40,"type":{"type":"data"},"data":"lang:uk"}},
-				{"update_id":21,"widget_query":{"id":"unknown-action","from":{"id":101},"chat":{"id":101,"type":"private"},"message_id":41,"type":{"type":"data"},"data":"watch:delete:123"}},
+				{"update_id":21,"widget_query":{"id":"unknown-action","from":{"id":101},"chat":{"id":101,"type":"private"},"message_id":41,"type":{"type":"data"},"data":"watch:drop:123"}},
 				{"update_id":22,"widget_query":{"id":"valid","from":{"id":101},"chat":{"id":101,"type":"private"},"message_id":42,"type":{"type":"data"},"data":"lang:be"}},
 				{"update_id":23,"message":{"text":"/menu","chat":{"id":101,"type":"private"}}}
 			]}`)
@@ -167,13 +169,12 @@ func TestBookCommandOpensOfficialReservationPage(t *testing.T) {
 		if err := r.ParseForm(); err != nil {
 			t.Error(err)
 		}
-		if r.URL.Path != "/botfake/sendWidget" ||
-			!strings.Contains(r.Form.Get("html"), luxmed.ReservationPageURL) ||
+		if r.URL.Path != "/botfake/sendMessage" || r.Form.Get("parse_mode") != "HTML" ||
 			!strings.Contains(r.Form.Get("reply_markup"), luxmed.ReservationPageURL) {
-			t.Errorf("booking entry must open the official portal from the widget and inline keyboard")
+			t.Errorf("booking entry must be an HTML card that opens the official portal from the keyboard")
 		}
 		want := "Choose an appointment time and book in the LUX MED portal."
-		if !strings.Contains(r.Form.Get("html"), want) || !strings.Contains(r.Form.Get("caption"), want) {
+		if !strings.Contains(r.Form.Get("text"), want) {
 			t.Errorf("booking entry lacks instructions to choose a time")
 		}
 		sent <- struct{}{}
@@ -223,9 +224,8 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 				switch r.URL.Path {
 				case "/botfake/sendWidget":
 					body := r.Form.Get("html")
-					check(body, `lang="`+tc.locale+`"`, tc.date, luxmed.ReservationPageURL,
-						"Konsultacja dermatologiczna", "dr Żółć", "Placówka LUX MED", "ul. Główna",
-						b.catalog.T(tc.locale, "button.book_portal"), b.catalog.T(tc.locale, "notification.booking_hint"))
+					check(body, `lang="`+tc.locale+`"`, tc.date, luxmed.ReservationPageURL, "dr Żółć", "ul. Główna",
+						strings.Split(b.catalog.T(tc.locale, "slot.months"), ",")[6], b.catalog.T(tc.locale, "notification.booking_hint"))
 					check(r.Form.Get("caption"), date, clock, "Konsultacja dermatologiczna")
 					w.WriteHeader(http.StatusNotFound)
 					fmt.Fprint(w, `{"ok":false,"error_code":404}`)
@@ -405,5 +405,34 @@ func TestAppMenuRetriesTemporaryTelegramFailures(t *testing.T) {
 				t.Errorf("menu updates = %d, want %d", got, tc.wantAttempts)
 			}
 		})
+	}
+}
+
+func TestCouponOpensSlotInMiniAppAndBooksOnPortal(t *testing.T) {
+	b := testBot(t)
+	item := domain.AppointmentHistory{ID: 77, Appointment: domain.Appointment{DateTime: time.Unix(0, 0), BookingURL: luxmed.ReservationPageURL}}
+	render := func() string {
+		t.Helper()
+		card := b.newWidgetCard("en", nil)
+		card.Slots = []widgetSlot{b.newWidgetSlot("en", item)}
+		var out strings.Builder
+		if err := chatWidget.Execute(&out, card); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	if markup := render(); strings.Contains(markup, "https://t.me") || !strings.Contains(markup, `<a class="open" href="`+luxmed.ReservationPageURL) {
+		t.Errorf("without a Mini App link the coupon must book on the portal: %s", markup)
+	}
+	var err error
+	if b.cfg.MiniApp, err = luxmed.NewMiniApp("http://localhost", "https://app.example", ""); err != nil {
+		t.Fatal(err)
+	}
+	b.cfg.MiniAppLink = "https://t.me/watcher_bot/app"
+	markup := render()
+	for _, want := range []string{`href="https://t.me/watcher_bot/app?startapp=slot-77-1970-01-01" data-app`, `<a class="book" href="` + luxmed.ReservationPageURL + `"`, ">Book</a>"} {
+		if !strings.Contains(markup, want) {
+			t.Errorf("missing %q in %s", want, markup)
+		}
 	}
 }

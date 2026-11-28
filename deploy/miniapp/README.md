@@ -11,6 +11,9 @@ Keep the existing `.env` and browser volumes. The separate `.miniapp.env` file c
 | `LUXMED_MINIAPP_URL` | `https://luxmed.ranus.site` |
 | `LUXMED_MINIAPP_BIND` | `10.250.183.2`, the home WireGuard address |
 | `LUXMED_BOT_ID` | The numeric portion of the Telegram bot token before the colon |
+| `LUXMED_MINIAPP_LINK` | Optional. The Mini App's t.me direct link, for example `https://t.me/<bot>/app` |
+
+`LUXMED_MINIAPP_LINK` lets a found time in a chat card open in the Mini App, while the card's Book button goes straight to the LUX MED portal. Telegram widgets can open a Mini App only through a t.me link. To get one, send `/newapp` to @BotFather, choose this bot, and set the Web App URL to `LUXMED_MINIAPP_URL` followed by `/app`, for example `https://luxmed.ranus.site/app`. Pick a short name such as `app`; the link is `https://t.me/<bot>/<short name>`. Without the variable, tapping a found time opens the portal and the card has no Book button.
 
 ```sh
 docker compose --env-file .env --env-file .miniapp.env \

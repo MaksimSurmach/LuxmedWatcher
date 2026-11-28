@@ -15,7 +15,9 @@ import (
 
 const (
 	// A notification lists every slot up to this count; longer results show a preview.
-	maxNotificationSlots     = 10
+	maxNotificationSlots = 10
+	// The chat card shows this many coupons; the rest live in the Mini App.
+	notificationCoupons      = 3
 	previewNotificationSlots = 5
 	// Telegram rejects messages over 4096 characters.
 	notificationTextBudget = 3600
@@ -82,6 +84,16 @@ func (b *Bot) appointmentNotification(locale string, watch domain.Watch, histori
 	}
 	text.WriteString(footer)
 	return text.String(), shown
+}
+
+// notificationCaption heads the coupon card. Push previews and clients without
+// widgets show only this text, so it ends with the soonest time.
+func (b *Bot) notificationCaption(locale string, watch domain.Watch, soonest domain.AppointmentHistory, count int) string {
+	return fmt.Sprintf("<b>%s</b>\n%s\n%s",
+		html.EscapeString(b.catalog.T(locale, "notification.title", count)),
+		html.EscapeString(truncateMessage(procedures.WatchTitle(watch), 240)),
+		html.EscapeString(b.catalog.T(locale, "notification.soonest", b.slotDateTime(locale, soonest.DateTime))),
+	)
 }
 
 type notificationPlace struct {

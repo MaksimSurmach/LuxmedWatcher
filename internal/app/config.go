@@ -36,6 +36,7 @@ type Config struct {
 	BrowserWorkerKey       string
 	BrowserViewerURL       string
 	MiniAppURL             string
+	MiniAppLink            string
 	MiniAppAgentURL        string
 	MiniAppTicketKey       string
 	ControlKey             string
@@ -60,6 +61,7 @@ func LoadConfig() (Config, error) {
 		BrowserViewerURL:     strings.TrimSpace(os.Getenv("LUXMED_VIEWER_URL")),
 		BrowserWorkerKey:     strings.TrimSpace(os.Getenv("LUXMED_WORKER_KEY")),
 		MiniAppURL:           strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_URL")),
+		MiniAppLink:          strings.TrimRight(strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_LINK")), "/"),
 		MiniAppAgentURL:      strings.TrimSpace(os.Getenv("LUXMED_MINIAPP_AGENT_URL")),
 		MiniAppTicketKey:     strings.TrimSpace(os.Getenv("LUXMED_INTERNAL_KEY")),
 		ControlKey:           strings.TrimSpace(os.Getenv("LUXMED_CONTROL_KEY")),
@@ -91,6 +93,10 @@ func LoadConfig() (Config, error) {
 	}
 	if (cfg.MiniAppURL == "") != (cfg.MiniAppAgentURL == "") || (cfg.MiniAppURL != "" && cfg.BrowserAPIURL == "" && cfg.BrowserRoutes == nil) {
 		return Config{}, fmt.Errorf("Mini App requires browser mode and both Mini App URLs")
+	}
+	// Widgets can open a Mini App only through its t.me direct link, which carries the slot as startapp.
+	if link := cfg.MiniAppLink; link != "" && (cfg.MiniAppURL == "" || !strings.HasPrefix(link, "https://t.me/") || strings.ContainsAny(link, "?#")) {
+		return Config{}, fmt.Errorf("LUXMED_MINIAPP_LINK must be a t.me Mini App link without a query, used with LUXMED_MINIAPP_URL")
 	}
 	if cfg.BrowserRoutes != nil {
 		adminAssigned := false

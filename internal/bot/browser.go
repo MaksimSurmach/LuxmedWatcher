@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"html"
 	"net/http"
 	"net/http/httptrace"
 	"strconv"
@@ -53,7 +54,9 @@ func (b *Bot) NotifyLuxMedReconnect(ctx context.Context, user domain.User) error
 	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
 		button = newMiniAppButton(button.Text, b.dashboardURL(user, "settings"))
 	}
-	msg := tgbotapi.NewMessage(user.TelegramChatID, b.catalog.T(user.Locale, "notification.search_paused"))
+	msg := tgbotapi.NewMessage(user.TelegramChatID, "<b>"+html.EscapeString(b.catalog.T(user.Locale, "notification.reconnect_title"))+
+		"</b>\n\n"+html.EscapeString(b.catalog.T(user.Locale, "notification.search_paused")))
+	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": {{button}}}
 	if ctx.Err() != nil {
 		return &scheduler.ReconnectDeliveryRejected{BeforeSend: true}
