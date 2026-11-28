@@ -88,6 +88,11 @@ func TestSearchResultCheckedAcrossClientModes(t *testing.T) {
 			name: "detail request limit", to: first.AddDate(0, 0, maxDayDetailRequests+1),
 			responses: limited, checked: true, slots: 1, wantErr: ErrPartialResults, wantPartial: true,
 		},
+		{
+			name: "complete detail supersedes a taken preview time", checked: true,
+			responses: []response{preview(slot(first), fmt.Sprintf(`{"day":%q,"isLimitedDay":true,"termsCounter":{"termsNumber":1}}`, first.Format(dateFormat))),
+				{path: oneDayTermsURL, status: http.StatusOK, body: fmt.Sprintf(`{"serviceVariantId":2,"termsForDay":{"day":%q,"terms":[]}}`, first.Format(dateFormat))}},
+		},
 		{name: "first request returns 401", responses: []response{unauthorized}, wantErr: ErrAuthentication},
 		{
 			name: "later 401 retains prior evidence and reports authentication failure", to: twoWindows,

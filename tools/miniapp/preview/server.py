@@ -9,6 +9,7 @@ Open /?tab=history, /?tab=watches or add &scenario=empty|session|long|booking
 (booking: the server offers booking; the 08:30 time answers "taken", others "confirmed") and &lang=pl|en|ru|uk|be.
 No Telegram, database or LUX MED account is needed."""
 import json, sys, pathlib
+from zoneinfo import ZoneInfo
 from datetime import datetime, timedelta, timezone
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -46,15 +47,22 @@ def slots(scenario):
             row(5, day(-1, 10, 0), d1, f1, a1, 'expired')]
     # Booking results persist for the server's lifetime: confirmed times leave the list, taken ones stay unavailable.
     rows = [dict(r, Status='expired') if BOOKED.get(r['ID']) == 'taken' else r for r in rows if BOOKED.get(r['ID']) != 'confirmed']
-    # Same order as the server: upcoming nearest first, then past or expired newest first.
-    now = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-    upcoming = sorted((r for r in rows if r['DateTime'] >= now and r['Status'] != 'expired'), key=lambda r: r['DateTime'])
-    return upcoming + sorted((r for r in rows if r not in upcoming), key=lambda r: r['DateTime'], reverse=True)
+    now = datetime.now(timezone.utc)
+    return sorted((r for r in rows if r['Status'] != 'expired' and datetime.fromisoformat(r['DateTime']) > now),
+                  key=lambda r: r['DateTime'])
 
 def available_count(scenario):
-    now = datetime.now(timezone.utc)
-    return sum(row['Status'] != 'expired' and datetime.fromisoformat(row['DateTime'].replace('Z', '+00:00')) > now
-               for row in slots(scenario))
+    return len(slots(scenario))
+
+def history(scenario, body):
+    groups = {}
+    for row in slots(scenario):
+        day = datetime.fromisoformat(row['DateTime']).astimezone(ZoneInfo('Europe/Warsaw')).date().isoformat()
+        groups.setdefault(day, []).append(row)
+    requested = json.loads(body).get('Day', '')
+    day = requested if requested in groups else next(iter(groups), '')
+    return dict(Day=day, Days=[dict(Date=k, Count=len(v)) for k,v in groups.items()],
+                Slots=groups.get(day, []) if requested else slots(scenario), More=False)
 
 def watches(scenario):
     base = dict(ID=1, Name='Echo serca', ServiceID=11, ServiceName='Echo serca (USG serca)', CityID=1, CityName='Warszawa', Status='active',
@@ -149,7 +157,7 @@ class H(BaseHTTPRequestHandler):
                 'autobook': lambda: autobook(body),
                 'connect': lambda: connect(self.headers.get('Host', 'localhost'), scenario, lang),
                 'load': lambda: dict(Watches=watches(scenario), AvailableSlots=available_count(scenario), AccountStatus='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected', Locale=lang, Booking=booking, CityID=1, CityName='Warszawa', MinimumMinutes=2, DefaultMinutes=10),
-                'history': lambda: dict(Slots=slots(scenario), More=False),
+                'history': lambda: history(scenario, body),
                 'account': lambda: dict(state='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected'),
                 'cities': lambda: [dict(ID=1, Name='Warszawa')],
                 'procedures': lambda: dict(Items=[dict(ID=11, Name='Echo serca (USG serca)'), dict(ID=12, Name='Konsultacja dermatologiczna')], More=False),

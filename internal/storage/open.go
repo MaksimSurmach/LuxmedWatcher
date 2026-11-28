@@ -127,6 +127,18 @@ func (db *DB) Migrate(ctx context.Context) error {
 		}
 	}
 	if !db.postgres {
+		// Existing databases use INTEGER PRIMARY KEY, which otherwise reuses a deleted maximum
+		// ID. Old Telegram buttons and open Mini App cursors must never point at a different slot.
+		if _, err := tx.ExecContext(ctx, `
+			CREATE TABLE IF NOT EXISTS appointment_history_sequence (
+				singleton INTEGER PRIMARY KEY CHECK(singleton=1), high_id INTEGER NOT NULL
+			);
+			INSERT OR IGNORE INTO appointment_history_sequence SELECT 1, COALESCE(MAX(id),0) FROM appointment_history;
+			CREATE TRIGGER IF NOT EXISTS remember_appointment_id AFTER INSERT ON appointment_history
+			BEGIN UPDATE appointment_history_sequence SET high_id=MAX(high_id,NEW.id) WHERE singleton=1; END;
+		`); err != nil {
+			return err
+		}
 		for _, column := range []struct{ table, name, definition string }{
 			{"luxmed_cities", "listed", "BOOLEAN NOT NULL DEFAULT TRUE"},
 			{"luxmed_access", "confirmed_unix", "BIGINT"},

@@ -211,7 +211,7 @@ components:
 
 **Creative North Star: "The Ticket Wallet"**
 
-Every found appointment is a ticket coupon kept in a wallet. A coupon has a perforated date stub on the left, punched notches where the stub tears off, and a body carrying the time, the doctor, the service and the street. A time that has been taken or has passed keeps its coupon, voided and stamped, so the history never silently disappears. Searches are boarding passes built from the same stub-and-body anatomy, with the stub reporting whether the search is still watching. The same paper, stock and ink carry the LUX MED sign-in page and the standalone remote viewer, so leaving the wallet to sign in never changes worlds: the remote browser sits in a sheet of stock like any other content.
+Every found appointment is a ticket coupon kept in a wallet. A coupon has a perforated date stub on the left, punched notches where the stub tears off, and a body carrying the time, the doctor, the service and the street. The date selector shows how many free times fall on each Warsaw calendar day. The wallet opens on the earliest available day and removes withdrawn or past times. Searches are boarding passes built from the same stub-and-body anatomy, with the stub reporting whether the search is still watching. The same paper, stock and ink carry the LUX MED sign-in page and the standalone remote viewer, so leaving the wallet to sign in never changes worlds: the remote browser sits in a sheet of stock like any other content.
 
 The mood is soft, calm and quiet, as the medical subject asks: warm paper ground, white coupon stock, one navy ink for text and every action. Colour carries meaning, never decoration: carbon purple marks times, ticket red marks dates, counts and stamps, green and amber report search health. Density is phone-first and single column, one coupon per row at full width, with the next action docked at the bottom of the screen. The world refuses the dashboard card stack, the generic white-and-blue booking app, and any black-and-yellow signage palette.
 
@@ -296,7 +296,6 @@ Depth is paper-and-stock: white stock lifted off warm paper by one soft navy-tin
 - **Toast** (`box-shadow: 0 10px 30px rgb(17 20 28 / .25)`): the announcement.
 
 ### Named Rules
-**The Void Goes Flat Rule.** A voided coupon loses its shadow and fill: it becomes a 1px perforation outline at 60% opacity with a struck-through time and a stamp. Spent tickets do not float.
 
 ## Shapes
 
@@ -336,7 +335,7 @@ On the sign-in page every control that is not the main action is a pill: stock f
 A two-way pill switch (Found, Searches) with a red Figures count beside each label; the current tab is a navy pill and its count fades to 75% of the label colour. A labeled Settings button on the right fills navy when Settings is open. The bar is sticky on paper. Icons are 20px inline SVG strokes at 1.75 width.
 
 ### Coupon (signature)
-The found-time ticket. A 76px stub (weekday muted, day number in red Figures, month in red) behind a dashed perforation with punched notches; the body holds the carbon time, the navy doctor and service, and the muted street truncated to one line. The soonest coupon's time grows to 1.85rem. Coupons deal in with an 8px rise and fade (0.42s, cubic-bezier(.16, 1, .3, 1), staggered 40ms), and lift 1px on hover. A gone or past coupon is voided and carries a red stamp.
+The found-time ticket. A 76px stub (weekday muted, day number in red Figures, month in red) behind a dashed perforation with punched notches; the body holds the carbon time, the navy doctor and service, and the muted street truncated to one line. The soonest coupon's time grows to 1.85rem. Coupons deal in with an 8px rise and fade (0.42s, cubic-bezier(.16, 1, .3, 1), staggered 40ms), and lift 1px on hover.
 
 ### Boarding pass
 A search card on the same anatomy with a 92px navy stub, top-aligned: the stub-state word on top (green active, red problem, amber degraded, muted paused), then the horizon figure (day number or day count, muted when paused) and its muted unit. The body carries the title, muted meta lines, the last successful check and flat-link actions.
@@ -365,7 +364,6 @@ The remote LUX MED browser is drawn inside a stock sheet (14px radius, stock lif
 - **Do** build new list items on the stub-and-body ticket anatomy with a 2px dashed perforation and paper-coloured notches.
 - **Do** lead every connection or health summary with the 8px status dot aligned to the first text line.
 - **Do** repeat the full token set, light and dark, on any page served outside the dashboard stylesheet (sign-in, viewer).
-- **Do** keep voided coupons visible: outline only, 60% opacity, struck-through time, rotated red stamp.
 - **Do** honour `prefers-reduced-motion`: all transitions and the deal, sheet and breathe animations sit inside the no-preference query. The sign-in page and viewer carry no animation.
 - **Do** keep tap targets at 44px or more and test at 360px with long Polish and Cyrillic strings in both themes.
 

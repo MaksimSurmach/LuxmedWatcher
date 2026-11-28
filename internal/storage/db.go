@@ -347,8 +347,13 @@ func (db *DB) CreateWatch(ctx context.Context, watch domain.Watch) (int64, error
 }
 
 func (db *DB) UpdateWatch(ctx context.Context, watch domain.Watch) error {
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	// Preserve a legacy sign-in error until the account has its own verification requirement.
-	res, err := db.sql.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE watches SET name=$1, city_id=$2, city_name=$3, service_id=$4, service_name=$5, doctor_id=$6,
 			doctor_name=$7, doctor_mode=$8, facility_mode=$9, facility_ids=$10, facility_names=$11, date_from=$12,
 			date_to=$13, next_days=$14, time_windows=$15, check_interval_seconds=$16, updated_at=$17,
@@ -357,7 +362,19 @@ func (db *DB) UpdateWatch(ctx context.Context, watch domain.Watch) error {
 				THEN last_error ELSE '' END
 		WHERE id=$18 AND user_id=$19 AND status <> $20
 	`, append(watchParameters(watch), time.Now().UTC(), watch.ID, watch.UserID, domain.WatchStatusDeleted)...)
-	return requireOneRow(res, err)
+	if err = requireOneRow(res, err); err != nil {
+		return err
+	}
+	if err = invalidateWatchAvailability(ctx, tx, watch.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func invalidateWatchAvailability(ctx context.Context, tx *sql.Tx, watchID int64) error {
+	_, err := tx.ExecContext(ctx, `UPDATE appointment_history SET status=$1 WHERE watch_id=$2 AND status NOT IN ($1,$3)`,
+		domain.HistoryStatusExpired, watchID, domain.HistoryStatusHidden)
+	return err
 }
 
 func watchParameters(watch domain.Watch) []any {
@@ -479,7 +496,15 @@ func (db *DB) SetWatchStatus(ctx context.Context, id int64, status domain.WatchS
 }
 
 func (db *DB) SetUserWatchStatus(ctx context.Context, userID, id int64, status domain.WatchStatus) error {
-	return setUserWatchStatus(ctx, db.sql, userID, id, status)
+	tx, err := db.sql.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := setUserWatchStatus(ctx, tx, userID, id, status); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (db *DB) ResumeWatchForMode(ctx context.Context, owner domain.User, id int64) error {
@@ -488,11 +513,23 @@ func (db *DB) ResumeWatchForMode(ctx context.Context, owner domain.User, id int6
 	})
 }
 
-func setUserWatchStatus(ctx context.Context, exec sqlExecutor, userID, id int64, status domain.WatchStatus) error {
-	res, err := exec.ExecContext(ctx, `
-		UPDATE watches SET status=$1, updated_at=$2 WHERE id=$3 AND user_id=$4 AND status <> $5
+func setUserWatchStatus(ctx context.Context, tx *sql.Tx, userID, id int64, status domain.WatchStatus) error {
+	res, err := tx.ExecContext(ctx, `
+		UPDATE watches SET status=$1, updated_at=$2 WHERE id=$3 AND user_id=$4 AND status <> $5 AND status <> $1
 	`, status, time.Now().UTC(), id, userID, domain.WatchStatusDeleted)
-	return requireOneRow(res, err)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		var exists int
+		return tx.QueryRowContext(ctx, "SELECT 1 FROM watches WHERE id=$1 AND user_id=$2 AND status=$3 AND status <> $4",
+			id, userID, status, domain.WatchStatusDeleted).Scan(&exists)
+	}
+	return invalidateWatchAvailability(ctx, tx, id)
 }
 
 func (db *DB) MarkWatchChecked(ctx context.Context, id int64, success bool, errText string) error {
@@ -532,10 +569,10 @@ func (db *DB) markWatchCheckedIfUnchanged(ctx context.Context, exec sqlExecutor,
 }
 
 func (db *DB) UpsertAppointmentHistory(ctx context.Context, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {
-	return upsertAppointmentHistory(ctx, db.sql, watchID, app)
+	return db.upsertAppointmentHistory(ctx, db.sql, watchID, app)
 }
 
-func upsertAppointmentHistory(ctx context.Context, reader sqlRowReader, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {
+func (db *DB) upsertAppointmentHistory(ctx context.Context, reader sqlRowReader, watchID int64, app domain.Appointment) (domain.AppointmentHistory, bool, error) {
 	if app.LegacyFingerprint != "" {
 		var legacyAddress string
 		err := reader.QueryRowContext(ctx, `
@@ -550,11 +587,15 @@ func upsertAppointmentHistory(ctx context.Context, reader sqlRowReader, watchID 
 		}
 	}
 	now := time.Now().UTC()
+	idColumn, idValue := "", ""
+	if !db.postgres {
+		idColumn, idValue = "id,", "(SELECT high_id + 1 FROM appointment_history_sequence WHERE singleton=1),"
+	}
 	row := reader.QueryRowContext(ctx, `
-		INSERT INTO appointment_history (
+		INSERT INTO appointment_history (`+idColumn+`
 			watch_id, external_id, fingerprint, date_time, service_id, service_name, doctor_id, doctor_name,
 			facility_id, facility_name, address, city_id, city_name, booking_url, first_seen_at, last_seen_at, seen_count, status, raw_payload
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, 1, $16, $17)
+		) VALUES (`+idValue+`$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $15, 1, $16, $17)
 		ON CONFLICT(watch_id, fingerprint) DO UPDATE SET
 			last_seen_at=excluded.last_seen_at,
 			seen_count=appointment_history.seen_count+1,
@@ -569,15 +610,22 @@ func upsertAppointmentHistory(ctx context.Context, reader sqlRowReader, watchID 
 }
 
 func (db *DB) MarkMissingAppointments(ctx context.Context, watchID int64, seenSince, notifiedBefore time.Time) error {
-	return db.markMissingAppointments(ctx, db.sql, watchID, seenSince, notifiedBefore)
+	return db.markMissingAppointments(ctx, db.sql, watchID, seenSince, notifiedBefore, nil, nil)
 }
 
-func (db *DB) markMissingAppointments(ctx context.Context, exec sqlExecutor, watchID int64, seenSince, notifiedBefore time.Time) error {
-	_, err := exec.ExecContext(ctx, `
+func (db *DB) markMissingAppointments(ctx context.Context, exec sqlExecutor, watchID int64, seenSince, notifiedBefore time.Time, from, end *time.Time) error {
+	query := `
 		UPDATE appointment_history SET status=$1,
-			last_notified_at=CASE WHEN `+db.dateTimeSQL("last_notified_at")+` <= `+db.dateTimeSQL("$2")+` THEN NULL ELSE last_notified_at END
-		WHERE watch_id=$3 AND `+db.dateTimeSQL("last_seen_at")+` < `+db.dateTimeSQL("$4")+` AND status <> $5
-	`, domain.HistoryStatusExpired, notifiedBefore.UTC(), watchID, seenSince.UTC(), domain.HistoryStatusHidden)
+			last_notified_at=CASE WHEN ` + db.dateTimeSQL("last_notified_at") + ` <= ` + db.dateTimeSQL("$2") + ` THEN NULL ELSE last_notified_at END
+		WHERE watch_id=$3 AND ` + db.dateTimeSQL("last_seen_at") + ` < ` + db.dateTimeSQL("$4") + ` AND status <> $5
+	`
+	args := []any{domain.HistoryStatusExpired, notifiedBefore.UTC(), watchID, seenSince.UTC(), domain.HistoryStatusHidden}
+	if from != nil {
+		when := db.dateTimeSQL("date_time")
+		query += " AND " + when + " >= " + db.dateTimeSQL("$6") + " AND " + when + " < " + db.dateTimeSQL("$7")
+		args = append(args, from.UTC(), end.UTC())
+	}
+	_, err := exec.ExecContext(ctx, query, args...)
 	return err
 }
 
@@ -590,59 +638,56 @@ func (db *DB) RecentHistory(ctx context.Context, userID int64, limit, offset int
 	return db.WatchHistory(ctx, userID, 0, limit, offset)
 }
 
-// AvailableHistoryCount counts currently offered times across the user's entire history.
+// Only running watches can confirm availability. Overlapping searches can observe the same slot.
+func (db *DB) availableHistoryFilter() string {
+	return `watch_id IN (SELECT id FROM watches WHERE user_id=$1 AND status='active')
+		AND status NOT IN ('expired','hidden') AND ` + db.dateTimeSQL("date_time") + " > " + db.dateTimeSQL("$2")
+}
+
 func (db *DB) AvailableHistoryCount(ctx context.Context, userID int64, asOf time.Time) (int, error) {
 	var count int
-	err := db.sql.QueryRowContext(ctx, `SELECT count(*) FROM appointment_history
-		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1)
-		AND status NOT IN ($2, $3) AND `+db.dateTimeSQL("date_time")+` > `+db.dateTimeSQL("$4"),
-		userID, domain.HistoryStatusHidden, domain.HistoryStatusExpired, asOf.UTC()).Scan(&count)
+	err := db.sql.QueryRowContext(ctx, "SELECT count(DISTINCT fingerprint) FROM appointment_history WHERE "+db.availableHistoryFilter(), userID, asOf.UTC()).Scan(&count)
 	return count, err
 }
 
-// UpcomingHistoryIDs captures the order for a history view. Future available slots
-// come first, followed by past and unavailable slots.
-func (db *DB) UpcomingHistoryIDs(ctx context.Context, userID int64, asOf time.Time, limit int) ([]int64, error) {
-	when := db.dateTimeSQL("date_time")
-	rows, err := db.sql.QueryContext(ctx, `
-		SELECT id FROM (
-			SELECT id, `+when+` AS slot_time,
-				CASE WHEN `+when+` > `+db.dateTimeSQL("$2")+` AND status <> $3 THEN 0 ELSE 1 END AS unavailable
-			FROM appointment_history
-			WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1) AND status <> $4
-		) ranked
-		ORDER BY unavailable, CASE WHEN unavailable = 0 THEN slot_time END ASC, slot_time DESC, id ASC
-		LIMIT $5
-	`, userID, asOf.UTC(), domain.HistoryStatusExpired, domain.HistoryStatusHidden, limit)
+type AvailableSlot struct {
+	ID       int64
+	DateTime time.Time
+}
+
+// AvailableHistoryIndex reads only IDs and times so counts cover every day before pagination.
+func (db *DB) AvailableHistoryIndex(ctx context.Context, userID int64, asOf time.Time) ([]AvailableSlot, error) {
+	rows, err := db.sql.QueryContext(ctx, `SELECT id, date_time FROM appointment_history WHERE id IN (
+		SELECT min(id) FROM appointment_history WHERE `+db.availableHistoryFilter()+` GROUP BY fingerprint
+	) ORDER BY `+db.dateTimeSQL("date_time")+`, id`, userID, asOf.UTC())
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var ids []int64
+	var slots []AvailableSlot
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var slot AvailableSlot
+		if err := rows.Scan(&slot.ID, &slot.DateTime); err != nil {
 			return nil, err
 		}
-		ids = append(ids, id)
+		slots = append(slots, slot)
 	}
-	return ids, rows.Err()
+	return slots, rows.Err()
 }
 
 // HistoryByIDs loads current slot data in the requested order, omitting hidden or removed slots.
-func (db *DB) HistoryByIDs(ctx context.Context, userID int64, ids []int64) ([]domain.AppointmentHistory, error) {
+func (db *DB) HistoryByIDs(ctx context.Context, userID int64, asOf time.Time, ids []int64) ([]domain.AppointmentHistory, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := []any{userID, domain.HistoryStatusHidden}
+	args := []any{userID, asOf.UTC()}
 	params := make([]string, 0, len(ids))
 	for _, id := range ids {
 		args = append(args, id)
 		params = append(params, "$"+strconv.Itoa(len(args)))
 	}
 	rows, err := db.sql.QueryContext(ctx, historySelect()+`
-		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1) AND status <> $2
-			AND id IN (`+strings.Join(params, ",")+`)
+		WHERE `+db.availableHistoryFilter()+` AND id IN (`+strings.Join(params, ",")+`)
 	`, args...)
 	if err != nil {
 		return nil, err
