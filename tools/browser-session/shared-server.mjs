@@ -67,7 +67,7 @@ function entryFor(id) {
 function deferCleanup(id, entry) {
   clearTimeout(entry.idle);
   entry.idle = setTimeout(() => {
-    if (!entry.busy && !entry.viewer) profiles.delete(id);
+    if (!entry.busy && !entry.viewer && !entry.parked) profiles.delete(id);
   }, Math.max(idleTime[mode], entry.expires - Date.now()));
   entry.idle.unref();
 }
@@ -80,7 +80,7 @@ const api = createServer(async (req, res) => {
   const isViewer = req.method === 'POST' && route === '/viewer' && !search;
   if (!isViewer && (req.method !== 'GET' || route !== '/session' && !allowedPortalResources.has(route))) return reply(res, 404);
   const entry = entryFor(id);
-  if (!entry || entry.busy || entry.viewer || !isViewer && Date.now() < entry.expires) return reply(res, 409);
+  if (!entry || entry.busy || entry.viewer || !isViewer && (entry.parked || Date.now() < entry.expires)) return reply(res, 409);
   if (isViewer) {
     entry.ticket = randomBytes(32).toString('hex');
     entry.expires = Date.now() + 45_000;
@@ -124,37 +124,70 @@ web.on('upgrade', (req, socket, head) => {
 
 async function view(id, entry, socket) {
   entry.viewer = socket;
-  const timeout = setTimeout(() => socket.close(), 10 * 60_000);
-  const disconnected = new Promise(resolve => socket.once('close', resolve));
+  const timeout = setTimeout(() => socket.close(1012), 10 * 60_000);
+  socket.on('message', () => timeout.refresh());
+  // A sleeping Telegram client may leave a half-open TCP connection.
+  let alive = true;
+  socket.on('pong', () => { alive = true; });
+  const heartbeat = setInterval(() => {
+    if (!alive) return socket.terminate();
+    alive = false;
+    socket.ping();
+  }, 12_000);
+  const disconnected = new Promise(resolve => socket.once('close', (code, reason) => resolve(code === 1000 && reason.toString() === 'finished')));
   socket.once('error', () => socket.terminate());
-  let handle;
+  const resumed = entry.parked;
+  clearTimeout(entry.parkTimer);
+  entry.parked = null;
+  let handle = resumed;
   let cleanup;
+  let finished = false;
 
   try {
-    handle = await provider.open(id);
+    handle ??= await provider.open(id);
     if (socket.readyState === WebSocket.OPEN) {
-      const report = observeSession(handle.page.context());
-      report(await checkPortal(handle.page));
+      if (!resumed) {
+        const report = observeSession(handle.page.context());
+        report(await checkPortal(handle.page));
+      }
       if (socket.readyState === WebSocket.OPEN) cleanup = await startScreencast(handle.page, socket);
     }
-    await disconnected;
+    finished = await disconnected;
   } catch (error) {
     socket.close(error?.code === 'BROWSER_BUSY' ? 1013 : 1011);
     await disconnected;
   } finally {
     clearTimeout(timeout);
+    clearInterval(heartbeat);
     await cleanup?.().catch(() => {});
-    if (handle) {
-      try {
-        await handle.save();
-        entry.needsLogin = false;
-      } catch {
-        console.warn('Could not save the LuxMed login profile');
-      }
-      await handle.close().catch(() => {});
+    if (handle && !stopping && !finished && cleanup && mode === 'chromium') {
+      entry.parked = handle;
+      entry.parkTimer = setTimeout(() => {
+        entry.parked = null;
+        entry.busy = true;
+        const task = release(entry, handle).finally(() => {
+          entry.busy = false;
+          deferCleanup(id, entry);
+        });
+        views.add(task);
+        void task.finally(() => views.delete(task));
+      }, 120_000);
+    } else if (handle) {
+      await release(entry, handle);
     }
     entry.viewer = null;
     if (!stopping) deferCleanup(id, entry);
+  }
+}
+
+async function release(entry, handle) {
+  try {
+    await handle.save();
+    entry.needsLogin = false;
+  } catch {
+    console.warn('Could not save the LuxMed login profile');
+  } finally {
+    await handle.close().catch(() => {});
   }
 }
 
@@ -165,6 +198,8 @@ async function stop() {
   stopping = true;
   for (const entry of profiles.values()) {
     clearTimeout(entry.idle);
+    clearTimeout(entry.parkTimer);
+    if (entry.parked) views.add(release(entry, entry.parked));
     entry.viewer?.terminate();
   }
   api.close();

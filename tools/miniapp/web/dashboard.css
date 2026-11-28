@@ -204,11 +204,17 @@ nav {
 /* Account and settings */
 .card { min-width: 0; padding: 16px; border-radius: 14px; background: var(--stock); box-shadow: var(--shadow); overflow-wrap: anywhere; }
 .account { gap: 12px; }
-.account-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 6px 12px; }
-.account-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
-.account-actions button { flex: 1 1 0; min-width: 9rem; font-size: .92rem; }
-.account-actions .flat { flex: 0 1 auto; min-width: 0; order: 2; }
-.account:is([data-state="needs_login"], [data-state="search_paused"]) #connect { background: var(--act); border-color: var(--act); color: var(--act-ink); }
+.account-panel { padding: 16px; border-radius: 12px; background: var(--tint); }
+.account[data-state="connected"] .account-panel { background: var(--ok-wash); }
+.account:is([data-state="needs_login"], [data-state="search_paused"]) .account-panel { background: var(--red-wash); }
+.account .account-status { display: flex; padding: 0; border-radius: 0; background: transparent; font-size: 1.25rem; }
+.account-activity { display: grid; gap: 6px; margin: 12px 0 0; }
+.account-activity:empty { display: none; }
+.account-activity div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; }
+.account-activity dt, .account-activity dd { margin: 0; font-size: .88rem; }
+.account-activity dd { font-variant-numeric: tabular-nums; }
+.login-viewer { position: fixed; inset: 0; width: 100%; height: 100%; max-width: none; max-height: none; margin: 0; padding: 0; border: 0; background: var(--paper); }
+.login-viewer iframe { display: block; border: 0; width: 100%; height: 100%; }
 [data-account-error]:empty { display: none; }
 
 /* Booking: a ticket that slides up from the bottom */

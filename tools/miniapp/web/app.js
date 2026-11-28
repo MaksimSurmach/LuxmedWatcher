@@ -7,9 +7,10 @@ import { Screencast } from '/screencast.js';
 initLogging('none');
 
 const telegram = window.Telegram?.WebApp;
-const initData = telegram?.initData ?? '';
+const bridge = window.frameElement?.loginSession;
+const initData = bridge?.initData || telegram?.initData || '';
 const locationURL = new URL(location.href);
-const ticket = locationURL.searchParams.get('ticket') || new URLSearchParams(initData).get('start_param');
+let ticket = locationURL.searchParams.get('ticket') || new URLSearchParams(initData).get('start_param');
 const returnToApp = locationURL.searchParams.get('return') === 'app';
 if (locationURL.searchParams.has('ticket')) {
   locationURL.searchParams.delete('ticket');
@@ -33,11 +34,10 @@ function renderLanguage() {
   const labels = {
     title: 'title', close: 'close', keyboard: 'keyboard', paste: 'paste', keyboardLabel: 'keyboard_hint',
     backspace: 'backspace', 'tab-key': 'tab_key', 'enter-key': 'enter_key',
-    'remote-notice': 'remote_notice', 'start-viewer': 'continue',
+    retry: 'retry',
   };
-  for (const [id, key] of Object.entries(labels)) element(id).textContent = label(key);
-  element('notice-lead').textContent = label('lead');
-  element('notice-more').textContent = label('lead_more');
+  for (const [id, key] of Object.entries(labels)) element(id).textContent = key === 'retry' ? t('common.retry') : label(key);
+  if (bridge) element('close').textContent = label('finish');
   document.title = label('title');
   screen.setAttribute('aria-label', label('screen'));
   element('scroll-up').setAttribute('aria-label', label('scroll_up'));
@@ -52,7 +52,11 @@ window.visualViewport?.addEventListener('resize', () => {
 });
 
 const keyCodes = { Tab: 0xff09, Backspace: 0xff08, Enter: 0xff0d };
-const opening = new AbortController();
+let opening;
+let retryTimer;
+let retries = 0;
+let standaloneToken;
+
 let viewer;
 let startupTimer;
 let connected = false;
@@ -60,98 +64,124 @@ let closed = false;
 let zoomed = false;
 let scrollDrag;
 
-function close(message) {
-  if (closed) return;
-  closed = true;
-  connected = false;
+function stopTransport(finished = false) {
   clearTimeout(startupTimer);
-  phase('closed');
-  document.querySelector('main').dataset.outcome = message === 'disconnected' ? 'done' : 'trouble';
-  hint.textContent = '';
-  opening.abort();
-  viewer?.disconnect();
+  clearTimeout(retryTimer);
+  opening?.abort();
+  opening = null;
+  const previous = viewer;
+  viewer = null;
+  previous?.disconnect(finished);
+  connected = false;
   keys.value = '';
-  screen.hidden = true;
-  typing.hidden = true;
-  controls.hidden = true;
+  screen.hidden = typing.hidden = controls.hidden = true;
+  zoomed = false;
+  zoom.textContent = label('zoom_in');
+  zoom.setAttribute('aria-pressed', 'false');
+  screen.classList.remove('screencast-zoomed');
+}
+
+function problem(message, retry = false) {
+  stopTransport();
+  phase('closed');
+  document.querySelector('main').dataset.outcome = 'trouble';
+  hint.textContent = '';
   status.textContent = label(message);
+  element('retry').hidden = !retry;
+  if (retry && retries < 8 && !document.hidden) {
+    retryTimer = setTimeout(() => { retries++; void start(); }, 1200 * (retries + 1));
+  }
+}
+
+async function standaloneAPI(action, data = {}) {
+  const response = await fetch('/api/dashboard/' + action, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData,
+      ...(standaloneToken && {Authorization: 'Bearer ' + standaloneToken}) },
+    body: JSON.stringify(data), redirect: 'error', cache: 'no-store', signal: opening.signal,
+  });
+  if (!response.ok) throw new Error(String(response.status));
+  return response.json();
+}
+
+async function launchTicket() {
+  if (bridge) return bridge.issueTicket();
+  if (!standaloneToken) ({ token: standaloneToken } = await standaloneAPI('auth'));
+  if (ticket) {
+    const first = ticket;
+    ticket = null;
+    return first;
+  }
+  const { url } = await standaloneAPI('resume-viewer');
+  return new URL(url).searchParams.get('ticket');
 }
 
 function init() {
   setLanguage(initialLanguage(telegram, locationURL.searchParams.get('lang')));
   renderLanguage();
-  element('close').hidden = !returnToApp && !(initData && typeof telegram?.close === 'function');
-  if (!initData || !ticket) {
-    close('missing');
-    return;
-  }
-  if (!window.isSecureContext) {
-    close('failed');
-    return;
-  }
-  phase('intro');
-  element('notice').hidden = false;
-  element('start-viewer').addEventListener('click', start, { once: true });
+  element('close').hidden = !bridge && !returnToApp && !(initData && typeof telegram?.close === 'function');
+  if (!initData || (!bridge && !ticket)) return problem('missing');
+  if (!window.isSecureContext) return problem('failed');
+  void start();
 }
 
 async function start() {
   if (closed) return;
-  element('notice').hidden = true;
+  stopTransport();
+  const attempt = new AbortController();
+  opening = attempt;
+  element('retry').hidden = true;
   phase('connecting');
-  status.textContent = label('starting');
-  startupTimer = setTimeout(() => close('failed'), 30_000);
+  status.textContent = label(retries ? 'reconnecting' : 'starting');
+  const fail = () => { if (opening === attempt) problem('interrupted', true); };
+  startupTimer = setTimeout(fail, 90_000);
   try {
+    const launch = await launchTicket();
+    if (opening !== attempt) return;
+    const authorization = bridge?.authorization || 'Bearer ' + standaloneToken;
     const response = await fetch('/api/session', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ initData, ticket }),
-      redirect: 'error',
-      cache: 'no-store',
-      signal: opening.signal,
+      method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: authorization },
+      body: JSON.stringify({ initData, ticket: launch }), redirect: 'error', cache: 'no-store', signal: attempt.signal,
     });
-    if (response.status === 403) {
-      close('access_denied');
-      return;
-    }
-    if (!response.ok) throw new Error('Request failed');
+    if (opening !== attempt) return;
+    if (response.status === 403) return problem('access_denied');
+    if (!response.ok) throw new Error(String(response.status));
     const { viewerToken, transport } = await response.json();
-    if (closed) return;
-    if (typeof viewerToken !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(viewerToken)) {
-      throw new Error('Invalid session');
-    }
-
+    if (opening !== attempt) return;
+    if (typeof viewerToken !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(viewerToken)) throw new Error('Invalid session');
     const address = new URL('/vnc', location.href);
     address.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
     const protocols = ['binary', `viewer-${viewerToken}`];
     screen.hidden = false;
-    if (transport === 'cdp') {
-      clearTimeout(startupTimer);
-      startupTimer = setTimeout(() => close('failed'), 90_000);
-      viewer = new Screencast(screen, address.href, protocols);
-    } else if (transport === undefined || transport === 'vnc') {
+    if (transport === 'cdp') viewer = new Screencast(screen, address.href, protocols);
+    else if (transport === undefined || transport === 'vnc') {
       viewer = new RFB(screen, address.href, { wsProtocols: protocols });
       viewer.scaleViewport = true;
-    } else {
-      throw new Error('Unknown viewer transport');
-    }
+    } else throw new Error('Unknown viewer transport');
     viewer.addEventListener('connect', () => {
-      if (closed) return;
+      if (opening !== attempt) return;
       clearTimeout(startupTimer);
       connected = true;
+      retries = 0;
       phase('live');
       status.textContent = label('live');
       hint.textContent = label('connected');
       controls.hidden = false;
-      if (telegram?.isVersionAtLeast?.('7.7')) telegram.disableVerticalSwipes();
+      if (!bridge && telegram?.isVersionAtLeast?.('7.7')) telegram.disableVerticalSwipes();
       if (matchMedia('(pointer: fine)').matches) viewer.focus({ preventScroll: true });
     });
-    viewer.addEventListener('disconnect', (event) => {
-      close(connected && event.detail?.clean ? 'disconnected' : 'failed');
-    });
-  } catch {
-    close('failed');
+    viewer.addEventListener('disconnect', fail);
+  } catch (error) {
+    if (opening !== attempt) return;
+    if (error.key === 'error.access_denied' || error.message === '403') return problem('access_denied');
+    if (error.key === 'error.reopen') return problem('missing');
+    fail();
   }
 }
+
+document.addEventListener('visibilitychange', () => {
+  if (!closed && !document.hidden && !element('retry').hidden) void start();
+});
+element('retry').onclick = () => { retries = 0; void start(); };
 
 function forwardText(text) {
   if (!connected || !text) return;
@@ -189,14 +219,16 @@ function sendKey(key, code) {
 }
 
 element('close').addEventListener('click', () => {
-  close('disconnected');
+  closed = true;
+  stopTransport(true);
+  if (bridge) { bridge.finish(); return; }
   if (returnToApp) {
     location.replace(`/app?tab=settings&lang=${language}${location.hash}`);
   } else {
     telegram?.close();
   }
 });
-window.addEventListener('pagehide', () => close('disconnected'));
+window.addEventListener('pagehide', () => { closed = true; stopTransport(); });
 function showKeyboard(show) {
   typing.hidden = !show;
   keyboard.setAttribute('aria-expanded', String(!typing.hidden));

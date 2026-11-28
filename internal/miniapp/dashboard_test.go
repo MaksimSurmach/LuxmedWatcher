@@ -143,6 +143,26 @@ func TestDashboardUsesTelegramIdentityAndExistingUserData(t *testing.T) {
 	}
 	token := session(signed)
 	otherToken := session(signTelegram(other.TelegramUserID, 12, time.Now(), priv))
+	// An open dashboard can reconnect after Telegram's launch proof expires.
+	oldProof := signTelegram(owner.TelegramUserID, 12, time.Now().Add(-10*time.Minute), priv)
+	for _, tc := range []struct {
+		auth string
+		want int
+	}{
+		{token, http.StatusNoContent}, {otherToken, http.StatusUnauthorized}, {"", http.StatusUnauthorized},
+	} {
+		req := httptest.NewRequest(http.MethodPost, dashboardPrefix+"viewer-access", nil)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("X-Telegram-Init-Data", oldProof)
+		if tc.auth != "" {
+			req.Header.Set("Authorization", "Bearer "+tc.auth)
+		}
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, req)
+		if res.Code != tc.want {
+			t.Fatalf("resume viewer access = %d, want %d", res.Code, tc.want)
+		}
+	}
 	type accountRevisions struct {
 		CredentialRevision     *int64
 		CredentialSaveRevision *int64

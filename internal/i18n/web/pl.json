@@ -188,5 +188,13 @@
   "watches.days_unit": "dni",
   "viewer.live": "Połączono ze zdalną przeglądarką",
   "viewer.lead": "Zaloguj się do LUX MED w oknie, które się otworzy.",
-  "viewer.lead_more": "Jeśli LUX MED poprosi o kod, wpisz go tam."
+  "viewer.lead_more": "Jeśli LUX MED poprosi o kod, wpisz go tam.",
+  "account.last_confirmed": "Dostęp potwierdzony",
+  "account.last_search": "Ostatnie wyszukiwanie",
+  "account.relogin": "Zaloguj się ponownie",
+  "account.without_password": "Zaloguj się bez zapisywania hasła",
+  "account.with_password": "Zaloguj się i zapisz hasło w bocie",
+  "viewer.finish": "Gotowe",
+  "viewer.reconnecting": "Ponowne łączenie…",
+  "viewer.interrupted": "Utracono połączenie z oknem logowania. Możesz połączyć się ponownie."
 }

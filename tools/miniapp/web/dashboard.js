@@ -102,7 +102,7 @@ function flash(message) {
 async function api(action, data = {}, attemptID = '') {
   let response;
   const headers = { 'Content-Type': 'application/json' };
-  if (action === 'auth' || action === 'connect') headers['X-Telegram-Init-Data'] = telegram.initData;
+  if (['auth', 'connect', 'resume-viewer'].includes(action)) headers['X-Telegram-Init-Data'] = telegram.initData;
   if (apiToken) headers.Authorization = `Bearer ${apiToken}`;
   if (attemptID) headers['X-LuxMed-Login-Attempt'] = attemptID;
   try {
@@ -149,53 +149,63 @@ function show(title, html, focus = true) {
   }
 }
 
-// The portal connection is only checked when the user asks (never automatically).
-// The pill names a state; the button below it carries the command.
-const accountStatusKey = (status) => status === 'no_saved_searches' ? 'watches.empty'
-  : ['needs_login', 'search_paused'].includes(status) ? 'watches.state_login' : `account.${status}`;
-
-// One main action per state: sign in when LUX MED needs it, otherwise check the connection.
 const needsSignIn = (account) => ['needs_login', 'search_paused'].includes(account);
+const accountStatusKey = (status) => needsSignIn(status) ? 'watches.state_login'
+  : status === 'no_saved_searches' ? 'account.unchecked' : `account.${status}`;
+
+function accountActivity() {
+  const format = new Intl.DateTimeFormat(language, { timeZone, dateStyle: 'medium', timeStyle: 'short' });
+  const lastSearch = Math.max(0, ...(state.Watches ?? []).map(w => Date.parse(w.LastCheckedAt) || 0));
+  const confirmed = Math.max(state.ConfirmedUnix * 1000 || 0, ...(state.Watches ?? []).map(w => Date.parse(w.LastSuccessAt) || 0));
+  return [['account.last_confirmed', confirmed], ['account.last_search', lastSearch]]
+    .filter(([, date]) => date > 0)
+    .map(([key, date]) => `<div><dt>${text(key)}</dt><dd><time datetime="${new Date(date).toISOString()}">${escape(format.format(date))}</time></dd></div>`).join('');
+}
+
 function accountSection() {
   const account = state.AccountStatus;
+  const connected = account === 'connected';
   return `<section class="card stack account" data-state="${account}" aria-labelledby="account-heading">
-    <div class="account-head">
-      <h2 id="account-heading">${text('account.title')}</h2>
-      <p class="account-status" data-state="${account}" role="status">${text(accountStatusKey(account))}</p>
-    </div>
-    <div class="account-actions">
-      ${state.SavedLogin ? '' : `<button type="button" class="${account === 'connected' ? 'flat' : 'secondary'}" id="connect"${account === 'connected' ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>`}
-      ${state.HasCredentials ? `<button type="button" class="flat danger" id="forget-credentials">${text(state.SavedLogin ? 'account.forget' : 'account.delete_credentials')}</button>` : ''}
-      <button type="button" class="${needsSignIn(account) ? 'flat' : 'secondary'}" id="account-check">${text('settings.check_account')}</button>
-    </div>
-    ${state.SavedLogin ? '' : `<p class="muted" id="account-instructions"${account === 'connected' ? ' hidden' : ''}>${text('account.instructions')}</p>`}
-    <details${state.SavedLogin && needsSignIn(account) ? ' open' : ''}>
-      <summary>${text(state.SavedLogin ? 'account.change_credentials' : 'account.password_mode')}</summary>
-      <form id="credentials" method="post" class="stack">
+    <h2 id="account-heading">${text('account.title')}</h2>
+    <div class="account-panel" role="status"><p class="account-status" data-state="${account}">${text(accountStatusKey(account))}</p>
+      <dl class="account-activity">${accountActivity()}</dl></div>
+    <button class="secondary" id="relogin" aria-expanded="false" aria-controls="login-methods"${connected ? '' : ' hidden'}>${text('account.relogin')}</button>
+    <div class="stack" id="login-methods"${connected ? ' hidden' : ''}>
+      <button type="button" class="primary" id="connect">${text('account.without_password')}</button>
+      <button type="button" class="secondary" id="password-mode" aria-expanded="false" aria-controls="credentials">${text('account.with_password')}</button>
+      <form id="credentials" method="post" class="stack" hidden>
         <label class="field">${text('account.login')}<input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="254" required></label>
         <label class="field">${text('account.password')}<input name="password" type="password" autocomplete="current-password" maxlength="1024" required></label>
         <p class="muted">${text('account.encryption')}</p>
         <button type="submit" class="primary">${text('account.save_credentials')}</button>
       </form>
-    </details>
+      ${state.HasCredentials ? `<button type="button" class="flat danger" id="forget-credentials">${text('account.delete_credentials')}</button>` : ''}
+    </div>
     <p class="muted error" data-account-error role="status"></p>
   </section>`;
 }
 
-async function signIn(revisions, attemptID, viewID) {
-  const { url } = await api('connect', revisions, attemptID);
-  let target;
-  try {
-    target = new URL(url);
-  } catch {
-    throw new DashboardError('error.link');
-  }
-  if (target.origin !== location.origin || target.pathname !== '/') throw new DashboardError('error.link');
-  target.searchParams.set('return', 'app');
-  target.hash = location.hash;
-  if (viewID !== renderID) return false;
-  location.assign(target.href);
-  return true;
+function openLoginViewer(issueTicket, finished) {
+  const dialog = document.createElement('dialog');
+  dialog.className = 'login-viewer';
+  dialog.setAttribute('aria-label', t('viewer.title'));
+  const frame = document.createElement('iframe');
+  frame.title = t('viewer.title');
+  frame.loginSession = { initData: telegram.initData, authorization: `Bearer ${apiToken}`,
+    issueTicket, finish: () => dialog.close() };
+  frame.src = `/?embedded=1&lang=${language}`;
+  dialog.append(frame);
+  document.body.append(dialog);
+  dialog.addEventListener('cancel', event => {
+    const done = frame.contentDocument?.querySelector('#close');
+    if (done) { event.preventDefault(); done.click(); }
+  });
+  dialog.addEventListener('close', () => {
+    frame.loginSession = null;
+    dialog.remove();
+    void finished();
+  }, { once: true });
+  dialog.showModal();
 }
 
 function accountModeChanged(latest, displayed) {
@@ -214,22 +224,16 @@ function refreshMountedAccount() {
     return;
   }
   const account = state.AccountStatus;
-  const connect = section.querySelector('#connect');
-  if (connect) {
-    const instructions = section.querySelector('#account-instructions');
-    instructions.hidden = account === 'connected';
-    if (instructions.hidden) connect.removeAttribute('aria-describedby');
-    else connect.setAttribute('aria-describedby', instructions.id);
-    connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
-    connect.className = account === 'connected' ? 'flat' : 'secondary';
-  } else if (needsSignIn(account) && section.dataset.state !== account) {
-    section.querySelector('details').open = true;
+  if (section.dataset.state !== account) {
+    section.querySelector('#relogin').hidden = account !== 'connected';
+    section.querySelector('#relogin').setAttribute('aria-expanded', 'false');
+    section.querySelector('#login-methods').hidden = account === 'connected';
   }
-  section.querySelector('#account-check').className = needsSignIn(account) ? 'flat' : 'secondary';
   section.dataset.state = account;
   const status = section.querySelector('.account-status');
   status.dataset.state = account;
   status.textContent = t(accountStatusKey(account));
+  section.querySelector('.account-activity').innerHTML = accountActivity();
 }
 
 function bindAccount() {
@@ -279,11 +283,68 @@ function bindAccount() {
 
   const failure = section.querySelector('[data-account-error]');
   const connect = section.querySelector('#connect');
-  if (connect) connect.onclick = () => void run(connect, () => chooseChrome(async (id) => {
-    if (!await signIn(revisions, id, viewID)) await refreshAccount();
+  const methods = section.querySelector('#login-methods');
+  const relogin = section.querySelector('#relogin');
+  relogin.onclick = () => {
+    methods.hidden = !methods.hidden;
+    relogin.setAttribute('aria-expanded', String(!methods.hidden));
+    if (!methods.hidden) connect.focus();
+  };
+  connect.onclick = () => void run(connect, () => chooseChrome(async (id) => {
+    let current = revisions;
+    if (SavedLogin) {
+      if (!window.confirm(t('account.forget'))) return;
+      await api('forget-credentials', revisions, id);
+      current = await api('load');
+    }
+    if (viewID !== renderID) return;
+    let selected = false;
+    async function issueTicket() {
+      let link;
+      if (selected) {
+        link = await api('resume-viewer');
+      } else {
+        try {
+          link = await api('connect', { CredentialRevision: current.CredentialRevision,
+            CredentialSaveRevision: current.CredentialSaveRevision }, id);
+          selected = true;
+        } catch (error) {
+          // Selecting Chromium commits before the agent can issue a viewer ticket.
+          if (error.key === 'error.unavailable') {
+            const latest = await api('load');
+            selected = !latest.SavedLogin && latest.CredentialRevision === current.CredentialRevision &&
+              latest.CredentialSaveRevision === current.CredentialSaveRevision + 1;
+          }
+          throw error;
+        }
+      }
+      const { url } = link;
+      const target = new URL(url);
+      const ticket = target.searchParams.get('ticket');
+      if (target.origin !== location.origin || target.pathname !== '/' || !ticket) throw new DashboardError('error.link');
+      return ticket;
+    }
+    openLoginViewer(issueTicket, async () => {
+      try {
+        for (let retry = 0; ; retry++) {
+          try { await api('account'); break; }
+          catch (err) {
+            if (err.key !== 'error.browser_busy' || retry >= 5) throw err;
+            await new Promise(resolve => setTimeout(resolve, 700));
+          }
+        }
+        await refreshAccount();
+      } catch (err) { await refreshAccount(err); }
+    });
   }, displayedAttempt()), failure);
 
   const form = section.querySelector('#credentials');
+  const passwordMode = section.querySelector('#password-mode');
+  passwordMode.onclick = () => {
+    form.hidden = !form.hidden;
+    passwordMode.setAttribute('aria-expanded', String(!form.hidden));
+    if (!form.hidden) form.elements.login.focus();
+  };
   form.onsubmit = (event) => {
     event.preventDefault();
     if (passwordSave?.saving || passwordSave?.choosingChrome) return;
@@ -316,21 +377,17 @@ function bindAccount() {
     await api('forget-credentials', revisions, id);
     await refreshAccount();
   }, SavedLogin ? displayedAttempt() : null), failure);
-  const check = section.querySelector('#account-check');
-  let refreshTimer;
-  let manualCheck = 0;
-
   async function showAccountSnapshot(latest) {
     if (latest.CredentialRevision < state.CredentialRevision ||
         latest.CredentialSaveRevision < state.CredentialSaveRevision) return;
     if (viewID !== renderID) {
       const {
         SavedLogin, HasCredentials, CredentialRevision, CredentialSaveRevision,
-        AccountStatus, ReconnectRequired, ReconnectEpisodeID,
+        AccountStatus, ConfirmedUnix, ReconnectRequired, ReconnectEpisodeID,
       } = latest;
       Object.assign(state, {
         SavedLogin, HasCredentials, CredentialRevision, CredentialSaveRevision,
-        AccountStatus, ReconnectRequired, ReconnectEpisodeID,
+        AccountStatus, ConfirmedUnix, ReconnectRequired, ReconnectEpisodeID,
       });
       refreshMountedAccount();
       return;
@@ -340,48 +397,17 @@ function bindAccount() {
       await switchTab(tab, { reload: false });
       return;
     }
+    const wasPending = section.dataset.state === 'verification_pending';
     refreshMountedAccount();
+    if (!wasPending && state.AccountStatus === 'verification_pending' && section.isConnected) setTimeout(pollPending, 5000);
   }
 
-  function scheduleRefresh() {
-    clearTimeout(refreshTimer);
-    if (!check.isConnected || !['verification_pending', 'search_paused'].includes(state.AccountStatus)) return;
-    refreshTimer = setTimeout(refreshAccountStatus, 5000);
+  async function pollPending() {
+    if (!section.isConnected || state.AccountStatus !== 'verification_pending') return;
+    if (!document.hidden) await refreshAccount().catch(() => {});
+    if (section.isConnected && state.AccountStatus === 'verification_pending') setTimeout(pollPending, 5000);
   }
-
-  async function refreshAccountStatus() {
-    if (!check.isConnected) return;
-    if (!document.hidden && !check.disabled) {
-      const revision = manualCheck;
-      try {
-        const latest = await api('load');
-        if (check.isConnected && revision === manualCheck &&
-            (latest.AccountStatus !== state.AccountStatus || accountModeChanged(latest, displayed))) {
-          await showAccountSnapshot(latest);
-        }
-      } catch (error) {
-        if (check.isConnected && revision === manualCheck && ['error.reopen', 'error.access_denied'].includes(error?.key)) {
-          failure.textContent = errorText(error);
-          return;
-        }
-      }
-    }
-    scheduleRefresh();
-  }
-
-  check.onclick = () => void run(check, async () => {
-    manualCheck++;
-    clearTimeout(refreshTimer);
-    try {
-      await api('account');
-      if (!check.isConnected) return;
-      const latest = await api('load');
-      if (check.isConnected) await showAccountSnapshot(latest);
-    } finally {
-      scheduleRefresh();
-    }
-  }, failure);
-  scheduleRefresh();
+  if (state.AccountStatus === 'verification_pending') setTimeout(pollPending, 5000);
 }
 
 function hoursLabel(windows) {

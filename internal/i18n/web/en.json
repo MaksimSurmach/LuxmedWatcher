@@ -188,5 +188,13 @@
   "watches.days_unit": "days",
   "viewer.live": "Connected to the remote browser",
   "viewer.lead": "Sign in to LUX MED in the window that opens.",
-  "viewer.lead_more": "If LUX MED asks for a code, enter it there."
+  "viewer.lead_more": "If LUX MED asks for a code, enter it there.",
+  "account.last_confirmed": "Access confirmed",
+  "account.last_search": "Last search",
+  "account.relogin": "Sign in again",
+  "account.without_password": "Sign in without saving the password",
+  "account.with_password": "Sign in and save the password in the bot",
+  "viewer.finish": "Done",
+  "viewer.reconnecting": "Reconnecting…",
+  "viewer.interrupted": "The sign-in window lost its connection. You can reconnect here."
 }
