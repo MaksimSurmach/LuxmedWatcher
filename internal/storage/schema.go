@@ -80,6 +80,7 @@ CREATE TABLE IF NOT EXISTS watches (
 	id %[4]s,
 	user_id %[5]s NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
+	auto_book BOOLEAN NOT NULL DEFAULT FALSE,
 	status TEXT NOT NULL CHECK (status IN ('%[1]s','%[2]s','%[3]s')),
 	city_id INTEGER NOT NULL,
 	city_name TEXT NOT NULL,
@@ -126,6 +127,32 @@ CREATE TABLE IF NOT EXISTS appointment_history (
 	status TEXT NOT NULL,
 	raw_payload TEXT NOT NULL DEFAULT '',
 	UNIQUE(watch_id, fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS bookings (
+	id %[4]s,
+	user_id %[5]s NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	watch_id %[5]s NOT NULL REFERENCES watches(id),
+	slot_id %[5]s NOT NULL,
+	fingerprint TEXT NOT NULL,
+	date_time %[6]s NOT NULL,
+	service TEXT NOT NULL,
+	doctor TEXT NOT NULL,
+	place TEXT NOT NULL,
+	automatic BOOLEAN NOT NULL,
+	provider_id TEXT NOT NULL DEFAULT '',
+	status TEXT NOT NULL CHECK (status IN ('pending','unknown','confirmed')),
+	reminders BOOLEAN NOT NULL DEFAULT FALSE,
+	UNIQUE (user_id, fingerprint)
+);
+
+CREATE TABLE IF NOT EXISTS booking_messages (
+	booking_id %[5]s NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+	kind TEXT NOT NULL,
+	due_at %[6]s NOT NULL,
+	claim_until %[6]s,
+	sent BOOLEAN NOT NULL DEFAULT FALSE,
+	PRIMARY KEY (booking_id, kind)
 );
 
 CREATE TABLE IF NOT EXISTS notification_history (

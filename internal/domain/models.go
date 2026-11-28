@@ -117,6 +117,7 @@ type TimeWindow struct {
 }
 
 type Watch struct {
+	AutoBook             bool
 	ID                   int64
 	UserID               int64
 	Name                 string
@@ -144,20 +145,21 @@ type Watch struct {
 }
 
 type Appointment struct {
-	ExternalID   string
-	Fingerprint  string
-	DateTime     time.Time
-	ServiceID    int
-	ServiceName  string
-	DoctorID     int
-	DoctorName   string
-	FacilityID   int
-	FacilityName string
-	Address      string
-	CityID       int
-	CityName     string
-	BookingURL   string
-	RawPayload   string
+	BookingDetails []byte `json:"-"`
+	ExternalID     string
+	Fingerprint    string
+	DateTime       time.Time
+	ServiceID      int
+	ServiceName    string
+	DoctorID       int
+	DoctorName     string
+	FacilityID     int
+	FacilityName   string
+	Address        string
+	CityID         int
+	CityName       string
+	BookingURL     string
+	RawPayload     string
 
 	// LegacyFingerprint is the lookup key for an existing row with the same address.
 	LegacyFingerprint string `json:"-"`

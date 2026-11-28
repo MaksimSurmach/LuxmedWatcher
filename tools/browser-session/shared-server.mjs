@@ -1,7 +1,7 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer } from 'node:http';
 import { WebSocket, WebSocketServer } from 'ws';
-import { allowedPortalResources } from './portal-api.mjs';
+import { allowedPortalResources, isBookingRequest, readBookingBody } from './portal-api.mjs';
 import { requestPortalResource } from './direct-session.mjs';
 import { checkPortal, observeSession, portalOrigin } from './session.mjs';
 import { startScreencast } from './screencast-server.mjs';
@@ -78,7 +78,8 @@ const api = createServer(async (req, res) => {
   if (!address) return reply(res, 403);
   const { id, route, search } = address;
   const isViewer = req.method === 'POST' && route === '/viewer' && !search;
-  if (!isViewer && (req.method !== 'GET' || route !== '/session' && !allowedPortalResources.has(route))) return reply(res, 404);
+  const booking = isBookingRequest(req.method, route, search);
+  if (!isViewer && !booking && (req.method !== 'GET' || route !== '/session' && !allowedPortalResources.has(route))) return reply(res, 404);
   const entry = entryFor(id);
   if (!entry || entry.busy || entry.viewer || !isViewer && (entry.parked || Date.now() < entry.expires)) return reply(res, 409);
   if (isViewer) {
@@ -91,7 +92,9 @@ const api = createServer(async (req, res) => {
   entry.busy = true;
   try {
     if (entry.needsLogin) return reply(res, 401);
-    const { status, body, retryAfter } = await requestPortalResource(profileDir, id, route === '/session' ? route : route + search);
+    const payload = booking ? await readBookingBody(req) : undefined;
+    if (booking && !payload) return reply(res, 400);
+    const { status, body, retryAfter } = await requestPortalResource(profileDir, id, route + search, { payload });
     entry.needsLogin = status === 401;
     return reply(res, status, body, retryAfter);
   } catch (error) {

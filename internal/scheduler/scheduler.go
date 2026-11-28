@@ -242,6 +242,13 @@ func (r *Runner) checkWithAccount(ctx context.Context, requested domain.Watch, m
 		}
 	}
 	count, err = r.run(ctx, user, watch, state, started)
+	if errors.Is(err, errAutoBooked) {
+		r.mu.Lock()
+		state.next = time.Now().Add(r.minimumInterval)
+		state.failures = 0
+		r.mu.Unlock()
+		return count, nil
+	}
 	r.noteAccessFailure(state, err)
 	if errors.Is(err, luxmed.ErrBrowserBusy) && !errors.Is(err, luxmed.ErrUnavailable) &&
 		!errors.Is(err, luxmed.ErrPartialResults) && count == 0 {
@@ -309,27 +316,9 @@ func (r *Runner) checkWithAccount(ctx context.Context, requested domain.Watch, m
 }
 
 func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, state *accountCheck, started time.Time) (int, error) {
-	browser := r.browsers[user.TelegramUserID]
-	if r.browsers != nil && browser == nil {
-		return 0, ErrInactive
-	}
-	account, err := r.db.LoginAccount(ctx, user.ID, browser != nil)
-	var client luxmed.Client
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		state.client = nil
-		state.encryptedPassword = ""
-		if browser == nil {
-			return 0, ErrNoAccount
-		}
-		client = browser.Client()
-	case err != nil:
-		return 0, fmt.Errorf("load LuxMed account: %w", err)
-	default:
-		client, err = r.passwordClient(ctx, account, state)
-		if err != nil {
-			return 0, err
-		}
+	client, account, err := r.searchClient(ctx, user, state)
+	if err != nil {
+		return 0, err
 	}
 	result, searchErr := client.SearchAppointments(ctx, watch)
 	if searchErr == nil && !result.Checked && !luxmed.SearchWindowOpen(watch, time.Now()) {
@@ -377,6 +366,24 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 	if err != nil {
 		return len(seen), errors.Join(searchErr, fmt.Errorf("save search history: %w", err))
 	}
+	if !errors.Is(searchErr, luxmed.ErrUnavailable) && !errors.Is(searchErr, luxmed.ErrBrowserBusy) {
+		if err := r.autoBook(ctx, user, watch, distinct, client); err != nil {
+			if errors.Is(err, errAutoBooked) {
+				return len(seen), err
+			}
+			searchErr = errors.Join(searchErr, err)
+		}
+	}
+	if watch.AutoBook && len(pending) > 0 {
+		ids := make([]int64, 0, len(pending))
+		for _, item := range pending {
+			ids = append(ids, item.ID)
+		}
+		pending, err = r.db.HistoryByIDs(ctx, user.ID, time.Now(), ids)
+		if err != nil {
+			return len(seen), errors.Join(searchErr, err)
+		}
+	}
 	if len(pending) == 0 {
 		return len(seen), searchErr
 	}
@@ -405,6 +412,32 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		recordErr = fmt.Errorf("record notification delivery: %w", recordErr)
 	}
 	return len(seen), errors.Join(searchErr, notifyErr, recordErr)
+}
+
+func (r *Runner) searchClient(ctx context.Context, user domain.User, state *accountCheck) (luxmed.Client, domain.LuxMedAccount, error) {
+	browser := r.browsers[user.TelegramUserID]
+	if r.browsers != nil && browser == nil {
+		return nil, domain.LuxMedAccount{}, ErrInactive
+	}
+	account, err := r.db.LoginAccount(ctx, user.ID, browser != nil)
+	var client luxmed.Client
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		state.client = nil
+		state.encryptedPassword = ""
+		if browser == nil {
+			return nil, account, ErrNoAccount
+		}
+		client = browser.Client()
+	case err != nil:
+		return nil, account, fmt.Errorf("load LuxMed account: %w", err)
+	default:
+		client, err = r.passwordClient(ctx, account, state)
+		if err != nil {
+			return nil, account, err
+		}
+	}
+	return client, account, nil
 }
 
 func (r *Runner) requireReconnect(ctx context.Context, user domain.User) error {
@@ -961,6 +994,7 @@ func (s *Scheduler) Run(ctx context.Context) {
 	var checks sync.WaitGroup
 	defer checks.Wait()
 	checks.Go(func() { s.maintainBrowserSessions(ctx) })
+	checks.Go(func() { s.deliverBookingMessages(ctx) })
 	dispatched := make(chan struct{}, cap(s.runner.capacity))
 	for ctx.Err() == nil {
 		now := time.Now()

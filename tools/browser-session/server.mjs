@@ -4,7 +4,7 @@ import { randomBytes } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { connect } from 'node:net';
-import { allowedPortalResources, fetchCatalog } from './portal-api.mjs';
+import { allowedPortalResources, fetchCatalog, isBookingRequest, readBookingBody } from './portal-api.mjs';
 import { observeSession, portalOrigin, portalSessionState, probePortal } from './session.mjs';
 import { renderViewerPage } from './viewer-copy.mjs';
 
@@ -60,7 +60,8 @@ const api = createServer(async (req, res) => {
         busy = false;
       }
     }
-    if (req.method !== 'GET' || (url.pathname !== '/session' && !allowedPortalResources.has(url.pathname)) || url.search.length > 4096) {
+    const booking = isBookingRequest(req.method, url.pathname, url.search);
+    if ((!booking && (req.method !== 'GET' || url.pathname !== '/session' && !allowedPortalResources.has(url.pathname))) || url.search.length > 4096) {
       return reply(res, 404);
     }
     busy = true;
@@ -68,7 +69,9 @@ const api = createServer(async (req, res) => {
       const { status, retryAfter } = await portalReady();
       if (status !== 200) return reply(res, status, '', retryAfter);
       if (url.pathname === '/session') return reply(res, 200);
-      const result = await fetchCatalog(page, url.pathname + url.search);
+      const payload = booking ? await readBookingBody(req) : undefined;
+      if (booking && !payload) return reply(res, 400);
+      const result = await fetchCatalog(page, url.pathname + url.search, payload);
       if (result.status === 401) readyUntil = 0;
       return reply(res, result.status, result.body, result.retryAfter);
     } finally {

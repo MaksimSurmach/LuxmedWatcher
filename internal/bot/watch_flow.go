@@ -40,7 +40,7 @@ func allowsFlowCallback(state *flow, data string) bool {
 		return kind == flowWatchDays
 	case strings.HasPrefix(data, "interval:"):
 		return kind == flowWatchInterval
-	case strings.HasPrefix(data, "confirm:"):
+	case data == "autobook:toggle" || strings.HasPrefix(data, "confirm:"):
 		return kind == flowWatchConfirm
 	default:
 		return true
@@ -219,12 +219,22 @@ func (b *Bot) previewWatch(user domain.User, state *flow, interval time.Duration
 	state.Watch.CheckIntervalSeconds = intervalSeconds(max(time.Minute, interval))
 	state.Watch.Name = state.Watch.ServiceName + " · " + state.Watch.CityName
 	state.Kind, state.Confirmation = flowWatchConfirm, randomCode()
-	b.sendWatchStep(user, b.watchSummary(user, state.Watch), tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.confirm_watch"), "confirm:"+state.Confirmation),
-			tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.cancel"), "cancel"),
-		),
-	))
+	summary := b.watchSummary(user, state.Watch)
+	rows := [][]tgbotapi.InlineKeyboardButton{tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.confirm_watch"), "confirm:"+state.Confirmation),
+		tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.cancel"), "cancel"),
+	)}
+	if b.runner != nil {
+		key := "booking.auto_off"
+		if state.Watch.AutoBook {
+			key = "booking.auto_on"
+		}
+		summary += "\n\n" + b.catalog.T(user.Locale, "booking.auto_note")
+		rows = append([][]tgbotapi.InlineKeyboardButton{{tgbotapi.NewInlineKeyboardButtonData(
+			b.catalog.T(user.Locale, key), "autobook:toggle",
+		)}}, rows...)
+	}
+	b.sendWatchStep(user, summary, tgbotapi.NewInlineKeyboardMarkup(rows...))
 }
 
 func (b *Bot) watchSummary(user domain.User, watch domain.Watch) string {

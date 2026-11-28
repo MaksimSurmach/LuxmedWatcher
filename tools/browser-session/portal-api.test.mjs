@@ -25,7 +25,7 @@ test('catalog only treats a redirect to the portal login page as authentication 
   const origin = `http://127.0.0.1:${server.address().port}`;
   globalThis.location = { origin };
   t.after(() => { delete globalThis.location; });
-  const page = { evaluate: (fn, path) => fn(origin + path) };
+  const page = { evaluate: (fn, args) => fn({ ...args, target: origin + args.target }) };
 
   assert.deepEqual(await fetchCatalog(page, '/login-redirect'), { status: 401 });
   assert.deepEqual(await fetchCatalog(page, '/maintenance-redirect'), { status: 502 });
