@@ -781,7 +781,7 @@ async function editor(watch, focusPicks = false) {
           `<button type="button" class="chip" data-days="${presetDays[i]}">${text(key)}</button>`).join('')}
           <button type="button" class="chip" data-range>${text('editor.date_range')}</button></div></div>
       <select name="dateMode" hidden><option value="days">${text('editor.upcoming')}</option><option value="range">${text('editor.date_range')}</option></select>
-      <label class="field" id="days">${text('editor.days_ahead')}<input name="days" type="number" min="1" max="90" value="${watch?.NextDays || 14}"></label>
+      <label class="field" id="days">${text('editor.days_ahead')}<input name="days" type="number" required min="1" max="90" value="${watch?.NextDays || 14}"></label>
       <div class="columns" id="range" hidden>
         <label class="field">${text('editor.from')}<input name="from" type="date" value="${dateOnly(watch?.DateFrom)}"></label>
         <label class="field">${text('editor.to')}<input name="to" type="date" value="${dateOnly(watch?.DateTo)}"></label>
@@ -870,13 +870,15 @@ async function editor(watch, focusPicks = false) {
       ['editor.city', Number(fields.city.value) ? fields.city.selectedOptions[0]?.textContent : t('editor.choose_city'), 1],
       ['editor.period', dates, 2],
       ['editor.days_and_hours', form.querySelector('[data-hours][aria-pressed="true"]')?.textContent ?? hoursLabel(hours), 2],
-      ['editor.doctor', doctorName, 4],
-      ['editor.clinics', clinics, 4],
-      ['editor.interval', fields.minutes.value || '—', 4],
+      ['editor.doctor', doctorName, 'doctor'],
+      ['editor.clinics', clinics, 'clinics'],
+      ['editor.interval', fields.minutes.value || '—', 'minutes'],
     ];
-    summary.innerHTML = rows.map(([label, value, goto]) => `<div><dt>${text(label)}</dt><dd>${escape(value)}</dd>${goto
-      ? `<button type="button" class="flat change" data-goto="${goto}" aria-label="${escape(`${t('editor.change')}: ${t(label)}`)}">${text('editor.change')}</button>` : ''}</div>`).join('');
-
+    if (!summary.childElementCount) {
+      summary.innerHTML = rows.map(([label, , destination]) => `<div><dt>${text(label)}</dt><dd></dd>
+        <button type="button" class="flat change" data-goto="${destination}" aria-label="${escape(`${t('editor.change')}: ${t(label)}`)}">${text('editor.change')}</button></div>`).join('');
+    }
+    rows.forEach(([, value], index) => { summary.children[index].querySelector('dd').textContent = value ?? ''; });
   }
   function markSelection() {
     picked.textContent = service ? t('editor.selected_service', { service: service.Name }) : t('editor.choose_service');
@@ -962,9 +964,9 @@ async function editor(watch, focusPicks = false) {
   function updateDates() {
     const range = fields.dateMode.value === 'range';
     form.querySelector('#range').hidden = !range;
-    form.querySelector('#days').hidden = range || presetDays.includes(fields.days.value);
-    fields.from.required = range;
-    fields.to.required = range;
+    form.querySelector('#days').hidden = range;
+    fields.from.disabled = fields.to.disabled = !range;
+    fields.from.required = fields.to.required = range;
     fields.days.disabled = range;
   }
   fields.dateMode.value = watch?.DateFrom ? 'range' : 'days';
@@ -1020,10 +1022,10 @@ async function editor(watch, focusPicks = false) {
     }
   };
   search.onclick = () => void run(search, () => findServices(), error);
-  providers.onclick = () => templateProviders();
+  providers.onclick = () => void loadProviders();
 
-  function templateProviders() {
-    void run(providers, async () => {
+  function loadProviders() {
+    return run(providers, async () => {
       const selectedCity = fields.city.value;
       const selectedService = service.ID;
       const { Doctors, Facilities } = await api('providers', { CityID: Number(selectedCity), ServiceID: selectedService });
@@ -1118,11 +1120,28 @@ async function editor(watch, focusPicks = false) {
     picked.focus();
   }
   function stepInvalid(n) {
-    const invalid = [...form.querySelectorAll(`[data-step="${n}"] :is(input, select)`)].find((field) => field.willValidate && !field.validity.valid);
+    if (n === 2) {
+      const today = dateOnly(new Date());
+      const last = new Date(today + 'T00:00:00Z');
+      last.setUTCDate(last.getUTCDate() + 90);
+      fields.from.max = fields.to.max = last.toISOString().slice(0, 10);
+      fields.to.min = fields.from.value > today ? fields.from.value : today;
+      for (const row of form.querySelectorAll('[data-day]')) {
+        const checked = row.querySelector('[type="checkbox"]').checked;
+        const [from, to] = row.querySelectorAll('[type="time"]');
+        from.required = to.required = checked;
+        to.min = checked ? from.value : '';
+      }
+    }
+    const inputs = form.querySelectorAll(`[data-step="${n}"] :is(input, select)`);
+    const invalid = [...inputs].find((field) => field.willValidate && !field.validity.valid &&
+      (field.type !== 'time' || field.closest('[data-day]').querySelector('[type="checkbox"]').checked));
     if (!invalid) return false;
+    if (n !== step) goTo(n, false);
     invalid.closest('details')?.setAttribute('open', '');
     invalid.closest('#advanced')?.removeAttribute('hidden');
     invalid.focus();
+    invalid.reportValidity();
     error.textContent = t('error.invalid_fields');
     return true;
   }
@@ -1133,16 +1152,24 @@ async function editor(watch, focusPicks = false) {
   };
   back.onclick = () => (step === 1 ? void switchTab(tab) : goTo(step - 1));
   const advanced = form.querySelector('#advanced');
-  summary.onclick = (event) => {
+  summary.onclick = async (event) => {
     const target = event.target.closest('[data-goto]');
     if (!target) return;
-    // Doctor, clinics and interval open in place below the review instead of a fourth step.
-    if (target.dataset.goto === '4') {
-      advanced.hidden = false;
-      (providers.disabled ? fields.minutes : providers).focus();
+    const destination = target.dataset.goto;
+    if (destination === '1' || destination === '2') {
+      goTo(Number(destination));
       return;
     }
-    goTo(Number(target.dataset.goto));
+    advanced.hidden = false;
+    if (destination === 'minutes') {
+      fields.minutes.focus();
+      return;
+    }
+    const focused = document.activeElement;
+    if (!fields.doctor && !providers.disabled) await loadProviders();
+    if (step !== 3 || !form.isConnected || document.activeElement !== focused) return;
+    const field = destination === 'doctor' ? fields.doctor : providerOptions.querySelector('[data-facility]');
+    (field ?? providers).focus();
   };
   // Editing starts at the review: everything is already filled in.
   goTo(watch ? 3 : 1, false);
@@ -1154,21 +1181,21 @@ async function editor(watch, focusPicks = false) {
       return;
     }
     void run(save, async () => {
-      const invalid = Array.from(form.elements).find((field) => field.willValidate && !field.validity.valid);
-      if (invalid) {
-        const section = invalid.closest('details');
-        if (section) section.open = true;
-        invalid.focus();
-        throw new DashboardError('error.invalid_fields');
-      }
+      if ([1, 2, 3].some(stepInvalid)) return;
       if (!service) return serviceMissing();
       const windows = selectedHours();
       const range = fields.dateMode.value === 'range';
-      await api('watch', { ID: watch?.ID ?? 0, CityID: Number(fields.city.value), ServiceID: service.ID, DoctorID: doctor,
-        FacilityIDs: [...facilities], DateFrom: range ? fields.from.value : '', DateTo: range ? fields.to.value : '',
-        NextDays: range ? 0 : Number(fields.days.value), TimeWindows: windows, CheckMinutes: Number(fields.minutes.value) });
-      await update('watches');
-      flash(t('watches.saved'));
+      form.inert = true;
+      try {
+        await api('watch', { ID: watch?.ID ?? 0, CityID: Number(fields.city.value), ServiceID: service.ID, DoctorID: doctor,
+          FacilityIDs: [...facilities], DateFrom: range ? fields.from.value : '', DateTo: range ? fields.to.value : '',
+          NextDays: range ? 0 : Number(fields.days.value), TimeWindows: windows, CheckMinutes: Number(fields.minutes.value) });
+      } finally {
+        form.inert = false;
+      }
+      if (id !== renderID) return;
+      await switchTab('watches');
+      if (tab === 'watches') flash(t('watches.saved'));
     }, error);
   };
   const remove = form.querySelector('#delete');
