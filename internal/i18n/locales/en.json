@@ -75,7 +75,7 @@
   "flow.account.login": "This installation receives credentials through Telegram. Send your LUX MED login here to verify and save your login and password encrypted, or use /cancel.",
   "flow.account.delete_failed": "Sign-in stopped because Telegram did not delete your message. Delete it in the chat.",
   "flow.account.delete_failed_saved": "LUX MED credentials were already saved. Telegram did not delete your message. Delete it in the chat.",
-  "flow.account.password": "Send your LUX MED password.",
+  "flow.account.password": "Send your LUX MED password. The bot will check it after deleting your message.",
   "flow.account.removed": "LUX MED account disconnected. Your watches are paused.",
   "flow.account.canceled": "Sign-in canceled. This attempt did not save credentials.",
   "flow.account.retry_hint": "Use the button to start a new sign-in.",
