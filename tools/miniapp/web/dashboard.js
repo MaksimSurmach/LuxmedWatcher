@@ -135,6 +135,7 @@ async function run(button, action, errorTarget) {
 
 // Found and Searches are named by the switch above them, so their heading is for screen readers only.
 function show(title, html, focus = true) {
+  main.inert = false;
   const named = tab === 'history' || tab === 'watches';
   main.innerHTML = `<h1 class="${named ? 'sr-only' : 'title'}">${escape(title)}</h1>${html}`;
   if (focus) {
@@ -653,8 +654,12 @@ function bookingDialog(slot) {
   dialog.showModal();
 }
 
+function pending(label) {
+  return `<div class="pending-mark" role="status"><span class="pending-label">${text(label)}</span></div>`;
+}
+
 async function historyScreen(id) {
-  show(titleFor('history'), `${watchStatus()}<div class="stack" id="slots" tabindex="-1"><p class="muted">${text('history.loading')}</p></div>${newWatchButton()}`);
+  show(titleFor('history'), `${watchStatus()}<div class="stack" id="slots" tabindex="-1">${pending('history.loading')}</div>${newWatchButton()}`);
   bindShared();
   const results = main.querySelector('#slots');
   const loaded = [];
@@ -788,7 +793,7 @@ async function editor(watch, focusPicks = false) {
   const id = ++renderID;
   markTab('watches');
   const title = t(watch ? 'editor.edit' : 'watches.new');
-  show(title, `<p class="muted">${text('editor.loading_cities')}</p>`);
+  show(title, pending('editor.loading_cities'));
   let options;
   try {
     options = await getCities();
@@ -1271,10 +1276,17 @@ async function switchTab(next, { reload = true } = {}) {
   markTab(tab);
   try {
     if (reload) {
-      show(titleFor(next), `<p>${text('dashboard.loading')}</p>`, false);
-      const latest = await api('load');
-      if (id !== renderID) return;
-      applySnapshot(latest);
+      main.inert = true;
+      const indicator = setTimeout(() => {
+        if (id === renderID) show(titleFor(next), pending('dashboard.loading'), false);
+      }, 180);
+      try {
+        const latest = await api('load');
+        if (id !== renderID) return;
+        applySnapshot(latest);
+      } finally {
+        clearTimeout(indicator);
+      }
     }
     if (tab === 'watches') watches();
     if (tab === 'history') await historyScreen(id);
@@ -1306,7 +1318,6 @@ async function start() {
     screenError('Luxmed Watcher', new DashboardError('error.open_from_bot'));
     return;
   }
-  show('Luxmed Watcher', `<p class="muted">${text('dashboard.loading')}</p>`, false);
   // Older bot links still say tab=home; Found is the home now.
   const initial = params.get('tab') === 'home' ? 'history' : params.get('tab');
   try {
@@ -1314,7 +1325,10 @@ async function start() {
     void getCities(true).catch(() => {});
     await update(tabs.includes(initial) ? initial : 'history');
   } catch (error) {
-    screenError('Luxmed Watcher', error, error?.key === 'error.access_denied' ? undefined : start);
+    screenError('Luxmed Watcher', error, error?.key === 'error.access_denied' ? undefined : () => {
+      show('Luxmed Watcher', pending('dashboard.loading'), false);
+      void start();
+    });
   }
 }
 
@@ -1332,4 +1346,4 @@ navigation.onclick = (event) => {
   const button = event.target.closest('[data-tab]');
   if (button) void switchTab(button.dataset.tab);
 };
-void start();
+export const ready = start();

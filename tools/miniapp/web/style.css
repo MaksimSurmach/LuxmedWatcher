@@ -35,7 +35,6 @@ main {
     max(12px, env(safe-area-inset-bottom), var(--tg-content-safe-area-inset-bottom, 0px))
     var(--gutter);
 }
-#boot { padding-top: 24px; color: var(--muted); }
 
 header {
   display: flex;

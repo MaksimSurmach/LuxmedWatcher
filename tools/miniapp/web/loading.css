@@ -1,0 +1,55 @@
+#boot {
+  position: fixed;
+  inset: 0;
+  display: grid;
+  align-content: center;
+  justify-items: center;
+  gap: 12px;
+  padding: 16px 24px 10vh;
+  background: var(--paper);
+  text-align: center;
+}
+
+#boot:not([hidden]) ~ :not(noscript) { display: none; }
+
+.boot-brand {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  color: var(--ink);
+  font: 650 22px/1.15 system-ui, sans-serif;
+  letter-spacing: -.035em;
+}
+
+#boot:not([data-failed]) .boot-status, .pending-label {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.boot-status { max-width: 32ch; margin: 0; color: var(--text); }
+
+.pending-mark {
+  display: grid;
+  place-items: center;
+  min-height: 64px;
+}
+
+.pending-mark::after {
+  content: '';
+  width: 32px;
+  height: 24px;
+  background: url('/watcher-ticket.svg') center / contain no-repeat;
+}
+
+.boot-brand, .pending-mark::after {
+  animation: reveal-ticket 140ms ease-out 180ms backwards;
+}
+
+@keyframes reveal-ticket { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .boot-brand, .pending-mark::after { animation-duration: 0s; }
+}

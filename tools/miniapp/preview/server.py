@@ -21,7 +21,7 @@ STUB = '<script>window.Telegram={WebApp:{initDataUnsafe:{user:{first_name:"Anna"
 SCENARIOS = {'', 'empty', 'session', 'long', 'booking'}
 LANGS = {'pl', 'en', 'ru', 'uk', 'be'}
 RESTORED = set()  # scenarios whose LUX MED sign-in was restored through connect
-TYPES = {'.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.woff2': 'font/woff2'}
+TYPES = {'.js': 'text/javascript', '.css': 'text/css', '.svg': 'image/svg+xml', '.html': 'text/html', '.woff2': 'font/woff2'}
 
 def day(offset, hh, mm):
     d = (datetime.now(timezone.utc) + timedelta(days=offset)).replace(hour=hh - 1, minute=mm, second=0, microsecond=0)
@@ -129,14 +129,13 @@ class H(BaseHTTPRequestHandler):
             for field, value in {
                 'Locale': locale, 'JavaScript': labels['common.javascript_required'],
                 'Loading': labels['dashboard.loading'], 'Unavailable': labels['error.unavailable'],
-                'Retry': labels['common.retry'],
             }.items():
                 body = body.replace(('{{.' + field + '}}').encode(), escape(value).encode())
             # Scenario and language travel in initData, then in the session token, because the page
             # sends no Referer and the API calls carry no query string.
             # Only allow-listed values reach the inline script, and '<' is escaped for the HTML context.
             params = json.dumps(choose(q)).replace('<', '\\u003c')
-            body = body.replace(b'<script src="https://telegram.org/js/telegram-web-app.js?65"></script>', (STUB % params).encode())
+            body = body.replace(b'<script defer src="https://telegram.org/js/telegram-web-app.js?65"></script>', (STUB % params).encode())
         self.send(body, TYPES.get(f.suffix, 'application/octet-stream'))
     def do_POST(self):
         n = int(self.headers.get('Content-Length') or 0); body = self.rfile.read(n)

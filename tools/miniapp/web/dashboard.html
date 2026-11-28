@@ -9,14 +9,16 @@
   <meta name="theme-color" content="#11141c" media="(prefers-color-scheme: dark)">
   <title>Luxmed Watcher</title>
   <link rel="stylesheet" href="/dashboard.css">
-  <script src="https://telegram.org/js/telegram-web-app.js?65"></script>
+  <link rel="stylesheet" href="/loading.css">
+  <noscript><style>#boot { display: none; }</style></noscript>
+  <script defer src="https://telegram.org/js/telegram-web-app.js?65"></script>
   <script type="module" src="/boot.js"></script>
 </head>
 <body>
   <div class="shell">
     <section id="boot" data-entry="dashboard" data-boot-error="{{.Unavailable}}">
-      <p role="status">{{.Loading}}</p>
-      <a href="">{{.Retry}}</a>
+      <div class="boot-brand"><img src="/watcher-ticket.svg" width="72" height="56" alt="">Luxmed Watcher</div>
+      <p class="boot-status" role="status">{{.Loading}}</p>
     </section>
     <nav id="navigation" hidden>
       <div class="switch">
