@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws';
+import { setTimeout as delay } from 'node:timers/promises';
 
 export const viewport = { width: 1180, height: 728 };
 const mouseButtons = ['left', 'middle', 'right'];
@@ -11,6 +12,22 @@ const keyCodes = {
 const modifierBits = { Alt: 1, Control: 2, Meta: 4, Shift: 8 };
 
 export async function startScreencast(page, socket) {
+  // The portal redirect can swap Chromium's document target after DOMContentLoaded.
+  // Rebind to the same page so the portal keeps its login form.
+  for (let attempt = 0; ; attempt++) {
+    if (socket.readyState !== WebSocket.OPEN) throw new Error('Viewer disconnected');
+    try {
+      await page.bringToFront();
+      await page.waitForLoadState('domcontentloaded', { timeout: 5000 });
+      return await attachScreencast(page, socket);
+    } catch (error) {
+      if (attempt >= 5 || !error.message.includes('Not attached to an active page')) throw error;
+      await delay(200 * (attempt + 1));
+    }
+  }
+}
+
+async function attachScreencast(page, socket) {
   const cdp = await page.context().newCDPSession(page);
   let modifiers = 0;
   let buttons = 0;
