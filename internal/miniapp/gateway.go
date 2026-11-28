@@ -26,6 +26,7 @@ func (a *app) public(web, vendor fs.FS) http.Handler {
 			http.ServeFileFS(w, r, web, file)
 		})
 	}
+	mux.Handle("GET /fonts/", http.FileServerFS(web))
 	mux.HandleFunc("GET /i18n.js", serveDictionaries)
 	mux.HandleFunc("GET /i18n/{locale}", func(w http.ResponseWriter, r *http.Request) {
 		locale := r.PathValue("locale")
@@ -64,7 +65,7 @@ func (a *app) public(web, vendor fs.FS) http.Handler {
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		socketOrigin := "wss:" + strings.TrimPrefix(a.config.Origin, "https:")
-		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; connect-src 'self' "+socketOrigin+"; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org")
+		w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'self' "+socketOrigin+"; img-src 'self' data: blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'self' https://web.telegram.org")
 		mux.ServeHTTP(w, r)
 	})
 }
