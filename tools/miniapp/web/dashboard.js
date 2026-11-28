@@ -730,22 +730,112 @@ function cityOptions(items, selected, placeholder) {
   return option(0, placeholder) + items.map(({ ID, Name }) => option(ID, Name)).join('');
 }
 
+function preferenceField(name, label, options = '') {
+  return `<div class="field">
+    <span id="${name}-label">${text(label)}</span>
+    <button type="button" class="preference-value" data-field="${name}" aria-haspopup="dialog"
+      aria-labelledby="${name}-label ${name}-value"><span id="${name}-value"></span></button>
+    <select name="${name}" hidden>${options}</select>
+  </div>`;
+}
+
+function bindPreferencePicker(form, sheet) {
+  const choices = sheet.querySelector('.preference-options');
+  let active;
+  function sync(select, opening = false) {
+    const display = form.querySelector(`#${select.name}-value`);
+    const chosen = select.selectedOptions[0];
+    display.textContent = chosen?.textContent ?? '';
+    display.lang = chosen?.lang || document.documentElement.lang;
+    if (active !== select || !sheet.open) return;
+    const focusInList = choices.contains(document.activeElement);
+    const focused = focusInList ? document.activeElement.value : select.value;
+    choices.replaceChildren(...Array.from(select.options, option => {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.tabIndex = -1;
+      row.value = option.value;
+      row.textContent = option.textContent;
+      if (option.lang) row.lang = option.lang;
+      row.setAttribute('aria-pressed', String(option.selected));
+      return row;
+    }));
+    const rows = Array.from(choices.children);
+    const target = rows.find(row => row.value === focused) ?? rows.find(row => row.value === select.value);
+    if (target) {
+      target.tabIndex = 0;
+      if (opening || focusInList) target.focus();
+    }
+  }
+  for (const trigger of form.querySelectorAll('[data-field]')) {
+    trigger.onclick = () => {
+      active = form.elements.namedItem(trigger.dataset.field);
+      sheet.querySelector('h2').textContent = form.querySelector(`#${active.name}-label`).textContent;
+      trigger.focus({ preventScroll: true });
+      sheet.showModal();
+      sync(active, true);
+    };
+  }
+  choices.onclick = event => {
+    const row = event.target.closest('button');
+    if (!row) return;
+    active.value = row.value;
+    active.dispatchEvent(new Event('change', { bubbles: true }));
+    sheet.close();
+    sync(active);
+  };
+  let prefix = '', lastTyped = 0;
+  choices.onkeydown = event => {
+    const rows = Array.from(choices.children);
+    const index = rows.indexOf(document.activeElement);
+    let next;
+    if (event.key === 'ArrowDown') next = rows[Math.min(index + 1, rows.length - 1)];
+    else if (event.key === 'ArrowUp') next = rows[Math.max(index - 1, 0)];
+    else if (event.key === 'Home') next = rows[0];
+    else if (event.key === 'End') next = rows.at(-1);
+    else if (event.key.length === 1 && event.key !== ' ' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      const now = performance.now();
+      prefix = (now - lastTyped < 700 ? prefix : '') + event.key.toLocaleLowerCase();
+      lastTyped = now;
+      next = rows.find(row => row.textContent.toLocaleLowerCase().startsWith(prefix));
+    } else return;
+    event.preventDefault();
+    if (next) {
+      rows[index].tabIndex = -1;
+      next.tabIndex = 0;
+      next.focus();
+    }
+  };
+  sheet.querySelector('.preference-close').onclick = () => sheet.close();
+  sheet.onclick = event => {
+    if (event.target !== sheet) return;
+    const { left, right, top, bottom } = sheet.getBoundingClientRect();
+    if (event.clientX < left || event.clientX > right || event.clientY < top || event.clientY > bottom) sheet.close();
+  };
+  sheet.addEventListener('close', () => { prefix = ''; });
+  return sync;
+}
+
 async function settingsScreen(id) {
   show(titleFor('settings'), `<div class="stack">
     ${accountSection()}
     <form class="stack" id="preferences">
       <section class="card stack" aria-labelledby="preferences-heading">
         <h2 id="preferences-heading">${text('settings.preferences')}</h2>
-        <label class="field">${text('settings.default_city')}<select name="city"></select></label>
+        ${preferenceField('city', 'settings.default_city')}
         <button type="button" class="secondary" id="load-cities" hidden>${text('settings.load_cities')}</button>
-        <label class="field">${text('settings.language')}<select name="locale">
-          ${Object.entries(languages).map(([code, name]) => `<option value="${code}" lang="${code}">${escape(name)}</option>`).join('')}
-        </select></label>
+        ${preferenceField('locale', 'settings.language', Object.entries(languages).map(([code, name]) =>
+          `<option value="${code}" lang="${code}">${escape(name)}</option>`).join(''))}
       </section>
       <p class="muted error" data-error role="status"></p>
       <button type="submit" class="primary">${text('common.save')}</button>
-    </form></div>`);
+    </form>
+    <dialog class="preference-sheet" aria-labelledby="preference-title">
+      <header><h2 id="preference-title"></h2><button type="button" class="preference-close" aria-label="${text('common.close')}">×</button></header>
+      <div class="preference-options"></div>
+    </dialog></div>`);
   const form = main.querySelector('#preferences');
+  const syncPreference = bindPreferencePicker(form, main.querySelector('.preference-sheet'));
   const error = form.querySelector('[data-error]');
   const loadCities = main.querySelector('#load-cities');
   const select = form.elements.city;
@@ -761,6 +851,7 @@ async function settingsScreen(id) {
       select.prepend(new Option(cities ? t('editor.choose_city') : 'Warszawa', '0'));
       select.value = '0';
     }
+    syncPreference(select);
     loadCities.hidden = true;
   }
   fillCities(cities ?? []);
@@ -778,6 +869,7 @@ async function settingsScreen(id) {
   if (!cities) void load();
   loadCities.onclick = () => void run(loadCities, load, error);
   form.elements.locale.value = Object.hasOwn(languages, state.Locale) ? state.Locale : language;
+  syncPreference(form.elements.locale);
   form.onsubmit = (event) => {
     event.preventDefault();
     void run(form.querySelector('[type="submit"]'), async () => {
