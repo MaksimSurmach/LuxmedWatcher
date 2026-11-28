@@ -6,8 +6,13 @@ const navigation = document.querySelector('#navigation');
 const announcement = document.querySelector('#announcement');
 const portal = 'https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Reservation';
 const referralsPortal = 'https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Referrals';
-const icons = { home: '⌂', calendar: '▦', history: '▤', settings: '⚙', language: '◎', plus: '+', pin: '⌖', link: '↗' };
-const icon = (name) => `<span class="icon" aria-hidden="true">${icons[name]}</span>`;
+const icons = {
+  user: '<circle cx="12" cy="8.5" r="3.75"/><path d="M4.75 19.5c1.2-3.3 4-5 7.25-5s6.05 1.7 7.25 5"/>',
+  plus: '<path d="M12 5v14M5 12h14"/>',
+  link: '<path d="M7.5 16.5l9-9M9.5 7.5h7v7"/>',
+  back: '<path d="M14.5 6 8.5 12l6 6"/>',
+};
+const icon = (name) => `<span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round">${icons[name]}</svg></span>`;
 const escape = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({
   '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
 })[char]);
@@ -45,14 +50,14 @@ class DashboardError extends Error {
 function errorText(error) {
   return error instanceof DashboardError ? error.message : t('error.unavailable');
 }
-const tabs = ['home', 'watches', 'history', 'settings'];
+const tabs = ['history', 'watches', 'settings'];
 const titleFor = (tab) => t(`tabs.${tab}`);
 let months;
 let weekdays;
 let state;
 let apiToken;
 let cities;
-let tab = 'home';
+let tab = 'history';
 let flashTimer;
 let renderID = 0;
 let passwordSave = null;
@@ -64,9 +69,28 @@ function renderLanguage() {
   months = t('calendar.months').split(',');
   weekdays = [t('editor.every_day'), ...t('calendar.weekdays').split(',')];
   navigation.setAttribute('aria-label', t('dashboard.navigation'));
-  for (const button of navigation.querySelectorAll('button')) {
-    button.lastElementChild.textContent = titleFor(button.dataset.tab);
+  for (const button of navigation.querySelectorAll('.switch button')) {
+    button.firstElementChild.textContent = titleFor(button.dataset.tab);
   }
+  const me = navigation.querySelector('.me');
+  me.setAttribute('aria-label', titleFor('settings'));
+  me.title = titleFor('settings');
+  // Initials from Telegram make the account button yours; the drawn person stays as the fallback.
+  const user = telegram?.initDataUnsafe?.user;
+  const initials = [user?.first_name, user?.last_name].map((name) => name?.trim()?.[0] ?? '').join('').toLocaleUpperCase(language);
+  if (initials) me.innerHTML = `<span class="initials" aria-hidden="true">${escape(initials)}</span>`;
+}
+
+// The switch shows how much each side holds on every screen: open times found, searches saved.
+function markTab(name) {
+  for (const button of navigation.querySelectorAll('[data-tab]')) {
+    if (button.dataset.tab === name) button.setAttribute('aria-current', 'page');
+    else button.removeAttribute('aria-current');
+  }
+}
+function setCount(name, value) {
+  const target = navigation.querySelector(`[data-count="${name}"]`);
+  target.textContent = value ? String(value) : '';
 }
 
 function flash(message) {
@@ -115,8 +139,10 @@ async function run(button, action, errorTarget) {
   }
 }
 
+// Found and Searches are named by the switch above them, so their heading is for screen readers only.
 function show(title, html, focus = true) {
-  main.innerHTML = `<h1>${escape(title)}</h1>${html}`;
+  const named = tab === 'history' || tab === 'watches';
+  main.innerHTML = `<h1 class="${named ? 'sr-only' : 'title'}">${escape(title)}</h1>${html}`;
   if (focus) {
     window.scrollTo(0, 0);
     main.focus({ preventScroll: true });
@@ -124,23 +150,26 @@ function show(title, html, focus = true) {
 }
 
 // The portal connection is only checked when the user asks (never automatically).
-// Compact: a status line with the two actions, used on Home. Full: adds instructions, used in Settings.
-const accountStatusKey = (status) => status === 'no_saved_searches' ? 'watches.empty' : `account.${status}`;
+// The pill names a state; the button below it carries the command.
+const accountStatusKey = (status) => status === 'no_saved_searches' ? 'watches.empty'
+  : ['needs_login', 'search_paused'].includes(status) ? 'watches.state_login' : `account.${status}`;
 
-function accountSection(compact = false) {
+// One main action per state: sign in when LUX MED needs it, otherwise check the connection.
+const needsSignIn = (account) => ['needs_login', 'search_paused'].includes(account);
+function accountSection() {
   const account = state.AccountStatus;
-  return `<section class="card stack account${compact ? ' compact' : ''}" data-state="${account}" aria-labelledby="account-heading">
+  return `<section class="card stack account" data-state="${account}" aria-labelledby="account-heading">
     <div class="account-head">
       <h2 id="account-heading">${text('account.title')}</h2>
       <p class="account-status" data-state="${account}" role="status">${text(accountStatusKey(account))}</p>
     </div>
     <div class="account-actions">
-      ${state.SavedLogin ? '' : `<button type="button" class="secondary" id="connect"${compact ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>`}
-      ${state.HasCredentials ? `<button type="button" class="secondary" id="forget-credentials">${text(state.SavedLogin ? 'account.forget' : 'account.delete_credentials')}</button>` : ''}
-      <button type="button" class="secondary" id="account-check">${text('settings.check_account')}</button>
+      ${state.SavedLogin ? '' : `<button type="button" class="${account === 'connected' ? 'flat' : 'secondary'}" id="connect"${account === 'connected' ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>`}
+      ${state.HasCredentials ? `<button type="button" class="flat danger" id="forget-credentials">${text(state.SavedLogin ? 'account.forget' : 'account.delete_credentials')}</button>` : ''}
+      <button type="button" class="${needsSignIn(account) ? 'flat' : 'secondary'}" id="account-check">${text('settings.check_account')}</button>
     </div>
-    ${compact || state.SavedLogin ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
-    <details>
+    ${state.SavedLogin ? '' : `<p class="muted" id="account-instructions"${account === 'connected' ? ' hidden' : ''}>${text('account.instructions')}</p>`}
+    <details${state.SavedLogin && needsSignIn(account) ? ' open' : ''}>
       <summary>${text(state.SavedLogin ? 'account.change_credentials' : 'account.password_mode')}</summary>
       <form id="credentials" method="post" class="stack">
         <label class="field">${text('account.login')}<input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="254" required></label>
@@ -180,13 +209,23 @@ function refreshMountedAccount() {
   if (!mountedAccount || mountedAccount.viewID !== renderID || !mountedAccount.section.isConnected) return;
   const { section, displayed } = mountedAccount;
   if (accountModeChanged(state, displayed)) {
-    section.outerHTML = accountSection(section.classList.contains('compact'));
+    section.outerHTML = accountSection();
     bindAccount();
     return;
   }
   const account = state.AccountStatus;
   const connect = section.querySelector('#connect');
-  if (connect) connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
+  if (connect) {
+    const instructions = section.querySelector('#account-instructions');
+    instructions.hidden = account === 'connected';
+    if (instructions.hidden) connect.removeAttribute('aria-describedby');
+    else connect.setAttribute('aria-describedby', instructions.id);
+    connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
+    connect.className = account === 'connected' ? 'flat' : 'secondary';
+  } else if (needsSignIn(account) && section.dataset.state !== account) {
+    section.querySelector('details').open = true;
+  }
+  section.querySelector('#account-check').className = needsSignIn(account) ? 'flat' : 'secondary';
   section.dataset.state = account;
   const status = section.querySelector('.account-status');
   status.dataset.state = account;
@@ -297,7 +336,7 @@ function bindAccount() {
       return;
     }
     applySnapshot(latest);
-    if (tab === 'home' || tab === 'watches') {
+    if (tab === 'history' || tab === 'watches') {
       await switchTab(tab, { reload: false });
       return;
     }
@@ -345,33 +384,6 @@ function bindAccount() {
   scheduleRefresh();
 }
 
-function home() {
-  const count = state.Watches?.length ?? 0;
-  const searchHint = count ? text('home.saved_searches', { count }) : text('watches.empty');
-  show(t('home.title'), `<p class="home-intro">${text('home.intro')}</p>
-    <div class="stack home">
-      <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
-      ${state.AccountStatus === 'no_saved_searches' ? '' : `<p class="home-count">${searchHint}</p>`}
-      <div class="rows">
-        <button type="button" class="row" id="recommendations"><span>${text('editor.recommendations')}</span></button>
-        <a class="row" href="${referralsPortal}" target="_blank" rel="noopener"><span>${text('home.referrals')}</span>${icon('link')}</a>
-      </div>
-      ${accountSection(true)}
-      <button type="button" class="row row-quiet" data-open="settings" id="change-language">
-        <span>${icon('language')}${text('home.change_language')}</span><small lang="${language}">${escape(languages[language])}</small>
-      </button>
-    </div>`);
-  main.querySelector('#new-watch').onclick = () => void editor();
-  main.querySelector('#recommendations').onclick = () => void editor(undefined, true);
-  for (const button of main.querySelectorAll('[data-open]')) {
-    button.onclick = async () => {
-      await switchTab(button.dataset.open);
-      if (button.id === 'change-language') main.querySelector('[name="locale"]')?.focus();
-    };
-  }
-  bindAccount();
-}
-
 function hoursLabel(windows) {
   return windows.map(window => `${weekdays[window.weekday]} ${window.from}–${window.to}`).join(' · ');
 }
@@ -381,6 +393,29 @@ const watchErrors = new Map([
   ['luxmed_partial', 'watches.check_partial'],
 ]);
 const timeOf = (date) => `${dateText(date)}, ${clock.format(new Date(date))}`;
+
+// One quiet line that answers "is it still watching?"; sign-in trouble becomes a banner with its fix.
+function watchStatus() {
+  const items = state.Watches ?? [];
+  const now = new Date();
+  const checks = items.map((watch) => Date.parse(watch.LastCheckedAt)).filter(Number.isFinite);
+  const last = checks.length ? Math.max(...checks) : 0;
+  const lastText = last && (dateOnly(last) === dateOnly(now) ? clock.format(last) : timeOf(last));
+  const active = items.filter((watch) => watch.Status === 'active').length;
+  const line = [items.length ? t('watches.active_count', { active, total: items.length }) : '', last ? `${t('watches.checked')} ${lastText}` : '']
+    .filter(Boolean).join(' · ');
+  const trouble = ['needs_login', 'search_paused'].includes(state.AccountStatus);
+  // The dot only breathes when checks can actually run.
+  const pulse = trouble ? ' trouble' : active ? '' : ' off';
+  return `${line ? `<p class="status-line"><span class="pulse${pulse}" aria-hidden="true"></span>${escape(line)}</p>` : ''}
+    ${trouble ? `<div class="alert" role="status"><p>${text(`account.${state.AccountStatus}`)}</p>
+      <button type="button" class="primary" data-sign-in>${text('account.sign_in')}</button></div>` : ''}`;
+}
+const newWatchButton = () => `<div class="dock"><button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button></div>`;
+function bindShared() {
+  main.querySelector('#new-watch')?.addEventListener('click', () => void editor());
+  for (const button of main.querySelectorAll('[data-sign-in]')) button.onclick = () => void switchTab('settings');
+}
 
 // Monitoring state and the last successful check are separate facts: a search can be
 // active and still be failing, and the user needs to see when it last worked.
@@ -392,7 +427,7 @@ function watchCard(watch) {
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
   const account = state.AccountStatus;
   const accessError = ['luxmed_authentication', 'luxmed_account_missing'].includes(watch.LastError);
-  const needsLogin = accessError && ['needs_login', 'search_paused'].includes(account);
+  const needsLogin = active && needsSignIn(account);
   let checkError = '';
   if (accessError) {
     if (needsLogin || account === 'verification_pending') checkError = `account.${account}`;
@@ -400,22 +435,27 @@ function watchCard(watch) {
     checkError = watchErrors.get(watch.LastError) ?? 'watches.check_error';
   }
   const success = watch.LastSuccessAt ? timeOf(watch.LastSuccessAt) : t('watches.never_succeeded');
-  return `<article class="card watch" data-status="${active ? 'active' : 'paused'}">
-    <h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
-    <p class="meta">${escape(watch.CityName)}${watch.DoctorName ? ` · ${escape(watch.DoctorName)}` : ''}</p>
-    <p class="meta">${dates}${watch.TimeWindows?.length ? ` · ${escape(hoursLabel(watch.TimeWindows))}` : ''}${minutes ? ` · ${text('watches.interval_card', { minutes })}` : ''}</p>
-    <dl class="health">
-      <div><dt>${text('watches.monitoring')}</dt><dd><span class="badge ${active ? 'active' : ''}">${text(active ? 'watches.active' : 'watches.paused')}</span></dd></div>
-      ${state.Booking ? `<div><dt>${text('watches.autobook')}</dt><dd class="autobook" data-on="${Boolean(watch.AutoBook)}">${text(watch.AutoBook ? 'watches.autobook_on' : 'watches.autobook_off')}</dd></div>` : ''}
-      <div><dt>${text('watches.last_success')}</dt><dd>${escape(success)}</dd></div>
-    </dl>
-    ${checkError ? `<p class="notice" role="status">${text(checkError)}</p>` : ''}
-    <div class="actions">
-      ${needsLogin ? `<button type="button" class="primary" data-sign-in>${text('account.sign_in')} ${icon('link')}</button>` : ''}
-      ${needsLogin ? `<button type="button" class="secondary" data-account-settings>${text('account.settings')}</button>` : ''}
-      ${state.Booking ? `<button type="button" class="secondary" data-autobook="${watch.ID}" aria-pressed="${Boolean(watch.AutoBook)}" aria-describedby="watch-${watch.ID}">${text(watch.AutoBook ? 'watches.autobook_disable' : 'watches.autobook_enable')}</button>` : ''}
-      <button type="button" class="secondary" data-edit="${watch.ID}" aria-describedby="watch-${watch.ID}">${text('watches.edit')}</button>
-      <button type="button" class="secondary" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}" aria-describedby="watch-${watch.ID}">${text(active ? 'watches.pause' : 'watches.resume')}</button>
+  const stateKey = !active ? 'paused' : needsLogin ? 'problem' : checkError ? 'degraded' : 'active';
+  // The stub carries what you check first: is it watching, and how far ahead.
+  const figure = watch.DateFrom ? Number(dateParts(watch.DateFrom).day) : watch.NextDays;
+  const unit = watch.DateFrom ? shortDate(watch.DateFrom).month : t('watches.days_unit');
+  return `<article class="pass watch" data-status="${active ? 'active' : 'paused'}">
+    <div class="stub" data-state="${stateKey}">
+      <small class="state">${text(!active ? 'watches.paused' : needsLogin ? 'watches.state_login' : 'watches.active')}</small>
+      <b>${figure}</b><small>${escape(unit)}</small>
+    </div>
+    <div class="body">
+      <h2 id="watch-${watch.ID}">${escape(watch.ServiceName || watch.Name)}</h2>
+      <p class="meta">${escape(watch.CityName)}${watch.DoctorName ? ` · ${escape(watch.DoctorName)}` : ''}</p>
+      <p class="meta">${[watch.DateFrom ? dates : '', watch.TimeWindows?.length ? escape(hoursLabel(watch.TimeWindows)) : '', minutes ? text('watches.interval_card', { minutes }) : ''].filter(Boolean).join(' · ')}</p>
+      <p class="meta">${text('watches.last_success')}: <span class="value">${escape(success)}</span></p>
+      ${state.Booking ? `<p class="meta autobook" data-on="${Boolean(watch.AutoBook)}">${text('watches.autobook')}: ${text(watch.AutoBook ? 'watches.autobook_on' : 'watches.autobook_off')}</p>` : ''}
+      ${checkError && !needsLogin ? `<p class="notice" role="status">${text(checkError)}</p>` : ''}
+      <div class="links">
+        <button type="button" class="flat" data-edit="${watch.ID}" aria-describedby="watch-${watch.ID}">${text('watches.edit')}</button>
+        <button type="button" class="flat" data-watch="${watch.ID}" data-status="${active ? 'paused' : 'active'}" aria-describedby="watch-${watch.ID}">${text(active ? 'watches.pause' : 'watches.resume')}</button>
+        ${state.Booking ? `<button type="button" class="flat" data-autobook="${watch.ID}" aria-pressed="${Boolean(watch.AutoBook)}" aria-describedby="watch-${watch.ID}">${text(watch.AutoBook ? 'watches.autobook_disable' : 'watches.autobook_enable')}</button>` : ''}
+      </div>
     </div>
   </article>`;
 }
@@ -450,21 +490,14 @@ function autoBookDialog(button, watch) {
 
 function watches() {
   const items = state.Watches ?? [];
-  const showAccount = !['unchecked', 'no_saved_searches'].includes(state.AccountStatus);
-  show(titleFor('watches'), `<div class="stack">
-    <button type="button" class="primary" id="new-watch">${icon('plus')}${text('watches.new')}</button>
-    ${showAccount ? accountSection(true) : ''}
-    ${items.length ? items.map(watchCard).join('') : `<div class="card empty"><h2>${text('watches.empty')}</h2><p>${text('watches.empty_hint')}</p></div>`}
+  show(titleFor('watches'), `${watchStatus()}<div class="stack list">
+    ${items.length ? items.map(watchCard).join('') : `<div class="empty"><h2>${text('watches.empty')}</h2><p>${text('watches.empty_hint')}</p></div>`}
     ${items.length ? `<section class="stack">
       <p class="muted" id="check-hint">${text('watches.check_chat_hint')}</p>
       <button type="button" class="secondary" id="check-in-chat" aria-describedby="check-hint">${text('watches.check_chat')}</button>
     </section>` : ''}
-  </div>`);
-  if (showAccount) bindAccount();
-  main.querySelector('#new-watch').onclick = () => void editor();
-  for (const button of main.querySelectorAll('[data-account-settings]')) {
-    button.onclick = () => void switchTab('settings');
-  }
+  </div>${newWatchButton()}`);
+  bindShared();
   for (const button of main.querySelectorAll('[data-edit]')) {
     button.onclick = () => void editor(items.find((item) => item.ID === Number(button.dataset.edit)));
   }
@@ -478,7 +511,6 @@ function watches() {
     const watch = items.find((item) => item.ID === Number(button.dataset.autobook));
     button.onclick = () => (watch.AutoBook ? setAutoBook(button, watch, false) : autoBookDialog(button, watch));
   }
-  for (const button of main.querySelectorAll('[data-sign-in]')) button.onclick = () => void switchTab('settings');
   const chat = main.querySelector('#check-in-chat');
   if (chat) chat.onclick = () => {
     if (telegram?.close) telegram.close();
@@ -486,65 +518,41 @@ function watches() {
   };
 }
 
-const longDay = () => new Intl.DateTimeFormat(language, { timeZone, weekday: 'short', day: 'numeric', month: 'long' });
+// Day names come from the catalog: browsers lack some locales (Belarusian falls back to Russian).
+const weekdayIndex = new Intl.DateTimeFormat('en', { timeZone, weekday: 'short' });
+const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+function dayLabel(value) {
+  const label = `${weekdays[dayNames.indexOf(weekdayIndex.format(new Date(value))) + 1]}, ${dateText(value)}`;
+  return label[0].toLocaleUpperCase(language) + label.slice(1);
+}
 const isExpired = (slot, now) => slot.Status === 'expired' || new Date(slot.DateTime) <= now;
 
-function timeRow({ slot, index, available, time }, mixed, now) {
+// One found time is one ticket coupon: the stub carries the date, the body the time, doctor and street.
+function coupon({ slot, index, available, time }, now, next) {
   const when = clock.format(time);
   const doctor = slot.Doctor || t('history.no_doctor');
-  const service = mixed && slot.Service ? `<span class="service">${escape(slot.Service)}</span>` : '';
+  const address = slot.Address || slot.Facility;
+  const { day } = dateParts(time);
+  const weekday = weekdays[dayNames.indexOf(weekdayIndex.format(new Date(time))) + 1];
+  const stub = `<span class="stub" aria-hidden="true"><small>${escape(weekday)}</small><b>${Number(day)}</b><small>${escape(shortDate(time).month)}</small></span>`;
+  const clockTime = `<time class="t" datetime="${escape(slot.DateTime)}">${escape(when)}</time>`;
+  const details = `<span class="who">${escape(doctor)}${slot.Service ? ` · ${escape(slot.Service)}` : ''}</span><small>${escape(address)}</small>`;
   if (!available) {
-    const reason = time <= now ? 'history.expired' : 'history.unavailable';
-    return `<li><div class="slot-row expired" tabindex="-1" data-expired-slot="${index}">
-      <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}<small>${text(reason)}</small></span></div></li>`;
+    const stamp = text(time <= now ? 'history.stamp_past' : 'history.stamp_gone');
+    return `<li><div class="coupon void" tabindex="-1" data-expired-slot="${index}">
+      <span class="sr-only">${escape(dayLabel(time))}</span>${stub}<span class="body">
+        <span class="coupon-head">${clockTime}<span class="stamp">${stamp}</span></span>${details}</span></div></li>`;
   }
-  return `<li><button type="button" class="slot-row" data-slot="${index}" aria-label="${escape(t('history.row_label', { time: when, doctor: mixed && slot.Service ? `${doctor}, ${slot.Service}` : doctor, address: slot.Address || slot.Facility }))}">
-    <time datetime="${escape(slot.DateTime)}">${when}</time><span class="doctor">${escape(doctor)}${service}</span><span class="arrow" aria-hidden="true">›</span></button></li>`;
+  return `<li><button type="button" class="coupon${next ? ' first' : ''}" data-slot="${index}" aria-label="${escape(`${dayLabel(time)}. ${t('history.row_label', { time: when, doctor: [doctor, slot.Service].filter(Boolean).join(', '), address })}`)}">
+    ${stub}<span class="body">${clockTime}${details}</span></button></li>`;
 }
 
-// Date first, then one block per clinic address, then the times with their doctors.
+// Open times first, soonest at the top; times that are gone sink below, newest first.
 function slotGroups(slots, now) {
-  const format = longDay();
-  const days = new Map();
-  slots.forEach((slot, index) => {
-    const key = dateOnly(slot.DateTime);
-    const time = Date.parse(slot.DateTime);
-    const available = !isExpired(slot, now);
-    if (!days.has(key)) days.set(key, { key, label: format.format(time), places: new Map(), available: false });
-    const day = days.get(key);
-    day.available ||= available;
-    const place = `${slot.Facility}\n${slot.Address}`;
-    if (!day.places.has(place)) day.places.set(place, []);
-    day.places.get(place).push({ slot, index, available, time });
-  });
-  // Reorder the display without changing the slots or cursor used for pagination.
-  const orderedDays = [...days.values()].sort((a, b) => {
-    const availability = Number(b.available) - Number(a.available);
-    return availability || (a.available ? a.key.localeCompare(b.key) : b.key.localeCompare(a.key));
-  });
-  return orderedDays.map((day) => `<section class="day">
-    <h2 class="day-title">${escape(day.label)}</h2>
-    ${[...day.places.values()].map((rows) => {
-      rows.sort((a, b) => {
-        const availability = Number(b.available) - Number(a.available);
-        return availability || a.time - b.time;
-      });
-      const first = rows[0];
-      return {
-        rows,
-        nextTime: first.available ? first.time : Infinity,
-        firstTime: first.time,
-      };
-    }).sort((a, b) => a.nextTime - b.nextTime || a.firstTime - b.firstTime).map(({ rows }) => {
-      const { Facility, Address, Service } = rows[0].slot;
-      // One address per block; the service moves to each time when the block mixes services.
-      const services = new Set(rows.map(({ slot }) => slot.Service));
-      const mixed = services.size > 1;
-      return `<div class="place">
-        <h3>${escape(Address || Facility)}</h3>
-        <p class="meta">${escape([Facility !== Address ? Facility : '', mixed ? '' : Service].filter(Boolean).join(' · '))}</p>
-        <ul class="times">${rows.map((row) => timeRow(row, mixed, now)).join('')}</ul></div>`;
-    }).join('')}</section>`).join('');
+  const rows = slots.map((slot, index) => ({ slot, index, time: Date.parse(slot.DateTime), available: !isExpired(slot, now) }));
+  const open = rows.filter((row) => row.available).sort((a, b) => a.time - b.time);
+  const gone = rows.filter((row) => !row.available).sort((a, b) => b.time - a.time);
+  return `<ul class="wallet">${[...open, ...gone].map((row, i) => coupon(row, now, row.available && i === 0)).join('')}</ul>`;
 }
 
 // The booking dialog is shared; each opening gets a session so late answers can tell
@@ -562,7 +570,7 @@ function bookingDialog(slot) {
   dialog.querySelector('h2').textContent = t('history.confirm_title');
   dialog.querySelector('dl').innerHTML = [
     [t('history.appointment'), slot.Service || t('history.appointment')],
-    [longDay().format(date), clock.format(date)],
+    [dayLabel(date), clock.format(date)],
     [slot.Doctor || t('history.no_doctor'), slot.Facility],
     [slot.Address, ''],
   ].filter(([a]) => a).map(([a, b]) => `<div><dt>${escape(a)}</dt>${b ? `<dd>${escape(b)}</dd>` : ''}</div>`).join('');
@@ -587,7 +595,7 @@ function bookingDialog(slot) {
     }
     const confirmed = Status === 'confirmed';
     const outcome = confirmed
-      ? t('history.book_confirmed', { time: `${longDay().format(date)}, ${clock.format(date)}`, address: slot.Address || slot.Facility })
+      ? t('history.book_confirmed', { time: `${dayLabel(date)}, ${clock.format(date)}`, address: slot.Address || slot.Facility })
       : t('history.book_taken');
     slot.Status = 'expired';
     // A late answer must not rewrite a dialog that now shows another time: announce it
@@ -621,7 +629,8 @@ function bookingDialog(slot) {
 }
 
 async function historyScreen(id) {
-  show(titleFor('history'), `<div class="stack" id="slots" tabindex="-1"><p class="muted">${text('history.loading')}</p></div>`);
+  show(titleFor('history'), `${watchStatus()}<div class="stack" id="slots" tabindex="-1"><p class="muted">${text('history.loading')}</p></div>${newWatchButton()}`);
+  bindShared();
   const results = main.querySelector('#slots');
   const loaded = [];
   const byID = new Map();
@@ -645,14 +654,12 @@ async function historyScreen(id) {
         loaded.push(slot);
       }
     }
+    const now = new Date();
     if (!loaded.length) {
-      results.innerHTML = `<div class="card empty"><h2>${text('history.empty')}</h2><p>${text('history.empty_hint')}</p></div>`;
+      results.innerHTML = `<div class="empty"><span class="stub ghost" aria-hidden="true"></span><h2>${text('history.empty')}</h2><p>${text(state.Watches?.length ? 'history.empty_hint' : 'watches.empty_hint')}</p></div>`;
       return;
     }
-    const now = new Date();
-    const note = loaded.some((slot) => !isExpired(slot, now))
-      ? `<p class="muted" data-found-note>${text('history.found_note')}</p>` : '';
-    results.innerHTML = `${note}${slotGroups(loaded, now)}${More ? `<button class="secondary" type="button" data-more>${text('common.more')}</button>` : ''}`;
+    results.innerHTML = `${slotGroups(loaded, now)}${More ? `<button class="secondary" type="button" data-more>${text('common.more')}</button>` : ''}`;
     for (const button of results.querySelectorAll('[data-slot]')) button.onclick = () => bookingDialog(loaded[Number(button.dataset.slot)]);
     const next = results.querySelector('[data-more]');
     if (next) next.onclick = () => void run(next, () => append(offset + Slots.length, Next));
@@ -698,11 +705,17 @@ async function settingsScreen(id) {
   const loadCities = main.querySelector('#load-cities');
   const selected = { ID: state.CityID, Name: state.CityName };
   function fillCities(items) {
-    form.elements.city.innerHTML = cityOptions(items, selected, t('settings.no_city'));
-    form.elements.city.value = selected.ID ?? 0;
+    const select = form.elements.city;
+    const value = select.value || String(selected.ID ?? 0);
+    select.innerHTML = cityOptions(items, selected, t('settings.no_city'));
+    select.value = value;
   }
   fillCities(cities ?? []);
-  loadCities.hidden = Boolean(cities);
+  loadCities.hidden = true;
+  if (!cities) {
+    getCities().then((items) => { if (id === renderID) fillCities(items); })
+      .catch((failure) => { if (id === renderID) { loadCities.hidden = false; error.textContent = errorText(failure); } });
+  }
   loadCities.onclick = () => void run(loadCities, async () => {
     const items = await getCities();
     if (id === renderID) {
@@ -724,6 +737,7 @@ async function settingsScreen(id) {
 
 async function editor(watch, focusPicks = false) {
   const id = ++renderID;
+  markTab('watches');
   const title = t(watch ? 'editor.edit' : 'watches.new');
   show(title, `<p class="muted">${text('editor.loading_cities')}</p>`);
   let options;
@@ -739,30 +753,41 @@ async function editor(watch, focusPicks = false) {
   let doctor = watch?.DoctorID ?? 0;
   let facilities = new Set(watch?.FacilityIDs);
   const existingHours = new Map((watch?.TimeWindows ?? []).map((window) => [window.weekday, window]));
-  const advancedOpen = Boolean(doctor || facilities.size);
-  show(title, `<form class="stack" novalidate>
-    <fieldset class="card stack"><legend>${text('editor.what')}</legend>
+  const presetDays = ['14', '30', '90'];
+  const hourPresets = [['', 'editor.any_time'], ['07:00-12:00', 'editor.morning'], ['12:00-17:00', 'editor.afternoon'], ['17:00-21:00', 'editor.evening']];
+  // Three short steps instead of one long form: what, when, then a review that saves.
+  show(title, `<form class="stack wizard" novalidate>
+    <div class="progress"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span id="step-label"></span></div>
+    <section class="step" data-step="1">
+      <h2 tabindex="-1">${text('editor.what')}</h2>
       <label class="field">${text('editor.city')}<select name="city" required>${cityOptions(options, city, t('editor.choose_city'))}</select></label>
-      ${watch ? '' : `<section class="quick-services stack" tabindex="-1" aria-labelledby="recommendations-heading">
-        <h2 id="recommendations-heading">${text('editor.recommendations')}</h2>
+      ${watch ? '' : `<section class="quick-services stack" tabindex="-1" aria-label="${text('editor.recommendations')}">
         <p class="muted" id="picks-status" role="status"></p>
         <div class="stack" id="picks-list"></div>
         <button type="button" class="secondary" id="retry-picks" hidden>${text('common.retry')}</button>
       </section>`}
-      <p class="catalog-heading">${text('editor.catalog')}</p>
-      <label class="field">${text('editor.service')}<input type="search" name="query" placeholder="${text('editor.service_placeholder')}" maxlength="80" autocomplete="off"></label>
-      <button type="button" class="secondary" id="search-services">${text('editor.find_service')}</button>
+      <div class="search-field">
+        <label class="field">${text('editor.service')}<input type="search" name="query" placeholder="${text('editor.service_placeholder')}" maxlength="80" autocomplete="off"></label>
+        <button type="button" class="secondary" id="search-services">${text('editor.find_service')}</button>
+      </div>
       <div class="options" id="services" aria-live="polite"></div>
       <p class="selection" id="selected-service" tabindex="-1" data-set="false"></p>
       <a class="flat referrals" href="${referralsPortal}" target="_blank" rel="noopener">${text('editor.referrals')} ${icon('link')}</a>
-    </fieldset>
-    <fieldset class="card stack"><legend>${text('editor.when')}</legend>
-      <label class="field">${text('editor.period')}<select name="dateMode"><option value="days">${text('editor.upcoming')}</option><option value="range">${text('editor.date_range')}</option></select></label>
-      <label class="field" id="days">${text('editor.days_ahead')}<input name="days" type="number" min="1" max="90" value="${watch?.NextDays || 14}"></label>
+    </section>
+    <section class="step" data-step="2" hidden>
+      <h2 tabindex="-1">${text('editor.when')}</h2>
+      <div class="group" role="group" aria-labelledby="period-label"><p class="label" id="period-label">${text('editor.period')}</p>
+        <div class="chips">${['editor.preset_2w', 'editor.preset_1m', 'editor.preset_3m'].map((key, i) =>
+          `<button type="button" class="chip" data-days="${presetDays[i]}">${text(key)}</button>`).join('')}
+          <button type="button" class="chip" data-range>${text('editor.date_range')}</button></div></div>
+      <select name="dateMode" hidden><option value="days">${text('editor.upcoming')}</option><option value="range">${text('editor.date_range')}</option></select>
+      <label class="field" id="days">${text('editor.days_ahead')}<input name="days" type="number" required min="1" max="90" value="${watch?.NextDays || 14}"></label>
       <div class="columns" id="range" hidden>
         <label class="field">${text('editor.from')}<input name="from" type="date" value="${dateOnly(watch?.DateFrom)}"></label>
         <label class="field">${text('editor.to')}<input name="to" type="date" value="${dateOnly(watch?.DateTo)}"></label>
       </div>
+      <div class="group" role="group" aria-labelledby="hours-label"><p class="label" id="hours-label">${text('editor.time_of_day')}</p>
+        <div class="chips">${hourPresets.map(([hours, key]) => `<button type="button" class="chip" data-hours="${hours}">${text(key)}</button>`).join('')}</div></div>
       <details><summary>${text('editor.days_and_hours')}</summary>
         <p class="muted">${text('editor.hours_hint')}</p>
         ${weekdays.map((day, index) => {
@@ -774,23 +799,25 @@ async function editor(watch, focusPicks = false) {
           </div>`;
         }).join('')}
       </details>
-    </fieldset>
-    <details class="card advanced" id="advanced"${advancedOpen ? ' open' : ''}>
-      <summary>${text('editor.advanced')}</summary>
-      <div class="stack">
-        <button type="button" class="secondary" id="providers">${text('editor.choose_providers')}</button>
-        <div class="stack" id="provider-options"></div>
-        <label class="field">${text('editor.interval')}<input name="minutes" type="number" required min="${state.MinimumMinutes}" max="1440" value="${watch ? Math.ceil(watch.CheckIntervalSeconds / 60) : state.DefaultMinutes}"></label>
+    </section>
+    <section class="step" data-step="3" hidden>
+      <h2 tabindex="-1" id="summary-heading">${text('editor.summary')}</h2>
+      <dl id="summary" class="summary"></dl>
+      <div class="advanced" id="advanced" hidden>
+        <div class="stack">
+          <button type="button" class="secondary" id="providers">${text('editor.choose_providers')}</button>
+          <div class="stack" id="provider-options"></div>
+          <label class="field">${text('editor.interval')}<input name="minutes" type="number" required min="${state.MinimumMinutes}" max="1440" value="${watch ? Math.ceil(watch.CheckIntervalSeconds / 60) : state.DefaultMinutes}"></label>
+        </div>
       </div>
-    </details>
-    <section class="card stack summary" aria-labelledby="summary-heading">
-      <h2 id="summary-heading">${text('editor.summary')}</h2>
-      <dl id="summary"></dl>
+      ${watch ? `<button type="button" class="flat danger" id="delete">${text('editor.delete')}</button>` : ''}
     </section>
     <p class="muted error" data-error role="status"></p>
-    <button type="submit" class="primary">${text('editor.save')}</button>
-    <button type="button" class="secondary" id="cancel">${text('common.cancel')}</button>
-    ${watch ? `<button type="button" class="flat danger" id="delete">${text('editor.delete')}</button>` : ''}
+    <div class="dock step-nav">
+      <button type="button" class="secondary" id="back"></button>
+      <button type="button" class="primary" id="next">${text('common.next')}</button>
+      <button type="submit" class="primary" id="save" hidden>${text('editor.save')}</button>
+    </div>
   </form>`);
   const form = main.querySelector('form');
   const fields = form.elements;
@@ -831,21 +858,27 @@ async function editor(watch, focusPicks = false) {
     });
   }
   function summarize() {
+    markChips();
     const range = fields.dateMode.value === 'range';
-    const dates = !range ? t('watches.period_days', { days: fields.days.value })
+    const preset = form.querySelector(`[data-days="${fields.days.value}"]`);
+    const dates = !range ? preset?.textContent ?? t('watches.period_days', { days: fields.days.value })
       : fields.from.value && fields.to.value ? `${dateText(fields.from.value)} — ${dateText(fields.to.value)}` : '—';
     const { doctorName, clinics } = providerSummary();
     const hours = selectedHours();
     const rows = [
-      ['editor.service', service?.Name ?? t('editor.choose_service')],
-      ['editor.city', Number(fields.city.value) ? fields.city.selectedOptions[0]?.textContent : t('editor.choose_city')],
-      ['editor.period', dates],
-      ['editor.days_and_hours', hoursLabel(hours) || t('editor.any_time')],
-      ['editor.doctor', doctorName],
-      ['editor.clinics', clinics],
-      ['editor.interval', fields.minutes.value ? t('watches.interval_card', { minutes: fields.minutes.value }) : '—'],
+      ['editor.service', service?.Name ?? t('editor.choose_service'), 1],
+      ['editor.city', Number(fields.city.value) ? fields.city.selectedOptions[0]?.textContent : t('editor.choose_city'), 1],
+      ['editor.period', dates, 2],
+      ['editor.days_and_hours', form.querySelector('[data-hours][aria-pressed="true"]')?.textContent ?? hoursLabel(hours), 2],
+      ['editor.doctor', doctorName, 'doctor'],
+      ['editor.clinics', clinics, 'clinics'],
+      ['editor.interval', fields.minutes.value || '—', 'minutes'],
     ];
-    summary.innerHTML = rows.map(([label, value]) => `<div><dt>${text(label)}</dt><dd>${escape(value)}</dd></div>`).join('');
+    if (!summary.childElementCount) {
+      summary.innerHTML = rows.map(([label, , destination]) => `<div><dt>${text(label)}</dt><dd></dd>
+        <button type="button" class="flat change" data-goto="${destination}" aria-label="${escape(`${t('editor.change')}: ${t(label)}`)}">${text('editor.change')}</button></div>`).join('');
+    }
+    rows.forEach(([, value], index) => { summary.children[index].querySelector('dd').textContent = value ?? ''; });
   }
   function markSelection() {
     picked.textContent = service ? t('editor.selected_service', { service: service.Name }) : t('editor.choose_service');
@@ -877,6 +910,7 @@ async function editor(watch, focusPicks = false) {
     const request = ++picksRequest;
     const cityID = Number(fields.city.value);
     picksList.replaceChildren();
+    quickPicks.hidden = false;
     retryPicks.hidden = true;
     picksStatus.hidden = false;
     picksStatus.textContent = t(cityID ? 'editor.loading_recommendations' : 'editor.choose_city');
@@ -907,6 +941,9 @@ async function editor(watch, focusPicks = false) {
         picksStatus.textContent = t(PortalIncomplete ? 'error.luxmed_unavailable' : 'editor.no_recommendations');
       }
       retryPicks.hidden = !PortalIncomplete;
+      // Nothing to recommend: drop the block instead of announcing its absence.
+      const empty = !PortalIncomplete && !picksList.childElementCount;
+      quickPicks.hidden = empty;
       markSelection();
     } catch (error) {
       if (id !== renderID || request !== picksRequest) return;
@@ -928,8 +965,8 @@ async function editor(watch, focusPicks = false) {
     const range = fields.dateMode.value === 'range';
     form.querySelector('#range').hidden = !range;
     form.querySelector('#days').hidden = range;
-    fields.from.required = range;
-    fields.to.required = range;
+    fields.from.disabled = fields.to.disabled = !range;
+    fields.from.required = fields.to.required = range;
     fields.days.disabled = range;
   }
   fields.dateMode.value = watch?.DateFrom ? 'range' : 'days';
@@ -985,10 +1022,10 @@ async function editor(watch, focusPicks = false) {
     }
   };
   search.onclick = () => void run(search, () => findServices(), error);
-  providers.onclick = () => templateProviders();
+  providers.onclick = () => void loadProviders();
 
-  function templateProviders() {
-    void run(providers, async () => {
+  function loadProviders() {
+    return run(providers, async () => {
       const selectedCity = fields.city.value;
       const selectedService = service.ID;
       const { Doctors, Facilities } = await api('providers', { CityID: Number(selectedCity), ServiceID: selectedService });
@@ -1022,27 +1059,145 @@ async function editor(watch, focusPicks = false) {
       }
     };
   }
+  function markChips() {
+    const range = fields.dateMode.value === 'range';
+    for (const chip of form.querySelectorAll('[data-days]')) chip.setAttribute('aria-pressed', String(!range && chip.dataset.days === fields.days.value));
+    form.querySelector('[data-range]').setAttribute('aria-pressed', String(range));
+    const hours = selectedHours();
+    for (const chip of form.querySelectorAll('[data-hours]')) {
+      const [from, to] = chip.dataset.hours.split('-');
+      const on = chip.dataset.hours ? hours.length === 1 && hours[0].weekday === 0 && hours[0].from === from && hours[0].to === to : !hours.length;
+      chip.setAttribute('aria-pressed', String(on));
+    }
+  }
+  for (const chip of form.querySelectorAll('[data-days], [data-range]')) {
+    chip.onclick = () => {
+      fields.dateMode.value = chip.dataset.days ? 'days' : 'range';
+      if (chip.dataset.days) fields.days.value = chip.dataset.days;
+      updateDates();
+      summarize();
+      if (!chip.dataset.days) fields.from.focus();
+    };
+  }
+  // A time-of-day chip writes the "Every day" row; specific days stay in the disclosure below.
+  for (const chip of form.querySelectorAll('[data-hours]')) {
+    chip.onclick = () => {
+      for (const row of form.querySelectorAll('[data-day]')) row.querySelector('[type="checkbox"]').checked = false;
+      if (chip.dataset.hours) {
+        const every = form.querySelector('[data-day="0"]');
+        const [from, to] = every.querySelectorAll('input[type="time"]');
+        [from.value, to.value] = chip.dataset.hours.split('-');
+        every.querySelector('[type="checkbox"]').checked = true;
+      }
+      summarize();
+    };
+  }
+
+  const back = form.querySelector('#back');
+  const next = form.querySelector('#next');
+  const save = form.querySelector('#save');
+  const stepLabel = form.querySelector('#step-label');
+  let step = 1;
+  function goTo(n, focus = true) {
+    step = n;
+    for (const section of form.querySelectorAll('.step')) section.hidden = Number(section.dataset.step) !== n;
+    form.querySelectorAll('.dots i').forEach((dot, i) => { dot.dataset.on = String(i < n); });
+    stepLabel.textContent = t('editor.step', { n });
+    back.textContent = t(n === 1 ? 'common.cancel' : 'common.back');
+    next.hidden = n === 3;
+    save.hidden = n !== 3;
+    error.textContent = '';
+    if (n === 3) summarize();
+    if (focus) {
+      window.scrollTo(0, 0);
+      form.querySelector(`[data-step="${n}"] h2`).focus({ preventScroll: true });
+    }
+  }
+  function serviceMissing() {
+    goTo(1, false);
+    picked.dataset.set = 'error';
+    picked.textContent = t('editor.choose_service');
+    picked.focus();
+  }
+  function stepInvalid(n) {
+    if (n === 2) {
+      const today = dateOnly(new Date());
+      const last = new Date(today + 'T00:00:00Z');
+      last.setUTCDate(last.getUTCDate() + 90);
+      fields.from.max = fields.to.max = last.toISOString().slice(0, 10);
+      fields.to.min = fields.from.value > today ? fields.from.value : today;
+      for (const row of form.querySelectorAll('[data-day]')) {
+        const checked = row.querySelector('[type="checkbox"]').checked;
+        const [from, to] = row.querySelectorAll('[type="time"]');
+        from.required = to.required = checked;
+        to.min = checked ? from.value : '';
+      }
+    }
+    const inputs = form.querySelectorAll(`[data-step="${n}"] :is(input, select)`);
+    const invalid = [...inputs].find((field) => field.willValidate && !field.validity.valid &&
+      (field.type !== 'time' || field.closest('[data-day]').querySelector('[type="checkbox"]').checked));
+    if (!invalid) return false;
+    if (n !== step) goTo(n, false);
+    invalid.closest('details')?.setAttribute('open', '');
+    invalid.closest('#advanced')?.removeAttribute('hidden');
+    invalid.focus();
+    invalid.reportValidity();
+    error.textContent = t('error.invalid_fields');
+    return true;
+  }
+  next.onclick = () => {
+    if (step === 1 && !service) return serviceMissing();
+    if (stepInvalid(step)) return;
+    goTo(step + 1);
+  };
+  back.onclick = () => (step === 1 ? void switchTab(tab) : goTo(step - 1));
+  const advanced = form.querySelector('#advanced');
+  summary.onclick = async (event) => {
+    const target = event.target.closest('[data-goto]');
+    if (!target) return;
+    const destination = target.dataset.goto;
+    if (destination === '1' || destination === '2') {
+      goTo(Number(destination));
+      return;
+    }
+    advanced.hidden = false;
+    if (destination === 'minutes') {
+      fields.minutes.focus();
+      return;
+    }
+    const focused = document.activeElement;
+    if (!fields.doctor && !providers.disabled) await loadProviders();
+    if (step !== 3 || !form.isConnected || document.activeElement !== focused) return;
+    const field = destination === 'doctor' ? fields.doctor : providerOptions.querySelector('[data-facility]');
+    (field ?? providers).focus();
+  };
+  // Editing starts at the review: everything is already filled in.
+  goTo(watch ? 3 : 1, false);
+
   form.onsubmit = (event) => {
     event.preventDefault();
-    void run(form.querySelector('[type="submit"]'), async () => {
-      const invalid = Array.from(form.elements).find((field) => field.willValidate && !field.validity.valid);
-      if (invalid) {
-        const section = invalid.closest('details');
-        if (section) section.open = true;
-        invalid.focus();
-        throw new DashboardError('error.invalid_fields');
-      }
-      if (!service) throw new DashboardError('editor.choose_service');
+    if (step < 3) {
+      next.click();
+      return;
+    }
+    void run(save, async () => {
+      if ([1, 2, 3].some(stepInvalid)) return;
+      if (!service) return serviceMissing();
       const windows = selectedHours();
       const range = fields.dateMode.value === 'range';
-      await api('watch', { ID: watch?.ID ?? 0, CityID: Number(fields.city.value), ServiceID: service.ID, DoctorID: doctor,
-        FacilityIDs: [...facilities], DateFrom: range ? fields.from.value : '', DateTo: range ? fields.to.value : '',
-        NextDays: range ? 0 : Number(fields.days.value), TimeWindows: windows, CheckMinutes: Number(fields.minutes.value) });
-      await update('watches');
-      flash(t('watches.saved'));
+      form.inert = true;
+      try {
+        await api('watch', { ID: watch?.ID ?? 0, CityID: Number(fields.city.value), ServiceID: service.ID, DoctorID: doctor,
+          FacilityIDs: [...facilities], DateFrom: range ? fields.from.value : '', DateTo: range ? fields.to.value : '',
+          NextDays: range ? 0 : Number(fields.days.value), TimeWindows: windows, CheckMinutes: Number(fields.minutes.value) });
+      } finally {
+        form.inert = false;
+      }
+      if (id !== renderID) return;
+      await switchTab('watches');
+      if (tab === 'watches') flash(t('watches.saved'));
     }, error);
   };
-  form.querySelector('#cancel').onclick = () => void switchTab(tab);
   const remove = form.querySelector('#delete');
   if (remove) remove.onclick = () => {
     if (!window.confirm(t('editor.confirm_delete'))) return;
@@ -1059,15 +1214,12 @@ function screenError(title, error, retry) {
   if (retry) main.querySelector('button').onclick = retry;
 }
 
-async function switchTab(next, { reload = next !== 'history' } = {}) {
+async function switchTab(next, { reload = true } = {}) {
   clearTimeout(flashTimer);
   announcement.textContent = '';
   tab = next;
   const id = ++renderID;
-  for (const button of navigation.querySelectorAll('button')) {
-    if (button.dataset.tab === tab) button.setAttribute('aria-current', 'page');
-    else button.removeAttribute('aria-current');
-  }
+  markTab(tab);
   try {
     if (reload) {
       show(titleFor(next), `<p>${text('dashboard.loading')}</p>`, false);
@@ -1075,7 +1227,6 @@ async function switchTab(next, { reload = next !== 'history' } = {}) {
       if (id !== renderID) return;
       applySnapshot(latest);
     }
-    if (tab === 'home') home();
     if (tab === 'watches') watches();
     if (tab === 'history') await historyScreen(id);
     if (tab === 'settings') await settingsScreen(id);
@@ -1086,6 +1237,8 @@ async function switchTab(next, { reload = next !== 'history' } = {}) {
 
 function applySnapshot(latest) {
   state = latest;
+  setCount('watches', state.Watches?.length ?? 0);
+  setCount('history', state.AvailableSlots);
   setLanguage(state.Locale);
   renderLanguage();
 }
@@ -1104,11 +1257,12 @@ async function start() {
     screenError('Luxmed Watcher', new DashboardError('error.open_from_bot'));
     return;
   }
-  show(titleFor('home'), `<p>${text('dashboard.loading')}</p>`, false);
-  const initial = params.get('tab');
+  show('Luxmed Watcher', `<p class="muted">${text('dashboard.loading')}</p>`, false);
+  // Older bot links still say tab=home; Found is the home now.
+  const initial = params.get('tab') === 'home' ? 'history' : params.get('tab');
   try {
     ({ token: apiToken } = await api('auth'));
-    await update(tabs.includes(initial) ? initial : 'home');
+    await update(tabs.includes(initial) ? initial : 'history');
   } catch (error) {
     screenError('Luxmed Watcher', error, error?.key === 'error.access_denied' ? undefined : start);
   }

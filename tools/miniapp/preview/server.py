@@ -17,11 +17,11 @@ from urllib.parse import urlparse, parse_qs
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 WEB = ROOT / 'tools/miniapp/web'
 I18N = ROOT / 'internal/i18n/web'
-STUB = '<script>window.Telegram={WebApp:{initData:%s,ready(){},expand(){},openLink(u){window.__opened=u}}}</script>'
+STUB = '<script>window.Telegram={WebApp:{initDataUnsafe:{user:{first_name:"Anna",last_name:"Kowalska"}},initData:%s,ready(){},expand(){},openLink(u){window.__opened=u}}}</script>'
 SCENARIOS = {'', 'empty', 'session', 'long', 'booking'}
 LANGS = {'pl', 'en', 'ru', 'uk', 'be'}
 RESTORED = set()  # scenarios whose LUX MED sign-in was restored through connect
-TYPES = {'.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html'}
+TYPES = {'.js': 'text/javascript', '.css': 'text/css', '.html': 'text/html', '.woff2': 'font/woff2'}
 
 def day(offset, hh, mm):
     d = (datetime.now(timezone.utc) + timedelta(days=offset)).replace(hour=hh - 1, minute=mm, second=0, microsecond=0)
@@ -51,8 +51,13 @@ def slots(scenario):
     upcoming = sorted((r for r in rows if r['DateTime'] >= now and r['Status'] != 'expired'), key=lambda r: r['DateTime'])
     return upcoming + sorted((r for r in rows if r not in upcoming), key=lambda r: r['DateTime'], reverse=True)
 
+def available_count(scenario):
+    now = datetime.now(timezone.utc)
+    return sum(row['Status'] != 'expired' and datetime.fromisoformat(row['DateTime'].replace('Z', '+00:00')) > now
+               for row in slots(scenario))
+
 def watches(scenario):
-    base = dict(ID=1, Name='Echo serca', ServiceName='Echo serca (USG serca)', CityName='Warszawa', Status='active',
+    base = dict(ID=1, Name='Echo serca', ServiceID=11, ServiceName='Echo serca (USG serca)', CityID=1, CityName='Warszawa', Status='active',
                 NextDays=14, DateFrom=None, DateTo=None, DoctorName='', TimeWindows=[], CheckIntervalSeconds=600,
                 LastCheckedAt=day(0, 12, 0), LastSuccessAt=day(0, 12, 0), LastError='')
     if scenario == 'long':
@@ -112,7 +117,7 @@ class H(BaseHTTPRequestHandler):
         f = (WEB / name).resolve()
         if WEB not in f.parents or not f.is_file(): return self.send(b'', 'text/plain', 404)
         body = f.read_bytes()
-        if name == 'dashboard.html':
+        if name in ('dashboard.html', 'index.html'):
             locale = pick(q, 'lang', LANGS, 'pl')
             labels = json.loads((I18N / f'{locale}.json').read_bytes())
             for field, value in {
@@ -138,10 +143,13 @@ class H(BaseHTTPRequestHandler):
                 'book': lambda: dict(Status=book(body)),
                 'autobook': lambda: autobook(body),
                 'connect': lambda: connect(self.headers.get('Host', 'localhost'), scenario, lang),
-                'load': lambda: dict(Watches=watches(scenario), Locale=lang, Booking=booking, CityID=1, CityName='Warszawa', MinimumMinutes=2, DefaultMinutes=10),
+                'load': lambda: dict(Watches=watches(scenario), AvailableSlots=available_count(scenario), AccountStatus='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected', Locale=lang, Booking=booking, CityID=1, CityName='Warszawa', MinimumMinutes=2, DefaultMinutes=10),
                 'history': lambda: dict(Slots=slots(scenario), More=False),
                 'account': lambda: dict(state='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected'),
-                'cities': lambda: [dict(ID=1, Name='Warszawa')]}.get(action)
+                'cities': lambda: [dict(ID=1, Name='Warszawa')],
+                'procedures': lambda: dict(Items=[dict(ID=11, Name='Echo serca (USG serca)'), dict(ID=12, Name='Konsultacja dermatologiczna')], More=False),
+                'procedure-picks': lambda: dict(Recent=[dict(ID=11, Name='Echo serca (USG serca)')], Popular=[dict(ID=12, Name='Konsultacja dermatologiczna'), dict(ID=13, Name='Konsultacja ortopedyczna')]),
+                'providers': lambda: dict(Doctors=[dict(ID=1, FirstName='Anna', LastName='Nowak')], Facilities=[dict(ID=1, Name='Centrum Medyczne Warszawa', Address='ul. Postępu 21C')])}.get(action)
         data = handler() if handler else {}
         self.send(json.dumps(data).encode(), 'application/json')
 

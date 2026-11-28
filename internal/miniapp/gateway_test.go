@@ -257,6 +257,22 @@ func TestSharedViewerAnnouncesCDPAndUsesPrivateWorkerScope(t *testing.T) {
 	}
 }
 
+func TestGatewayServesBundledFontsWithLicense(t *testing.T) {
+	handler := (&app{}).public(os.DirFS("../../tools/miniapp/web"), fstest.MapFS{})
+	for _, asset := range []struct{ name, contentType, signature string }{
+		{"azeret-mono-latin.woff2", "font/woff2", "wOF2"},
+		{"azeret-mono-latin-ext.woff2", "font/woff2", "wOF2"},
+		{"OFL.txt", "text/plain", "Copyright 2021 The Azeret Project Authors"},
+	} {
+		res := httptest.NewRecorder()
+		handler.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/fonts/"+asset.name, nil))
+		if res.Code != http.StatusOK || !strings.HasPrefix(res.Header().Get("Content-Type"), asset.contentType) ||
+			!strings.HasPrefix(res.Body.String(), asset.signature) || !strings.Contains(res.Header().Get("Content-Security-Policy"), "font-src 'self'") {
+			t.Fatalf("failed to serve %s with its expected type, contents and policy", asset.name)
+		}
+	}
+}
+
 func TestGatewayServesLocalizedPagesAndBundledDictionaries(t *testing.T) {
 	t.Parallel()
 

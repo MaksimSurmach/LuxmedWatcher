@@ -18,6 +18,7 @@ if (locationURL.searchParams.has('ticket')) {
 
 const element = (id) => document.getElementById(id);
 const status = element('status');
+const hint = element('hint');
 const screen = element('screen');
 const controls = element('controls');
 const keyboard = element('keyboard');
@@ -26,6 +27,7 @@ const typing = element('typing');
 const keys = element('keys');
 const zoom = element('zoom');
 const label = (name) => t(`viewer.${name}`);
+const phase = (name) => { document.querySelector('main').dataset.phase = name; };
 
 function renderLanguage() {
   const labels = {
@@ -34,6 +36,8 @@ function renderLanguage() {
     'remote-notice': 'remote_notice', 'start-viewer': 'continue',
   };
   for (const [id, key] of Object.entries(labels)) element(id).textContent = label(key);
+  element('notice-lead').textContent = label('lead');
+  element('notice-more').textContent = label('lead_more');
   document.title = label('title');
   screen.setAttribute('aria-label', label('screen'));
   element('scroll-up').setAttribute('aria-label', label('scroll_up'));
@@ -61,6 +65,9 @@ function close(message) {
   closed = true;
   connected = false;
   clearTimeout(startupTimer);
+  phase('closed');
+  document.querySelector('main').dataset.outcome = message === 'disconnected' ? 'done' : 'trouble';
+  hint.textContent = '';
   opening.abort();
   viewer?.disconnect();
   keys.value = '';
@@ -73,15 +80,16 @@ function close(message) {
 function init() {
   setLanguage(initialLanguage(telegram, locationURL.searchParams.get('lang')));
   renderLanguage();
-  element('close').hidden = false;
+  element('close').hidden = !returnToApp && !(initData && typeof telegram?.close === 'function');
   if (!initData || !ticket) {
-    status.textContent = label('missing');
+    close('missing');
     return;
   }
   if (!window.isSecureContext) {
     close('failed');
     return;
   }
+  phase('intro');
   element('notice').hidden = false;
   element('start-viewer').addEventListener('click', start, { once: true });
 }
@@ -89,6 +97,7 @@ function init() {
 async function start() {
   if (closed) return;
   element('notice').hidden = true;
+  phase('connecting');
   status.textContent = label('starting');
   startupTimer = setTimeout(() => close('failed'), 30_000);
   try {
@@ -129,12 +138,16 @@ async function start() {
       if (closed) return;
       clearTimeout(startupTimer);
       connected = true;
-      status.textContent = label('connected');
+      phase('live');
+      status.textContent = label('live');
+      hint.textContent = label('connected');
       controls.hidden = false;
       if (telegram?.isVersionAtLeast?.('7.7')) telegram.disableVerticalSwipes();
       if (matchMedia('(pointer: fine)').matches) viewer.focus({ preventScroll: true });
     });
-    viewer.addEventListener('disconnect', () => close(connected ? 'disconnected' : 'failed'));
+    viewer.addEventListener('disconnect', (event) => {
+      close(connected && event.detail?.clean ? 'disconnected' : 'failed');
+    });
   } catch {
     close('failed');
   }
@@ -161,12 +174,12 @@ function sendText() {
 function pasteText(text) {
   if (!connected) return;
   if (!text) {
-    status.textContent = label('paste_empty');
+    hint.textContent = label('paste_empty');
   } else if (text.length > 2048) {
-    status.textContent = label('paste_too_long');
+    hint.textContent = label('paste_too_long');
   } else {
     forwardText(text);
-    status.textContent = label('connected');
+    hint.textContent = label('connected');
   }
 }
 
@@ -203,7 +216,7 @@ paste.addEventListener('click', async () => {
   } catch {
     if (!connected) return;
     showKeyboard(true);
-    status.textContent = label('paste_manually');
+    hint.textContent = label('paste_manually');
   } finally {
     paste.disabled = false;
   }
@@ -280,7 +293,7 @@ zoom.addEventListener('click', () => {
   }
   zoom.textContent = label(zoomed ? 'fit' : 'zoom_in');
   zoom.setAttribute('aria-pressed', String(zoomed));
-  status.textContent = label(zoomed ? 'zoomed' : 'connected');
+  hint.textContent = label(zoomed ? 'zoomed' : 'connected');
 });
 
 init();

@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "low-contrast",
+        "value": "*",
+        "files": [
+          "tools/browser-session/viewer.html"
+        ],
+        "createdAt": "2026-11-28T08:43:08.216Z",
+        "reason": "Claude: detector resolves the dark-mode --muted (#98a1b8) against a white ground; rendered pairs are #5f6884 on #f3f1ec (light, ~5.4:1) and #98a1b8 on #11141c (dark); see captures viewer-light-pl / viewer-dark-pl-360"
+      }
+    ]
+  }
+}
