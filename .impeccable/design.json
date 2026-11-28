@@ -472,7 +472,7 @@
       },
       {
         "name": "The Figures-Only Rule",
-        "body": "Azeret Mono sets digits only: stub days, pass horizons, times and counts. Words, headings, labels and the booking sheet's date line stay in system sans. The colon inside a time is pulled in (-0.22em each side) so \"08:15\" closes up.",
+        "body": "Azeret Mono sets digits only: stub days, pass horizons, times and counts. Words, headings, labels and the booking sheet's date line stay in system sans. Appointment times use the font’s native colon spacing.",
         "section": "typography"
       },
       {
