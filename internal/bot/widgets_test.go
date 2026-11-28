@@ -414,7 +414,7 @@ func TestCouponOpensSlotInMiniAppAndBooksOnPortal(t *testing.T) {
 	render := func() string {
 		t.Helper()
 		card := b.newWidgetCard("en", nil)
-		card.Slots = []widgetSlot{b.newWidgetSlot("en", item)}
+		card.Slots = []widgetSlot{b.newWidgetSlot(domain.User{Locale: "en", TelegramUserID: 77}, item)}
 		var out strings.Builder
 		if err := chatWidget.Execute(&out, card); err != nil {
 			t.Fatal(err)
@@ -429,6 +429,10 @@ func TestCouponOpensSlotInMiniAppAndBooksOnPortal(t *testing.T) {
 		t.Fatal(err)
 	}
 	b.cfg.MiniAppLink = "https://t.me/watcher_bot/app"
+	if strings.Contains(render(), "?startapp=") {
+		t.Fatal("unassigned user got a Mini App link")
+	}
+	b.cfg.Browsers = map[int64]*luxmed.Browser{77: {}}
 	markup := render()
 	for _, want := range []string{`href="https://t.me/watcher_bot/app?startapp=slot-77-1970-01-01" data-app`, `<a class="book" href="` + luxmed.ReservationPageURL + `"`, ">Book</a>"} {
 		if !strings.Contains(markup, want) {

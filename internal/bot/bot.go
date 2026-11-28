@@ -181,16 +181,17 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		b.catalog.T(user.Locale, "button.book_portal"), portalURL(histories[0].BookingURL),
 	)}
 	keyboard := [][]miniAppButton{{booking}}
+	var options []miniAppButton
+	if count > min(shown, notificationCoupons) {
+		options = append(options, b.actionButton(user, "button.all_options", fmt.Sprintf("options:%d:0", watch.ID)))
+	}
 	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
-		label := b.catalog.T(user.Locale, "button.slot_results")
-		if count > notificationCoupons {
-			label = fmt.Sprintf("%s · %d", b.catalog.T(user.Locale, "button.all_options"), count)
-		}
-		results := newMiniAppButton(label, b.dashboardURL(user, "history"))
+		results := newMiniAppButton(b.catalog.T(user.Locale, "button.slot_results"), b.dashboardURL(user, "history"))
 		results.WidgetAction = "app:history"
-		keyboard = append(keyboard, []miniAppButton{results})
-	} else if count > min(shown, notificationCoupons) {
-		keyboard = append(keyboard, []miniAppButton{b.actionButton(user, "button.all_options", fmt.Sprintf("options:%d:0", watch.ID))})
+		options = append(options, results)
+	}
+	if len(options) > 0 {
+		keyboard = append(keyboard, options)
 	}
 	keyboard = append(keyboard,
 		[]miniAppButton{b.actionButton(user, "button.show_watch", fmt.Sprintf("watch:show:%d", watch.ID))},
@@ -209,7 +210,7 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	card := b.newWidgetCard(user.Locale, actions)
 	card.BookingHint = b.catalog.T(user.Locale, "notification.booking_hint")
 	for _, item := range soonest {
-		card.Slots = append(card.Slots, b.newWidgetSlot(user.Locale, item))
+		card.Slots = append(card.Slots, b.newWidgetSlot(user, item))
 	}
 	if count > len(soonest) {
 		card.More = b.catalog.T(user.Locale, "notification.more", count-len(soonest))
@@ -1865,13 +1866,7 @@ func (b *Bot) showWatch(ctx context.Context, user domain.User, watch domain.Watc
 		pass.Lines = append(pass.Lines, b.catalog.T(user.Locale, key))
 		markup = b.withAccountRecovery(user, key, markup)
 	}
-	// The pass keeps doctor, dates and hours from the summary, then the last check and result count.
-	details := strings.Split(summary, "\n")
-	for _, i := range []int{2, 4, 6} {
-		if i < len(details) {
-			pass.Lines = append(pass.Lines, details[i])
-		}
-	}
+	pass.Lines = append(pass.Lines, strings.Split(summary, "\n")...)
 	statusLines := strings.Split(status, "\n")
 	pass.Lines = append(pass.Lines, statusLines[min(1, len(statusLines)-1):]...)
 	fallback := tgbotapi.NewMessage(user.TelegramChatID, html.EscapeString(text))

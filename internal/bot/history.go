@@ -87,7 +87,8 @@ func (b *Bot) sendHistoryPage(
 	}
 	var lines []string
 	var bookingURL string
-	var card widgetCard
+	var coupons []widgetSlot
+	var previews []string
 	var hide []tgbotapi.InlineKeyboardButton
 	for i, item := range items {
 		when := b.slotDateTime(user.Locale, item.DateTime)
@@ -108,7 +109,7 @@ func (b *Bot) sendHistoryPage(
 		if item.Address != "" {
 			line += "\n" + truncateMessage(item.Address, 100)
 		}
-		coupon := b.newWidgetSlot(user.Locale, item)
+		coupon := b.newWidgetSlot(user, item)
 		coupon.Hide, coupon.HideLabel = hideAction(item.ID), b.catalog.T(user.Locale, "button.hide")
 		if item.ServiceName != "" {
 			coupon.Doctor = strings.Join(slices.DeleteFunc([]string{coupon.Doctor, truncateMessage(item.ServiceName, 64)}, func(s string) bool { return s == "" }), " · ")
@@ -123,7 +124,12 @@ func (b *Bot) sendHistoryPage(
 		case bookingURL == "":
 			bookingURL = portalURL(item.BookingURL)
 		}
-		card.Slots = append(card.Slots, coupon)
+		coupons = append(coupons, coupon)
+		preview := when
+		if coupon.Stamp != "" {
+			preview += " · " + coupon.Stamp
+		}
+		previews = append(previews, preview)
 		if item.LastNotifiedAt != nil {
 			line += "\n" + b.catalog.T(user.Locale, "history.notified")
 		}
@@ -151,13 +157,12 @@ func (b *Bot) sendHistoryPage(
 	if empty == "options.empty" {
 		title = b.catalog.T(user.Locale, "button.all_options")
 	}
-	slots := card.Slots
-	card = b.newWidgetCard(user.Locale, widgetKeyboard(tgbotapi.NewInlineKeyboardMarkup(slices.Concat(bottom...))))
-	card.Slots = slots
+	card := b.newWidgetCard(user.Locale, widgetKeyboard(tgbotapi.NewInlineKeyboardMarkup(slices.Concat(bottom...))))
+	card.Slots = coupons
 	fallback := tgbotapi.NewMessage(user.TelegramChatID, html.EscapeString(truncateMessage(strings.Join(lines, "\n\n"), 4000)))
 	fallback.ParseMode = tgbotapi.ModeHTML
 	fallback.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
-	if _, err := b.sendWidget(card, "<b>"+html.EscapeString(title)+"</b>", fallback); err != nil {
+	if _, err := b.sendWidget(card, "<b>"+html.EscapeString(title)+"</b>\n"+html.EscapeString(strings.Join(previews, " · ")), fallback); err != nil {
 		b.logger.Warn("send Telegram history page failed")
 	}
 }

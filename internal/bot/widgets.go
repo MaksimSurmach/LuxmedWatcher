@@ -133,7 +133,8 @@ func (b *Bot) newWidgetCard(locale string, actions [][]miniAppButton) widgetCard
 	return card
 }
 
-func (b *Bot) newWidgetSlot(locale string, item domain.AppointmentHistory) widgetSlot {
+func (b *Bot) newWidgetSlot(user domain.User, item domain.AppointmentHistory) widgetSlot {
+	locale := user.Locale
 	local := item.DateTime.In(luxmed.Location())
 	place := item.Address
 	if place == "" {
@@ -148,7 +149,7 @@ func (b *Bot) newWidgetSlot(locale string, item domain.AppointmentHistory) widge
 		Place:   truncateMessage(place, 64),
 		URL:     portalURL(item.BookingURL),
 	}
-	if b.cfg.MiniApp != nil && b.cfg.MiniAppLink != "" && item.ID > 0 {
+	if b.cfg.MiniApp != nil && b.cfg.MiniAppLink != "" && b.cfg.Browsers[user.TelegramUserID] != nil && item.ID > 0 {
 		slot.AppURL = b.cfg.MiniAppLink + "?startapp=slot-" + strconv.FormatInt(item.ID, 10) + "-" + local.Format(time.DateOnly)
 		slot.Book = b.catalog.T(locale, "button.book")
 	}

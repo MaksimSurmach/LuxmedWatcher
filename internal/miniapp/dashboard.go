@@ -204,13 +204,14 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 	)
 	var input struct {
 		Day    string
+		SlotID int64
 		Offset int
 		After  *dashboardHistoryCursor
 	}
 	if !decodeDashboard(w, r, &input) {
 		return
 	}
-	if input.Offset < 0 || input.Offset > maxPageOffset {
+	if input.SlotID < 0 || (input.SlotID > 0 && input.After != nil) || input.Offset < 0 || input.Offset > maxPageOffset {
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
@@ -275,8 +276,7 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 			return
 		}
 		for _, item := range items {
-			slots = append(slots, dashboardHistory{item.ID, item.WatchID, item.DateTime, item.ServiceName,
-				item.DoctorName, item.FacilityName, item.Address, item.Status})
+			slots = append(slots, historySlot(item))
 		}
 		offset = end
 	}
@@ -288,13 +288,32 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 		}
 		next = &dashboardHistoryCursor{View: view, Offset: offset}
 	}
+	var linked *dashboardHistory
+	if input.SlotID > 0 {
+		// Chat coupons carry the original watch row, even when the list deduplicates overlapping watches.
+		items, err := d.db.HistoryByIDs(r.Context(), user.ID, now, []int64{input.SlotID})
+		if err != nil {
+			reply(w, http.StatusServiceUnavailable, nil)
+			return
+		}
+		if len(items) == 1 && items[0].DateTime.In(luxmed.Location()).Format(time.DateOnly) == selected {
+			slot := historySlot(items[0])
+			linked = &slot
+		}
+	}
 	reply(w, http.StatusOK, struct {
-		Days  []historyDay `json:",omitempty"`
-		Day   string       `json:",omitempty"`
-		Slots []dashboardHistory
-		More  bool
-		Next  *dashboardHistoryCursor `json:",omitempty"`
-	}{days, selected, slots, more, next})
+		Days   []historyDay `json:",omitempty"`
+		Day    string       `json:",omitempty"`
+		Slots  []dashboardHistory
+		More   bool
+		Next   *dashboardHistoryCursor `json:",omitempty"`
+		Linked *dashboardHistory       `json:",omitempty"`
+	}{days, selected, slots, more, next, linked})
+}
+
+func historySlot(item domain.AppointmentHistory) dashboardHistory {
+	return dashboardHistory{item.ID, item.WatchID, item.DateTime, item.ServiceName,
+		item.DoctorName, item.FacilityName, item.Address, item.Status}
 }
 
 func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, user domain.User) {
