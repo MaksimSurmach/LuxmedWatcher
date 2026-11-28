@@ -188,5 +188,13 @@
   "watches.days_unit": "дней",
   "viewer.live": "Удалённый браузер подключён",
   "viewer.lead": "Войдите в LUX MED в открывшемся окне.",
-  "viewer.lead_more": "Если LUX MED попросит код, введите его там."
+  "viewer.lead_more": "Если LUX MED попросит код, введите его там.",
+  "account.last_confirmed": "Доступ подтверждён",
+  "account.last_search": "Последний поиск",
+  "account.relogin": "Войти заново",
+  "account.without_password": "Войти без сохранения пароля",
+  "account.with_password": "Войти и сохранить пароль в боте",
+  "viewer.finish": "Готово",
+  "viewer.reconnecting": "Восстанавливаем соединение…",
+  "viewer.interrupted": "Связь с окном входа прервалась. Можно подключиться снова."
 }

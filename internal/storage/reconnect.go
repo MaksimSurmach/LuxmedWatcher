@@ -40,6 +40,7 @@ const (
 )
 
 type LuxMedAccessSnapshot struct {
+	ConfirmedUnix          *int64
 	Status                 LuxMedAccessStatus
 	EpisodeID              string
 	SavedLogin             bool
@@ -62,13 +63,14 @@ func setLuxMedAccessStatus(ctx context.Context, writer interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
 }, userID int64, status LuxMedAccessStatus, requiresTerms bool) error {
 	_, err := writer.ExecContext(ctx, `
-		INSERT INTO luxmed_access (user_id, status, requires_terms)
-		VALUES ($1, $2, $3 OR ($2<>$4 AND `+hasWatchSignInError("$5", "$6")+`))
+		INSERT INTO luxmed_access (user_id, status, requires_terms, confirmed_unix)
+		VALUES ($1, $2, $3 OR ($2<>$4 AND `+hasWatchSignInError("$5", "$6")+`), CASE WHEN $2=$4 THEN CAST($7 AS BIGINT) ELSE NULL END)
 		ON CONFLICT (user_id) DO UPDATE SET
 			status=excluded.status,
+			confirmed_unix=COALESCE(excluded.confirmed_unix, luxmed_access.confirmed_unix),
 			requires_terms=excluded.status<>$4 AND (luxmed_access.requires_terms OR excluded.requires_terms)
-		WHERE luxmed_access.status<>excluded.status OR (excluded.requires_terms AND NOT luxmed_access.requires_terms)
-	`, userID, status, requiresTerms, LuxMedAccessConnected, domain.WatchStatusActive, domain.WatchStatusPaused)
+		WHERE excluded.status=$4 OR luxmed_access.status<>excluded.status OR (excluded.requires_terms AND NOT luxmed_access.requires_terms)
+	`, userID, status, requiresTerms, LuxMedAccessConnected, domain.WatchStatusActive, domain.WatchStatusPaused, time.Now().Unix())
 	return err
 }
 
@@ -90,13 +92,13 @@ func (db *DB) WatchesWithReconnectState(ctx context.Context, userID int64) ([]do
 			`+hasAccountTermsRequirement("$1")+`, `+hasWatchSignInError("$2", "$3")+`,
 			EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1 AND use_saved_login),
 			EXISTS (SELECT 1 FROM luxmed_accounts WHERE user_id=$1),
-			credential_revision, credential_save_revision
+			credential_revision, credential_save_revision, (SELECT confirmed_unix FROM luxmed_access WHERE user_id=$1)
 		FROM users WHERE id=$1
 		`,
 		userID, domain.WatchStatusActive, domain.WatchStatusPaused,
 	).Scan(
 		&access.EpisodeID, &access.Status, &requiresTerms, &staleSignInError,
-		&access.SavedLogin, &access.HasCredentials, &access.CredentialRevision, &access.CredentialSaveRevision,
+		&access.SavedLogin, &access.HasCredentials, &access.CredentialRevision, &access.CredentialSaveRevision, &access.ConfirmedUnix,
 	)
 	if err != nil {
 		return nil, access, err

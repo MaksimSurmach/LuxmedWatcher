@@ -161,7 +161,11 @@ func (a *app) session(w http.ResponseWriter, r *http.Request) {
 		reply(w, http.StatusBadRequest, nil)
 		return
 	}
-	id, ok := verifiedTelegramID(input.InitData, a.config.BotID, time.Now(), 5*time.Minute, a.key)
+	maxAge := 5 * time.Minute
+	if r.Header.Get("Authorization") != "" {
+		maxAge += dashboardSessionLifetime
+	}
+	id, ok := verifiedTelegramID(input.InitData, a.config.BotID, time.Now(), maxAge, a.key)
 	if !ok {
 		reply(w, http.StatusUnauthorized, nil)
 		return
@@ -178,7 +182,7 @@ func (a *app) exchange(w http.ResponseWriter, r *http.Request, id int64, launch,
 		reply(w, http.StatusUnauthorized, nil)
 		return
 	}
-	if status := a.access(r.Context(), initData); status != http.StatusNoContent {
+	if status := a.access(r.Context(), initData, r.Header.Get("Authorization")); status != http.StatusNoContent {
 		reply(w, status, nil)
 		return
 	}
@@ -202,13 +206,14 @@ func (a *app) exchange(w http.ResponseWriter, r *http.Request, id int64, launch,
 	reply(w, http.StatusOK, result)
 }
 
-func (a *app) access(ctx context.Context, initData string) int {
+func (a *app) access(ctx context.Context, initData, authorization string) int {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.config.DashboardAPI+dashboardPrefix+"viewer-access", nil)
 	if err != nil {
 		return http.StatusServiceUnavailable
 	}
 	req.Header.Set("Origin", a.config.Origin)
 	req.Header.Set("X-Telegram-Init-Data", initData)
+	req.Header.Set("Authorization", authorization)
 	res, err := a.client.Do(req)
 	if err != nil {
 		return http.StatusServiceUnavailable

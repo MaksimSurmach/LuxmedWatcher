@@ -75,9 +75,21 @@ func (d *dashboard) handler() http.Handler {
 	mux.HandleFunc("POST "+dashboardPrefix+"forget-credentials", d.authorize(d.forgetCredentials))
 	mux.HandleFunc("POST "+dashboardPrefix+"account", dashboardDeadline(d.authorize(d.account)))
 	mux.HandleFunc("POST "+dashboardPrefix+"connect", d.browserLogin)
-	mux.HandleFunc("POST "+dashboardPrefix+"viewer-access", d.authorizeTelegram(func(w http.ResponseWriter, _ *http.Request, _ domain.User) {
-		reply(w, http.StatusNoContent, nil)
-	}))
+	mux.HandleFunc("POST "+dashboardPrefix+"resume-viewer", d.authorize(d.resumeViewer))
+	mux.HandleFunc("POST "+dashboardPrefix+"viewer-access", func(w http.ResponseWriter, r *http.Request) {
+		access := func(w http.ResponseWriter, _ *http.Request, _ domain.User) { reply(w, http.StatusNoContent, nil) }
+		if r.Header.Get("Authorization") == "" {
+			d.authorizeTelegram(access)(w, r)
+			return
+		}
+		d.authorize(func(w http.ResponseWriter, r *http.Request, u domain.User) {
+			if !authorizedUserWithMaxAge(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, u.TelegramUserID, time.Now(), dashboardSessionLifetime+5*time.Minute, d.key) {
+				reply(w, http.StatusUnauthorized, nil)
+				return
+			}
+			access(w, r, u)
+		})(w, r)
+	})
 	return mux
 }
 
@@ -173,10 +185,11 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		DefaultMinutes         int
 		ReconnectRequired      bool
 		ReconnectEpisodeID     string `json:",omitempty"`
+		ConfirmedUnix          *int64
 		AccountStatus          storage.LuxMedAccessStatus
 	}{access.SavedLogin, access.HasCredentials, access.CredentialRevision, access.CredentialSaveRevision, watches, available, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
-		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.Status})
+		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.ConfirmedUnix, access.Status})
 }
 
 func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -622,7 +635,7 @@ func (d *dashboard) forgetCredentials(w http.ResponseWriter, r *http.Request, us
 func (d *dashboard) browserLogin(w http.ResponseWriter, r *http.Request) {
 	id, ok := d.sessions.verify(r.Header.Get("Authorization"), time.Now())
 	if !ok || r.Header.Get("Origin") != d.cfg.Origin ||
-		!authorizedUser(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, id, time.Now(), d.key) {
+		!authorizedUserWithMaxAge(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, id, time.Now(), dashboardSessionLifetime+5*time.Minute, d.key) {
 		reply(w, http.StatusUnauthorized, nil)
 		return
 	}
@@ -650,6 +663,28 @@ func (d *dashboard) openBrowser(w http.ResponseWriter, r *http.Request, user dom
 		dashboardResult(w, nil, err)
 		return
 	}
+	d.issueViewerLink(w, r, user)
+}
+
+// Reattach the transport without selecting a login mode or changing the credential revisions.
+func (d *dashboard) resumeViewer(w http.ResponseWriter, r *http.Request, user domain.User) {
+	if !authorizedUserWithMaxAge(r.Header.Get("X-Telegram-Init-Data"), d.cfg.BotID, user.TelegramUserID, time.Now(), dashboardSessionLifetime+5*time.Minute, d.key) {
+		reply(w, http.StatusUnauthorized, nil)
+		return
+	}
+	_, saved, _, err := d.db.BrowserLoginMode(r.Context(), user.ID)
+	if err != nil {
+		dashboardResult(w, nil, err)
+		return
+	}
+	if saved {
+		dashboardResult(w, nil, storage.ErrCredentialsChanged)
+		return
+	}
+	d.issueViewerLink(w, r, user)
+}
+
+func (d *dashboard) issueViewerLink(w http.ResponseWriter, r *http.Request, user domain.User) {
 	link, err := d.connect(r.Context(), user.TelegramUserID)
 	if err == nil {
 		link += "&lang=" + i18n.Normalize(user.Locale, "pl")

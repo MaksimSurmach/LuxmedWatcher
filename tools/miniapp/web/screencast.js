@@ -50,8 +50,9 @@ export class Screencast extends EventTarget {
     this.decoding = false;
   }
 
-  disconnect() {
-    this.socket.close();
+  disconnect(finished = false) {
+    if (finished) this.socket.close(1000, 'finished');
+    else this.socket.close();
     this.frame = undefined;
     this.canvas.remove();
   }

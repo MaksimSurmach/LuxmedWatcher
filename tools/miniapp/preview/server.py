@@ -89,10 +89,9 @@ def choose(q):
     return '&'.join(f'{k}={v}' for k, v in values if v) or 'preview'
 
 def connect(host, scenario, lang):
-    # The real server returns a remote-browser link; the preview marks the sign-in restored and
-    # returns to the app on the same origin, keeping the scenario.
     RESTORED.add(scenario)
-    return {'url': f'http://{host}/?' + '&'.join(f'{k}={v}' for k, v in (('tab', 'watches'), ('scenario', scenario), ('lang', lang)) if v)}
+    return {'url': f'http://{host}/?ticket=preview'}
+
 
 def slot_id(body):
     try:
@@ -113,6 +112,13 @@ class H(BaseHTTPRequestHandler):
             locale = u.path[6:]
             if locale not in LANGS: return self.send(b'', 'text/plain', 404)
             return self.send((I18N / f'{locale}.json').read_bytes(), 'application/json')
+        if u.path == '/' and q.get('embedded') == ['1']:
+            locale = pick(q, 'lang', LANGS, 'pl')
+            labels = json.loads((I18N / f'{locale}.json').read_bytes())
+            html = ('<main><h1>LUX MED · Preview</h1><button>' + escape(labels['viewer.finish']) +
+                    '</button></main><script>document.querySelector("button").onclick=async()=>{'
+                    'await frameElement.loginSession.issueTicket();frameElement.loginSession.finish()}</script>')
+            return self.send(html.encode(), 'text/html; charset=utf-8')
         name = 'dashboard.html' if u.path == '/' else u.path.lstrip('/')
         f = (WEB / name).resolve()
         if WEB not in f.parents or not f.is_file(): return self.send(b'', 'text/plain', 404)
