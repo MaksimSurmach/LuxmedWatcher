@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="72" height="56" viewBox="0 0 72 56">
+  <style>
+    .ticket { fill: #1f2f57 }
+    .cut { stroke: #f3f1ec }
+    .hand { stroke: #ff9c88 }
+    @media (prefers-color-scheme: dark) {
+      .ticket { fill: #dfe5f5 }
+      .cut { stroke: #11141c }
+      .hand { stroke: #a0352d }
+    }
+  </style>
+  <g transform="rotate(-8 36 28)">
+    <path class="ticket" d="M10 8h52a4 4 0 0 1 4 4v10a6 6 0 0 0 0 12v10a4 4 0 0 1-4 4H10a4 4 0 0 1-4-4V34a6 6 0 0 0 0-12V12a4 4 0 0 1 4-4Z"/>
+    <g fill="none" stroke-width="2.5">
+      <path class="cut" d="M49 8v40" stroke-dasharray="4 4"/>
+      <circle class="cut" cx="28" cy="28" r="10"/>
+      <path class="hand" d="M28 22v6l5 3" stroke-linecap="round" stroke-linejoin="round"/>
+    </g>
+  </g>
+</svg>

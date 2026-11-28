@@ -1,17 +1,15 @@
 const boot = document.querySelector('#boot');
-boot.querySelector('a').addEventListener('click', (event) => {
-  event.preventDefault();
-  location.reload();
-});
-
 window.Telegram?.WebApp?.ready();
+
 try {
   if (boot.dataset.entry === 'dashboard') {
-    await import('/dashboard.js');
+    const { ready } = await import('/dashboard.js');
+    await ready;
   } else {
     await import('/app.js');
   }
   boot.hidden = true;
 } catch {
+  boot.dataset.failed = '';
   boot.querySelector('[role="status"]').textContent = boot.dataset.bootError;
 }

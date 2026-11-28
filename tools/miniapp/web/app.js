@@ -54,6 +54,7 @@ window.visualViewport?.addEventListener('resize', () => {
 const keyCodes = { Tab: 0xff09, Backspace: 0xff08, Enter: 0xff0d };
 let opening;
 let retryTimer;
+let waitingToReconnect = false;
 let retries = 0;
 let standaloneToken;
 
@@ -67,6 +68,7 @@ let scrollDrag;
 function stopTransport(finished = false) {
   clearTimeout(startupTimer);
   clearTimeout(retryTimer);
+  waitingToReconnect = false;
   opening?.abort();
   opening = null;
   const previous = viewer;
@@ -83,12 +85,13 @@ function stopTransport(finished = false) {
 
 function problem(message, retry = false) {
   stopTransport();
-  phase('closed');
+  waitingToReconnect = retry && retries < 8;
+  phase(waitingToReconnect ? 'connecting' : 'closed');
   document.querySelector('main').dataset.outcome = 'trouble';
   hint.textContent = '';
-  status.textContent = label(message);
-  element('retry').hidden = !retry;
-  if (retry && retries < 8 && !document.hidden) {
+  status.textContent = label(waitingToReconnect ? 'reconnecting' : message);
+  element('retry').hidden = !retry || waitingToReconnect;
+  if (waitingToReconnect && !document.hidden) {
     retryTimer = setTimeout(() => { retries++; void start(); }, 1200 * (retries + 1));
   }
 }
@@ -179,7 +182,7 @@ async function start() {
 }
 
 document.addEventListener('visibilitychange', () => {
-  if (!closed && !document.hidden && !element('retry').hidden) void start();
+  if (!closed && !document.hidden && (waitingToReconnect || !element('retry').hidden)) void start();
 });
 element('retry').onclick = () => { retries = 0; void start(); };
 

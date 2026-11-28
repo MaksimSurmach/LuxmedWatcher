@@ -307,7 +307,10 @@ func TestGatewayServesLocalizedPagesAndBundledDictionaries(t *testing.T) {
 					!strings.Contains(body, `src="/boot.js"`) {
 					t.Errorf("%s: incorrect locale or missing boot script", path)
 				}
-				for _, key := range []string{"common.javascript_required", "dashboard.loading", "error.unavailable", "common.retry"} {
+				if strings.Contains(body, `<a href=""`) || !strings.Contains(body, `src="/watcher-ticket.svg"`) {
+					t.Errorf("%s: loading screen must show the ticket without a reload link", path)
+				}
+				for _, key := range []string{"common.javascript_required", "dashboard.loading", "error.unavailable"} {
 					want := template.HTMLEscapeString(labels[key])
 					if want == "" || !strings.Contains(body, want) {
 						t.Errorf("%s: missing localized bootstrap label %s", path, key)
