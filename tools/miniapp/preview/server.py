@@ -51,6 +51,11 @@ def slots(scenario):
     upcoming = sorted((r for r in rows if r['DateTime'] >= now and r['Status'] != 'expired'), key=lambda r: r['DateTime'])
     return upcoming + sorted((r for r in rows if r not in upcoming), key=lambda r: r['DateTime'], reverse=True)
 
+def available_count(scenario):
+    now = datetime.now(timezone.utc)
+    return sum(row['Status'] != 'expired' and datetime.fromisoformat(row['DateTime'].replace('Z', '+00:00')) > now
+               for row in slots(scenario))
+
 def watches(scenario):
     base = dict(ID=1, Name='Echo serca', ServiceID=11, ServiceName='Echo serca (USG serca)', CityID=1, CityName='Warszawa', Status='active',
                 NextDays=14, DateFrom=None, DateTo=None, DoctorName='', TimeWindows=[], CheckIntervalSeconds=600,
@@ -138,7 +143,7 @@ class H(BaseHTTPRequestHandler):
                 'book': lambda: dict(Status=book(body)),
                 'autobook': lambda: autobook(body),
                 'connect': lambda: connect(self.headers.get('Host', 'localhost'), scenario, lang),
-                'load': lambda: dict(Watches=watches(scenario), AccountStatus='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected', Locale=lang, Booking=booking, CityID=1, CityName='Warszawa', MinimumMinutes=2, DefaultMinutes=10),
+                'load': lambda: dict(Watches=watches(scenario), AvailableSlots=available_count(scenario), AccountStatus='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected', Locale=lang, Booking=booking, CityID=1, CityName='Warszawa', MinimumMinutes=2, DefaultMinutes=10),
                 'history': lambda: dict(Slots=slots(scenario), More=False),
                 'account': lambda: dict(state='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected'),
                 'cities': lambda: [dict(ID=1, Name='Warszawa')],

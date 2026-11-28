@@ -172,7 +172,7 @@
   "watches.autobook_disabled": "Automatyczna rezerwacja wyłączona",
   "watches.state_login": "Wymaga logowania",
   "history.stamp_past": "Minął",
-  "history.stamp_gone": "Zajęty",
+  "history.stamp_gone": "Niedostępny",
   "editor.preset_2w": "2 tygodnie",
   "editor.preset_1m": "1 miesiąc",
   "editor.preset_3m": "3 miesiące",

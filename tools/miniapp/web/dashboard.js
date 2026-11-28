@@ -82,25 +82,13 @@ function renderLanguage() {
 }
 
 // The switch shows how much each side holds on every screen: open times found, searches saved.
-let foundCount;
 function markTab(name) {
   for (const button of navigation.querySelectorAll('[data-tab]')) {
     if (button.dataset.tab === name) button.setAttribute('aria-current', 'page');
     else button.removeAttribute('aria-current');
   }
 }
-async function countFound() {
-  if (foundCount !== undefined) return;
-  try {
-    const now = new Date();
-    const { Slots } = await api('history', { Offset: 0 });
-    if (foundCount === undefined) setCount('history', (Slots ?? []).filter((slot) => !isExpired(slot, now)).length);
-  } catch {
-    // The count is a hint; Found itself reports errors.
-  }
-}
 function setCount(name, value) {
-  if (name === 'history') foundCount = value;
   const target = navigation.querySelector(`[data-count="${name}"]`);
   target.textContent = value ? String(value) : '';
 }
@@ -162,27 +150,26 @@ function show(title, html, focus = true) {
 }
 
 // The portal connection is only checked when the user asks (never automatically).
-// Compact: a status line with the two actions, used on Home. Full: adds instructions, used in Settings.
 // The pill names a state; the button below it carries the command.
 const accountStatusKey = (status) => status === 'no_saved_searches' ? 'watches.empty'
   : ['needs_login', 'search_paused'].includes(status) ? 'watches.state_login' : `account.${status}`;
 
 // One main action per state: sign in when LUX MED needs it, otherwise check the connection.
 const needsSignIn = (account) => ['needs_login', 'search_paused'].includes(account);
-function accountSection(compact = false) {
+function accountSection() {
   const account = state.AccountStatus;
-  return `<section class="card stack account${compact ? ' compact' : ''}" data-state="${account}" aria-labelledby="account-heading">
+  return `<section class="card stack account" data-state="${account}" aria-labelledby="account-heading">
     <div class="account-head">
       <h2 id="account-heading">${text('account.title')}</h2>
       <p class="account-status" data-state="${account}" role="status">${text(accountStatusKey(account))}</p>
     </div>
     <div class="account-actions">
-      ${state.SavedLogin ? '' : `<button type="button" class="${account === 'connected' ? 'flat' : 'secondary'}" id="connect"${compact || account === 'connected' ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>`}
+      ${state.SavedLogin ? '' : `<button type="button" class="${account === 'connected' ? 'flat' : 'secondary'}" id="connect"${account === 'connected' ? '' : ' aria-describedby="account-instructions"'}>${text(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in')} ${icon('link')}</button>`}
       ${state.HasCredentials ? `<button type="button" class="flat danger" id="forget-credentials">${text(state.SavedLogin ? 'account.forget' : 'account.delete_credentials')}</button>` : ''}
       <button type="button" class="${needsSignIn(account) ? 'flat' : 'secondary'}" id="account-check">${text('settings.check_account')}</button>
     </div>
-    ${compact || state.SavedLogin || account === 'connected' ? '' : `<p class="muted" id="account-instructions">${text('account.instructions')}</p>`}
-    <details${compact ? ' hidden' : ''}>
+    ${state.SavedLogin ? '' : `<p class="muted" id="account-instructions"${account === 'connected' ? ' hidden' : ''}>${text('account.instructions')}</p>`}
+    <details${state.SavedLogin && needsSignIn(account) ? ' open' : ''}>
       <summary>${text(state.SavedLogin ? 'account.change_credentials' : 'account.password_mode')}</summary>
       <form id="credentials" method="post" class="stack">
         <label class="field">${text('account.login')}<input name="login" autocomplete="username" autocapitalize="none" spellcheck="false" maxlength="254" required></label>
@@ -222,14 +209,22 @@ function refreshMountedAccount() {
   if (!mountedAccount || mountedAccount.viewID !== renderID || !mountedAccount.section.isConnected) return;
   const { section, displayed } = mountedAccount;
   if (accountModeChanged(state, displayed)) {
-    section.outerHTML = accountSection(section.classList.contains('compact'));
+    section.outerHTML = accountSection();
     bindAccount();
     return;
   }
   const account = state.AccountStatus;
   const connect = section.querySelector('#connect');
-  if (connect) connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
-  if (connect) connect.className = account === 'connected' ? 'flat' : 'secondary';
+  if (connect) {
+    const instructions = section.querySelector('#account-instructions');
+    instructions.hidden = account === 'connected';
+    if (instructions.hidden) connect.removeAttribute('aria-describedby');
+    else connect.setAttribute('aria-describedby', instructions.id);
+    connect.firstChild.textContent = t(account === 'search_paused' ? 'account.connect_luxmed' : 'account.sign_in') + ' ';
+    connect.className = account === 'connected' ? 'flat' : 'secondary';
+  } else if (needsSignIn(account) && section.dataset.state !== account) {
+    section.querySelector('details').open = true;
+  }
   section.querySelector('#account-check').className = needsSignIn(account) ? 'flat' : 'secondary';
   section.dataset.state = account;
   const status = section.querySelector('.account-status');
@@ -403,7 +398,7 @@ const timeOf = (date) => `${dateText(date)}, ${clock.format(new Date(date))}`;
 function watchStatus() {
   const items = state.Watches ?? [];
   const now = new Date();
-  const checks = items.map((watch) => Date.parse(watch.LastSuccessAt)).filter(Boolean);
+  const checks = items.map((watch) => Date.parse(watch.LastCheckedAt)).filter(Number.isFinite);
   const last = checks.length ? Math.max(...checks) : 0;
   const lastText = last && (dateOnly(last) === dateOnly(now) ? clock.format(last) : timeOf(last));
   const active = items.filter((watch) => watch.Status === 'active').length;
@@ -432,7 +427,7 @@ function watchCard(watch) {
   const minutes = Math.ceil(watch.CheckIntervalSeconds / 60);
   const account = state.AccountStatus;
   const accessError = ['luxmed_authentication', 'luxmed_account_missing'].includes(watch.LastError);
-  const needsLogin = accessError && ['needs_login', 'search_paused'].includes(account);
+  const needsLogin = active && needsSignIn(account);
   let checkError = '';
   if (accessError) {
     if (needsLogin || account === 'verification_pending') checkError = `account.${account}`;
@@ -495,7 +490,6 @@ function autoBookDialog(button, watch) {
 
 function watches() {
   const items = state.Watches ?? [];
-  setCount('watches', items.length);
   show(titleFor('watches'), `${watchStatus()}<div class="stack list">
     ${items.length ? items.map(watchCard).join('') : `<div class="empty"><h2>${text('watches.empty')}</h2><p>${text('watches.empty_hint')}</p></div>`}
     ${items.length ? `<section class="stack">
@@ -533,9 +527,6 @@ function dayLabel(value) {
 }
 const isExpired = (slot, now) => slot.Status === 'expired' || new Date(slot.DateTime) <= now;
 
-// Mono figures give the colon a whole cell; set it apart so "08:15" closes up.
-const figureTime = (time) => clock.format(time).replace(':', '<span class="colon">:</span>');
-
 // One found time is one ticket coupon: the stub carries the date, the body the time, doctor and street.
 function coupon({ slot, index, available, time }, now, next) {
   const when = clock.format(time);
@@ -544,15 +535,16 @@ function coupon({ slot, index, available, time }, now, next) {
   const { day } = dateParts(time);
   const weekday = weekdays[dayNames.indexOf(weekdayIndex.format(new Date(time))) + 1];
   const stub = `<span class="stub" aria-hidden="true"><small>${escape(weekday)}</small><b>${Number(day)}</b><small>${escape(shortDate(time).month)}</small></span>`;
-  const body = `<time class="t" datetime="${escape(slot.DateTime)}">${figureTime(time)}</time>
-    <span class="who">${escape(doctor)}${slot.Service ? ` · ${escape(slot.Service)}` : ''}</span><small>${escape(address)}</small>`;
+  const clockTime = `<time class="t" datetime="${escape(slot.DateTime)}">${escape(when)}</time>`;
+  const details = `<span class="who">${escape(doctor)}${slot.Service ? ` · ${escape(slot.Service)}` : ''}</span><small>${escape(address)}</small>`;
   if (!available) {
-    const past = time <= now;
-    return `<li><div class="coupon void" tabindex="-1" data-expired-slot="${index}" aria-label="${escape(`${dayLabel(time)}, ${when}, ${doctor}. ${t(past ? 'history.expired' : 'history.unavailable')}`)}">
-      ${stub}<span class="body">${body}</span><span class="stamp" aria-hidden="true">${text(past ? 'history.stamp_past' : 'history.stamp_gone')}</span></div></li>`;
+    const stamp = text(time <= now ? 'history.stamp_past' : 'history.stamp_gone');
+    return `<li><div class="coupon void" tabindex="-1" data-expired-slot="${index}">
+      <span class="sr-only">${escape(dayLabel(time))}</span>${stub}<span class="body">
+        <span class="coupon-head">${clockTime}<span class="stamp">${stamp}</span></span>${details}</span></div></li>`;
   }
-  return `<li><button type="button" class="coupon${next ? ' first' : ''}" data-slot="${index}" aria-label="${escape(`${dayLabel(time)}. ${t('history.row_label', { time: when, doctor, address })}`)}">
-    ${stub}<span class="body">${body}</span></button></li>`;
+  return `<li><button type="button" class="coupon${next ? ' first' : ''}" data-slot="${index}" aria-label="${escape(`${dayLabel(time)}. ${t('history.row_label', { time: when, doctor: [doctor, slot.Service].filter(Boolean).join(', '), address })}`)}">
+    ${stub}<span class="body">${clockTime}${details}</span></button></li>`;
 }
 
 // Open times first, soonest at the top; times that are gone sink below, newest first.
@@ -581,7 +573,7 @@ function bookingDialog(slot) {
     [dayLabel(date), clock.format(date)],
     [slot.Doctor || t('history.no_doctor'), slot.Facility],
     [slot.Address, ''],
-  ].filter(([a]) => a).map(([a, b], i) => `<div><dt>${escape(a)}</dt>${b ? `<dd>${i === 1 ? figureTime(date) : escape(b)}</dd>` : ''}</div>`).join('');
+  ].filter(([a]) => a).map(([a, b]) => `<div><dt>${escape(a)}</dt>${b ? `<dd>${escape(b)}</dd>` : ''}</div>`).join('');
   const note = dialog.querySelector('#booking-note');
   const open = dialog.querySelector('#booking-open');
   note.textContent = t(state.Booking ? 'history.book_note' : 'history.confirm_note');
@@ -637,7 +629,6 @@ function bookingDialog(slot) {
 }
 
 async function historyScreen(id) {
-  setCount('watches', state.Watches?.length ?? 0);
   show(titleFor('history'), `${watchStatus()}<div class="stack" id="slots" tabindex="-1"><p class="muted">${text('history.loading')}</p></div>${newWatchButton()}`);
   bindShared();
   const results = main.querySelector('#slots');
@@ -664,8 +655,6 @@ async function historyScreen(id) {
       }
     }
     const now = new Date();
-    const open = loaded.filter((slot) => !isExpired(slot, now)).length;
-    setCount('history', open);
     if (!loaded.length) {
       results.innerHTML = `<div class="empty"><span class="stub ghost" aria-hidden="true"></span><h2>${text('history.empty')}</h2><p>${text(state.Watches?.length ? 'history.empty_hint' : 'watches.empty_hint')}</p></div>`;
       return;
@@ -716,8 +705,10 @@ async function settingsScreen(id) {
   const loadCities = main.querySelector('#load-cities');
   const selected = { ID: state.CityID, Name: state.CityName };
   function fillCities(items) {
-    form.elements.city.innerHTML = cityOptions(items, selected, t('settings.no_city'));
-    form.elements.city.value = selected.ID ?? 0;
+    const select = form.elements.city;
+    const value = select.value || String(selected.ID ?? 0);
+    select.innerHTML = cityOptions(items, selected, t('settings.no_city'));
+    select.value = value;
   }
   fillCities(cities ?? []);
   loadCities.hidden = true;
@@ -1196,7 +1187,7 @@ function screenError(title, error, retry) {
   if (retry) main.querySelector('button').onclick = retry;
 }
 
-async function switchTab(next, { reload = next !== 'history' } = {}) {
+async function switchTab(next, { reload = true } = {}) {
   clearTimeout(flashTimer);
   announcement.textContent = '';
   tab = next;
@@ -1209,8 +1200,6 @@ async function switchTab(next, { reload = next !== 'history' } = {}) {
       if (id !== renderID) return;
       applySnapshot(latest);
     }
-    setCount('watches', state.Watches?.length ?? 0);
-    if (tab !== 'history') void countFound();
     if (tab === 'watches') watches();
     if (tab === 'history') await historyScreen(id);
     if (tab === 'settings') await settingsScreen(id);
@@ -1221,6 +1210,8 @@ async function switchTab(next, { reload = next !== 'history' } = {}) {
 
 function applySnapshot(latest) {
   state = latest;
+  setCount('watches', state.Watches?.length ?? 0);
+  setCount('history', state.AvailableSlots);
   setLanguage(state.Locale);
   renderLanguage();
 }

@@ -276,7 +276,7 @@ A warm, low-saturation paper-and-navy palette with three meaning colours used sp
 - **Ticket date line** (700, 0.85rem, 1.3, 0.06em, uppercase, system sans): the date on the booking sheet, in ticket red between the perforations.
 
 ### Named Rules
-**The Figures-Only Rule.** Azeret Mono sets digits only: stub days, pass horizons, times and counts. Words, headings, labels and the booking sheet's date line stay in system sans. The colon inside a time is pulled in (-0.22em each side) so "08:15" closes up.
+**The Figures-Only Rule.** Azeret Mono sets digits only: stub days, pass horizons, times and counts. Words, headings, labels and the booking sheet's date line stay in system sans. Appointment times use the font’s native colon spacing.
 
 **The Native Weight Rule.** Weights step 400 / 600 / 650 / 700 / 800; 800 is used only by the stamp.
 

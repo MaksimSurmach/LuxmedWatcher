@@ -154,12 +154,18 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
+	available, err := d.db.AvailableHistoryCount(r.Context(), user.ID, time.Now())
+	if err != nil {
+		reply(w, http.StatusServiceUnavailable, nil)
+		return
+	}
 	reply(w, http.StatusOK, struct {
 		SavedLogin             bool
 		HasCredentials         bool
 		CredentialRevision     int64
 		CredentialSaveRevision int64
 		Watches                []domain.Watch
+		AvailableSlots         int
 		Locale                 string
 		CityID                 *int
 		CityName               string
@@ -168,7 +174,7 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		ReconnectRequired      bool
 		ReconnectEpisodeID     string `json:",omitempty"`
 		AccountStatus          storage.LuxMedAccessStatus
-	}{access.SavedLogin, access.HasCredentials, access.CredentialRevision, access.CredentialSaveRevision, watches, user.Locale, user.PreferredCityID, user.PreferredCityName,
+	}{access.SavedLogin, access.HasCredentials, access.CredentialRevision, access.CredentialSaveRevision, watches, available, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
 		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.Status})
 }

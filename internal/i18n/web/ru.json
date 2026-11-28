@@ -172,7 +172,7 @@
   "watches.autobook_disabled": "Автозапись выключена",
   "watches.state_login": "Нужен вход",
   "history.stamp_past": "Прошло",
-  "history.stamp_gone": "Занято",
+  "history.stamp_gone": "Недоступно",
   "editor.preset_2w": "2 недели",
   "editor.preset_1m": "1 месяц",
   "editor.preset_3m": "3 месяца",

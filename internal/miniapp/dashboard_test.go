@@ -649,6 +649,20 @@ func testDashboardHistoryPageOrder(t *testing.T, change string) {
 	if !slices.Equal(got, wantNext) || second.More {
 		t.Fatalf("next page IDs = %v, want %v, more = %v", got, wantNext, second.More)
 	}
+	req := httptest.NewRequest(http.MethodPost, dashboardPrefix+"load", nil)
+	req.Header.Set("Origin", origin)
+	req.Header.Set("Authorization", "Bearer "+token)
+	res := httptest.NewRecorder()
+	handler.ServeHTTP(res, req)
+	var summary struct{ AvailableSlots int }
+	wantCount := len(slotIDs) - 1
+	if change == "returned" {
+		wantCount = len(slotIDs)
+	}
+	if err := json.Unmarshal(res.Body.Bytes(), &summary); res.Code != http.StatusOK || err != nil || summary.AvailableSlots != wantCount {
+		t.Fatalf("dashboard available slots = %d, want %d (status %d, error %v)", summary.AvailableSlots, wantCount, res.Code, err)
+	}
+
 	if change == "returned" && second.Slots[1].Status == domain.HistoryStatusExpired {
 		t.Fatal("returned time still has expired status")
 	}

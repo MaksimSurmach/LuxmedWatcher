@@ -590,6 +590,16 @@ func (db *DB) RecentHistory(ctx context.Context, userID int64, limit, offset int
 	return db.WatchHistory(ctx, userID, 0, limit, offset)
 }
 
+// AvailableHistoryCount counts currently offered times across the user's entire history.
+func (db *DB) AvailableHistoryCount(ctx context.Context, userID int64, asOf time.Time) (int, error) {
+	var count int
+	err := db.sql.QueryRowContext(ctx, `SELECT count(*) FROM appointment_history
+		WHERE watch_id IN (SELECT id FROM watches WHERE user_id=$1)
+		AND status NOT IN ($2, $3) AND `+db.dateTimeSQL("date_time")+` > `+db.dateTimeSQL("$4"),
+		userID, domain.HistoryStatusHidden, domain.HistoryStatusExpired, asOf.UTC()).Scan(&count)
+	return count, err
+}
+
 // UpcomingHistoryIDs captures the order for a history view. Future available slots
 // come first, followed by past and unavailable slots.
 func (db *DB) UpcomingHistoryIDs(ctx context.Context, userID int64, asOf time.Time, limit int) ([]int64, error) {
