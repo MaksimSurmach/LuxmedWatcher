@@ -109,7 +109,10 @@ export async function requestPortalResource(profileDir, id, path, {
       response = await get(path === '/session' ? sessionProbe : path);
     }
     try {
-      const status = responseStatus(response, origin);
+      const upstreamStatus = responseStatus(response, origin);
+      // The worker uses 409 for its own busy state. Keep write conflicts
+      // from the portal distinct so a confirmation is never replayed.
+      const status = payload && upstreamStatus === 409 ? 502 : upstreamStatus;
       const headers = response.headers();
       if (status !== 200) return { status, retryAfter: headers['retry-after'] };
       if (Number(headers['content-length']) > maxResponseBytes ||

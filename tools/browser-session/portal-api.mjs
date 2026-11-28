@@ -61,7 +61,8 @@ export async function fetchCatalog(page, path, payload) {
     if (response.status === 0) return { status: 502 };
     if (!response.ok) {
       const retryAfter = response.headers.get('Retry-After');
-      return { status: response.status, ...(retryAfter && { retryAfter }) };
+      const status = body && response.status === 409 ? 502 : response.status;
+      return { status, ...(retryAfter && { retryAfter }) };
     }
     if (!response.headers.get('Content-Type')?.toLowerCase().includes('json')) return { status: 502 };
     const reader = response.body.getReader();

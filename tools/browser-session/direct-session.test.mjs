@@ -126,6 +126,7 @@ test('an HTML maintenance response to refresh is temporary and preserves the sav
 test('a booking POST uses the portal anti-forgery token and is never replayed', async t => {
   const confirm = '/PatientPortal/NewPortal/Reservation/Confirm';
   const paths = [];
+  let status = 401;
   const { dir, origin } = await fixture(t, async (req, res) => {
     paths.push(req.url);
     if (req.url.endsWith('/getforgerytoken')) {
@@ -136,7 +137,7 @@ test('a booking POST uses the portal anti-forgery token and is never replayed', 
       let data = '';
       for await (const part of req) data += part;
       assert.deepEqual(JSON.parse(data), { temporaryReservationId: 72 });
-      res.writeHead(401).end();
+      res.writeHead(status).end();
     } else {
       assert.fail('unexpected portal call');
     }
@@ -149,5 +150,13 @@ test('a booking POST uses the portal anti-forgery token and is never replayed', 
     origin, payload: '{"temporaryReservationId":72}', report() {},
   });
   assert.equal(result.status, 401);
+  assert.deepEqual(paths, ['/PatientPortal/NewPortal/security/getforgerytoken', confirm]);
+
+  paths.length = 0;
+  status = 409;
+  const conflict = await requestPortalResource(dir, '1', confirm, {
+    origin, payload: '{"temporaryReservationId":72}', report() {},
+  });
+  assert.equal(conflict.status, 502);
   assert.deepEqual(paths, ['/PatientPortal/NewPortal/security/getforgerytoken', confirm]);
 });
