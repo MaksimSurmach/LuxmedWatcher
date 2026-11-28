@@ -346,7 +346,7 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 			return 0, errors.Join(searchErr, err)
 		}
 	}
-	if searchErr != nil && len(appointments) == 0 {
+	if searchErr != nil && len(appointments) == 0 && len(result.CompleteDays) == 0 {
 		return 0, searchErr
 	}
 	if err := r.checkWatchUnchanged(ctx, watch); err != nil {
@@ -370,8 +370,9 @@ func (r *Runner) run(ctx context.Context, user domain.User, watch domain.Watch, 
 		distinct = append(distinct, appointment)
 	}
 	pending, err := r.db.SaveSearchHistory(ctx, user, storage.SearchHistoryUpdate{
-		WatchID: watch.ID, Appointments: distinct, Complete: searchErr == nil,
-		StartedAt: started, RenotifyAt: started.Add(-r.notificationCooldown),
+		WatchID: watch.ID, Appointments: distinct, Complete: searchErr == nil && result.Checked, CompleteDays: result.CompleteDays,
+		WatchUpdatedAt: watch.UpdatedAt,
+		StartedAt:      started, RenotifyAt: started.Add(-r.notificationCooldown),
 	})
 	if err != nil {
 		return len(seen), errors.Join(searchErr, fmt.Errorf("save search history: %w", err))
@@ -956,13 +957,20 @@ func New(db *storage.DB, runner *Runner, interval, retention time.Duration, logg
 }
 
 func (s *Scheduler) Run(ctx context.Context) {
-	var nextCleanup time.Time
+	var nextCleanup, nextSlotCleanup time.Time
 	var checks sync.WaitGroup
 	defer checks.Wait()
 	checks.Go(func() { s.maintainBrowserSessions(ctx) })
 	dispatched := make(chan struct{}, cap(s.runner.capacity))
 	for ctx.Err() == nil {
-		if s.retention > 0 && time.Now().After(nextCleanup) {
+		now := time.Now()
+		if !now.Before(nextSlotCleanup) {
+			if err := s.db.PurgeUnavailableSlots(ctx, now, now.Add(-s.runner.notificationCooldown)); err != nil {
+				s.logger.Warn("purge unavailable slots", "err", err)
+			}
+			nextSlotCleanup = now.Add(time.Hour)
+		}
+		if s.retention > 0 && now.After(nextCleanup) {
 			if err := s.db.PurgeHistory(ctx, time.Now().Add(-s.retention)); err != nil {
 				s.logger.Warn("clean up expired history", "err", err)
 			}

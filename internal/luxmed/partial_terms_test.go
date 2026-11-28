@@ -77,6 +77,14 @@ func TestSearchLoadsOnlyBoundedMissingDays(t *testing.T) {
 		t.Fatalf("checked = %v, appointments = %d, requests = %d, err = %v",
 			result.Checked, len(apps), calls.Load(), err)
 	}
+	if len(result.CompleteDays) != 6 {
+		t.Fatalf("complete days: %v", result.CompleteDays)
+	}
+	for _, day := range result.CompleteDays {
+		if day.Format(dateFormat) == days[5] {
+			t.Fatalf("unrequested detail day verified: %v", day)
+		}
+	}
 }
 
 func TestSearchSkipsDetailDaysExcludedByWeekday(t *testing.T) {

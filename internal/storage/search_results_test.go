@@ -2,6 +2,7 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"testing"
 	"time"
@@ -78,6 +79,61 @@ func TestSearchWritesRequireCurrentCredentialRevision(t *testing.T) {
 		must(err)
 		if access.Status != LuxMedAccessConnected || access.EpisodeID != "" {
 			t.Fatalf("current mode did not restore access: %+v", access)
+		}
+	})
+}
+
+func TestPartialSearchWithdrawsOnlyVerifiedDays(t *testing.T) {
+	testStores(t, func(t *testing.T, ctx context.Context, db *DB) {
+		must := func(err error) {
+			t.Helper()
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+		user, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: 10, Status: domain.UserStatusActive})
+		must(err)
+		watch, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 2})
+		must(err)
+		other, err := db.CreateWatch(ctx, domain.Watch{UserID: user.ID, CityID: 1, ServiceID: 2})
+		must(err)
+		// On the short Warsaw day the next midnight is 23 hours later.
+		zone, err := time.LoadLocation("Europe/Warsaw")
+		must(err)
+		day := time.Date(2030, 3, 31, 0, 0, 0, 0, zone)
+		put := func(watch int64, key string, when time.Time) domain.AppointmentHistory {
+			t.Helper()
+			row, _, err := db.UpsertAppointmentHistory(ctx, watch, domain.Appointment{Fingerprint: key, DateTime: when})
+			must(err)
+			return row
+		}
+		adjacent := put(watch, "tomorrow", day.AddDate(0, 0, 1))
+		duplicate := put(other, "tomorrow", day.AddDate(0, 0, 1))
+		gone := put(watch, "gone", day.Add(time.Hour))
+		start := time.Now().Add(time.Second)
+		_, err = db.SaveSearchHistory(ctx, user, SearchHistoryUpdate{WatchID: watch, StartedAt: start, RenotifyAt: start.Add(-time.Hour), CompleteDays: []time.Time{day}})
+		must(err)
+		if _, err := db.AppointmentHistoryByID(ctx, gone.ID); !errors.Is(err, sql.ErrNoRows) {
+			t.Fatalf("withdrawn row remains: %v", err)
+		}
+		for _, row := range []domain.AppointmentHistory{adjacent, duplicate} {
+			_, err := db.AppointmentHistoryByID(ctx, row.ID)
+			must(err)
+		}
+		index, err := db.AvailableHistoryIndex(ctx, user.ID, day)
+		must(err)
+		if len(index) != 1 || index[0].ID != adjacent.ID {
+			t.Fatalf("unverified day or duplicate: %+v", index)
+		}
+		if next := put(watch, "replacement", day.Add(2*time.Hour)); next.ID <= gone.ID {
+			t.Fatal("stale slot ID reused")
+		}
+		must(db.SetUserWatchStatus(ctx, user.ID, watch, domain.WatchStatusPaused))
+		must(db.ResumeWatchForMode(ctx, user, watch))
+		rows, err := db.HistoryByIDs(ctx, user.ID, day, []int64{adjacent.ID, duplicate.ID})
+		must(err)
+		if len(rows) != 1 || rows[0].ID != duplicate.ID {
+			t.Fatalf("unverified slots returned after resume: %+v", rows)
 		}
 	})
 }

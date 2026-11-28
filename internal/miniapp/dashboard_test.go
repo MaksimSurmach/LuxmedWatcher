@@ -615,6 +615,8 @@ func testDashboardHistoryPageOrder(t *testing.T, change string) {
 		Slots []dashboardHistory
 		More  bool
 		Next  json.RawMessage
+		Days  []historyDay
+		Day   string
 	}
 	request := func(body string) page {
 		t.Helper()
@@ -629,6 +631,26 @@ func testDashboardHistoryPageOrder(t *testing.T, change string) {
 		}
 		return result
 	}
+	byDate := request(`{"Day":"first"}`)
+	if len(byDate.Days) < 2 || byDate.Day != byDate.Days[0].Date {
+		t.Fatalf("missing first day: %+v", byDate)
+	}
+	total := 0
+	for _, day := range byDate.Days {
+		total += day.Count
+		selected := request(fmt.Sprintf(`{"Day":%q}`, day.Date))
+		if len(selected.Slots) != min(24, day.Count) {
+			t.Fatalf("day count differs from results: %+v", selected)
+		}
+		for _, slot := range selected.Slots {
+			if slot.DateTime.In(luxmed.Location()).Format(time.DateOnly) != day.Date {
+				t.Fatalf("slot on wrong Warsaw day: %+v", slot)
+			}
+		}
+	}
+	if total != len(slotIDs) {
+		t.Fatalf("calendar count %d != %d", total, len(slotIDs))
+	}
 	markFirstMissing := func() {
 		t.Helper()
 		if err := db.MarkMissingAppointments(ctx, firstWatch, now.Add(time.Minute), now); err != nil {
@@ -640,7 +662,7 @@ func testDashboardHistoryPageOrder(t *testing.T, change string) {
 	if change == "returned" {
 		markFirstMissing()
 		wantFirst = slotIDs[1]
-		wantNext = []int64{slotIDs[25], slotIDs[0]}
+		wantNext = []int64{slotIDs[25]}
 	}
 	first := request("{}")
 	if len(first.Slots) != 24 || !first.More || len(first.Next) == 0 || first.Slots[0].ID != wantFirst {
@@ -683,9 +705,6 @@ func testDashboardHistoryPageOrder(t *testing.T, change string) {
 		t.Fatalf("dashboard available slots = %d, want %d (status %d, error %v)", summary.AvailableSlots, wantCount, res.Code, err)
 	}
 
-	if change == "returned" && second.Slots[1].Status == domain.HistoryStatusExpired {
-		t.Fatal("returned time still has expired status")
-	}
 	if change == "returned" {
 		fresh := request("{}")
 		if len(fresh.Slots) == 0 || fresh.Slots[0].ID != slotIDs[0] {

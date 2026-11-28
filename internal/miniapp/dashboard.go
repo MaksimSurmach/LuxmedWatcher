@@ -155,6 +155,11 @@ type dashboardHistory struct {
 	Status   domain.HistoryStatus
 }
 
+type historyDay struct {
+	Date  string
+	Count int
+}
+
 type dashboardHistoryCursor struct {
 	View   string
 	Offset int
@@ -198,6 +203,7 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 		maxPageOffset = 10_000
 	)
 	var input struct {
+		Day    string
 		Offset int
 		After  *dashboardHistoryCursor
 	}
@@ -209,11 +215,19 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 		return
 	}
 	now := time.Now()
+	if input.Day != "" && input.Day != "first" {
+		if _, err := time.Parse(time.DateOnly, input.Day); err != nil {
+			reply(w, http.StatusBadRequest, nil)
+			return
+		}
+	}
 	var ids []int64
+	var days []historyDay
+	selected := input.Day
 	view := ""
 	offset := input.Offset
 	if input.After != nil {
-		if input.Offset != 0 || input.After.View == "" || input.After.Offset <= 0 {
+		if input.Day != "" || input.Offset != 0 || input.After.View == "" || input.After.Offset <= 0 {
 			reply(w, http.StatusBadRequest, nil)
 			return
 		}
@@ -225,17 +239,37 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 			return
 		}
 	} else {
-		var err error
-		ids, err = d.db.UpcomingHistoryIDs(r.Context(), user.ID, now, maxPageOffset+pageSize)
+		index, err := d.db.AvailableHistoryIndex(r.Context(), user.ID, now)
 		if err != nil {
 			reply(w, http.StatusServiceUnavailable, nil)
 			return
+		}
+		byDay := make(map[string][]int64)
+		for _, slot := range index {
+			date := slot.DateTime.In(luxmed.Location()).Format(time.DateOnly)
+			if len(days) == 0 || days[len(days)-1].Date != date {
+				days = append(days, historyDay{Date: date})
+			}
+			days[len(days)-1].Count++
+			byDay[date] = append(byDay[date], slot.ID)
+			if selected == "" {
+				ids = append(ids, slot.ID)
+			}
+		}
+		if selected != "" {
+			if len(byDay[selected]) == 0 {
+				selected = ""
+				if len(days) > 0 {
+					selected = days[0].Date
+				}
+			}
+			ids = byDay[selected]
 		}
 	}
 	slots := make([]dashboardHistory, 0, pageSize)
 	for len(slots) < pageSize && offset < len(ids) {
 		end := min(offset+pageSize-len(slots), len(ids))
-		items, err := d.db.HistoryByIDs(r.Context(), user.ID, ids[offset:end])
+		items, err := d.db.HistoryByIDs(r.Context(), user.ID, now, ids[offset:end])
 		if err != nil {
 			reply(w, http.StatusServiceUnavailable, nil)
 			return
@@ -255,10 +289,12 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 		next = &dashboardHistoryCursor{View: view, Offset: offset}
 	}
 	reply(w, http.StatusOK, struct {
+		Days  []historyDay `json:",omitempty"`
+		Day   string       `json:",omitempty"`
 		Slots []dashboardHistory
 		More  bool
 		Next  *dashboardHistoryCursor `json:",omitempty"`
-	}{slots, more, next})
+	}{days, selected, slots, more, next})
 }
 
 func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, user domain.User) {

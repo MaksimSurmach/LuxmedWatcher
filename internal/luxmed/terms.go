@@ -122,6 +122,13 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 	var details []detailRequest
 	requested := make(map[string]bool)
 	var uncovered int
+	covered := make(map[time.Time]bool)
+	defer func() {
+		for day := range covered {
+			result.CompleteDays = append(result.CompleteDays, day)
+		}
+		slices.SortFunc(result.CompleteDays, time.Time.Compare)
+	}()
 	for !from.After(to) {
 		end := from.AddDate(0, 0, 13)
 		if end.After(to) {
@@ -141,20 +148,35 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 		if err != nil {
 			return result, searchFailure(result.Checked, err)
 		}
+		for day := from; !day.After(end); day = day.AddDate(0, 0, 1) {
+			covered[day] = true
+		}
 		slices.SortFunc(preview.days, func(a, b dayInfo) int { return cmp.Compare(a.Day, b.Day) })
 		for _, info := range preview.days {
-			if info.Counter.Count <= 0 || requested[info.Day] {
+			if requested[info.Day] {
 				continue
 			}
 			day, err := time.ParseInLocation(dateFormat, info.Day, warsaw)
 			if err != nil {
 				uncovered++
+				for day := from; !day.After(end); day = day.AddDate(0, 0, 1) {
+					delete(covered, day)
+				}
 				continue
 			}
-			if day.Before(from) || day.After(end) || !matchesWeekday(day, watch.TimeWindows) ||
-				(!info.IsLimitedDay && preview.loadedDays[info.Day] >= info.Counter.Count) {
+			if day.Before(from) || day.After(end) || !matchesWeekday(day, watch.TimeWindows) {
 				continue
 			}
+			if info.Counter.Count == nil || *info.Counter.Count < 0 {
+				delete(covered, day)
+				uncovered++
+				continue
+			}
+			count := *info.Counter.Count
+			if count == 0 || (info.Status == 0 && !info.IsLimitedDay && preview.loadedDays[info.Day] >= count) {
+				continue
+			}
+			delete(covered, day)
 			requested[info.Day] = true
 			if info.Status != 0 {
 				uncovered++
@@ -163,7 +185,7 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 			detailQuery := maps.Clone(query)
 			detailQuery.Set("searchDateFrom", info.Day)
 			detailQuery.Set("searchDateTo", info.Day)
-			detailQuery.Set("expectedTermsNumber", strconv.Itoa(info.Counter.Count))
+			detailQuery.Set("expectedTermsNumber", strconv.Itoa(count))
 			detailQuery.Del("searchDatePreset")
 			detailQuery.Del("nextSearch")
 			details = append(details, detailRequest{day: day, query: detailQuery})
@@ -186,6 +208,17 @@ func (c *HTTPClient) SearchAppointments(ctx context.Context, watch domain.Watch)
 			return result, searchFailure(true, err)
 		}
 		apps, err := decodeOneDayTerms(watch, detail.day, data, c.rawPayloads)
+		if err == nil {
+			// The later complete day response supersedes the preview, including times just taken.
+			result.Appointments = slices.DeleteFunc(result.Appointments, func(app domain.Appointment) bool {
+				if !startOfDay(app.DateTime).Equal(detail.day) {
+					return false
+				}
+				delete(seen, app.Fingerprint)
+				return true
+			})
+			covered[detail.day] = true
+		}
 		addMatches(apps, detail.day, detail.day)
 		if err != nil {
 			return result, searchFailure(true, err)
@@ -310,7 +343,7 @@ type dayInfo struct {
 	Status       int    `json:"termsStatus"`
 	IsLimitedDay bool   `json:"isLimitedDay"`
 	Counter      struct {
-		Count int `json:"termsNumber"`
+		Count *int `json:"termsNumber"`
 	} `json:"termsCounter"`
 }
 
@@ -363,7 +396,7 @@ func decodeOneDayTerms(watch domain.Watch, day time.Time, body []byte, raw bool)
 			return nil, fmt.Errorf("luxmed one-day terms outside requested date: %w", ErrResponse)
 		}
 	}
-	if response.Info != nil && (response.Info.IsLimitedDay || response.Info.Counter.Count > len(apps)) {
+	if response.Info != nil && (response.Info.Status != 0 || response.Info.IsLimitedDay || response.Info.Counter.Count == nil || *response.Info.Counter.Count < 0 || *response.Info.Counter.Count > len(apps)) {
 		err = errors.Join(err, ErrPartialResults)
 	}
 	return apps, err

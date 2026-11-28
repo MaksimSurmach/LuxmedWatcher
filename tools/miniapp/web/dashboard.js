@@ -551,10 +551,9 @@ function dayLabel(value) {
   const label = `${weekdays[dayNames.indexOf(weekdayIndex.format(new Date(value))) + 1]}, ${dateText(value)}`;
   return label[0].toLocaleUpperCase(language) + label.slice(1);
 }
-const isExpired = (slot, now) => slot.Status === 'expired' || new Date(slot.DateTime) <= now;
-
 // One found time is one ticket coupon: the stub carries the date, the body the time, doctor and street.
-function coupon({ slot, index, available, time }, now, next) {
+function coupon(slot, index) {
+  const time = Date.parse(slot.DateTime);
   const when = clock.format(time);
   const doctor = slot.Doctor || t('history.no_doctor');
   const address = slot.Address || slot.Facility;
@@ -563,22 +562,8 @@ function coupon({ slot, index, available, time }, now, next) {
   const stub = `<span class="stub" aria-hidden="true"><small>${escape(weekday)}</small><b>${Number(day)}</b><small>${escape(shortDate(time).month)}</small></span>`;
   const clockTime = `<time class="t" datetime="${escape(slot.DateTime)}">${escape(when)}</time>`;
   const details = `<span class="who">${escape(doctor)}${slot.Service ? ` · ${escape(slot.Service)}` : ''}</span><small>${escape(address)}</small>`;
-  if (!available) {
-    const stamp = text(time <= now ? 'history.stamp_past' : 'history.stamp_gone');
-    return `<li><div class="coupon void" tabindex="-1" data-expired-slot="${index}">
-      <span class="sr-only">${escape(dayLabel(time))}</span>${stub}<span class="body">
-        <span class="coupon-head">${clockTime}<span class="stamp">${stamp}</span></span>${details}</span></div></li>`;
-  }
-  return `<li><button type="button" class="coupon${next ? ' first' : ''}" data-slot="${index}" aria-label="${escape(`${dayLabel(time)}. ${t('history.row_label', { time: when, doctor: [doctor, slot.Service].filter(Boolean).join(', '), address })}`)}">
+  return `<li><button type="button" class="coupon${index === 0 ? ' first' : ''}" data-slot="${Number(slot.ID)}" aria-label="${escape(`${dayLabel(time)}. ${t('history.row_label', { time: when, doctor: [doctor, slot.Service].filter(Boolean).join(', '), address })}`)}">
     ${stub}<span class="body">${clockTime}${details}</span></button></li>`;
-}
-
-// Open times first, soonest at the top; times that are gone sink below, newest first.
-function slotGroups(slots, now) {
-  const rows = slots.map((slot, index) => ({ slot, index, time: Date.parse(slot.DateTime), available: !isExpired(slot, now) }));
-  const open = rows.filter((row) => row.available).sort((a, b) => a.time - b.time);
-  const gone = rows.filter((row) => !row.available).sort((a, b) => b.time - a.time);
-  return `<ul class="wallet">${[...open, ...gone].map((row, i) => coupon(row, now, row.available && i === 0)).join('')}</ul>`;
 }
 
 // The booking dialog is shared; each opening gets a session so late answers can tell
@@ -658,51 +643,131 @@ function pending(label) {
   return `<div class="pending-mark" role="status"><span class="pending-label">${text(label)}</span></div>`;
 }
 
+let selectedHistoryDay = 'first';
+let refreshHistory;
+
 async function historyScreen(id) {
-  show(titleFor('history'), `${watchStatus()}<div class="stack" id="slots" tabindex="-1">${pending('history.loading')}</div>${newWatchButton()}`);
+  show(titleFor('history'), `${watchStatus()}<section class="day-filter" aria-label="${text('history.days')}" hidden><h2>${text('history.days')}</h2><div class="history-days"></div></section><p class="error" id="history-error" role="status"></p><div class="stack" id="slots" tabindex="-1">${pending('history.loading')}</div>${newWatchButton()}`);
   bindShared();
+  const days = main.querySelector('.history-days');
   const results = main.querySelector('#slots');
-  const loaded = [];
-  const byID = new Map();
-  async function append(offset, cursor) {
-    let page;
-    try {
-      page = await api('history', cursor ? { After: cursor } : { Offset: offset });
-    } catch (error) {
-      if (cursor && error?.key === 'error.stale' && id === renderID) return historyScreen(id);
-      throw error;
+  let slots = [];
+  let next;
+  let generation = 0;
+  let busy = false;
+  let dayMarkup;
+  const current = request => id === renderID && request === generation;
+
+  function renderDays(items, selected) {
+    const markup = items.map(({ Date: date, Count: count }) => {
+      const label = dayLabel(date + 'T12:00:00Z');
+      return `<button type="button" data-date="${escape(date)}" aria-pressed="${date === selected}" aria-controls="slots"
+        aria-label="${text('history.day_count', { date: label, count })}"><span>${escape(label)}</span><b>${Number(count)}</b></button>`;
+    }).join('');
+    if (markup !== dayMarkup) {
+      const focused = days.contains(document.activeElement);
+      days.innerHTML = markup;
+      days.parentElement.hidden = !items.length;
+      const active = days.querySelector('[aria-pressed="true"]');
+      if (focused) active?.focus({ preventScroll: true });
+      if (active && (focused || !dayMarkup)) days.scrollLeft += active.getBoundingClientRect().left - days.getBoundingClientRect().left;
+      dayMarkup = markup;
     }
-    if (id !== renderID) return;
-    const { Slots, More, Next } = page;
-    const first = loaded.length;
-    for (const slot of Slots) {
-      const previous = byID.get(slot.ID);
-      if (previous) {
-        Object.assign(previous, slot);
-      } else {
-        byID.set(slot.ID, slot);
-        loaded.push(slot);
+    setCount('history', items.reduce((sum, day) => sum + day.Count, 0));
+  }
+
+  function renderSlots(items, cursor) {
+    const changed = JSON.stringify(items) !== JSON.stringify(slots) || Boolean(next) !== Boolean(cursor);
+    next = cursor;
+    if (!changed && results.hasAttribute('data-ready')) return;
+    const focused = document.activeElement.dataset.slot;
+    slots = items;
+    results.dataset.ready = '';
+    if (slots.length) {
+      results.innerHTML = `<ul class="wallet">${slots.map(coupon).join('')}</ul>${next ? `<button class="secondary" type="button" data-more>${text('common.more')}</button>` : ''}`;
+    } else {
+      const hint = !state.Watches?.length ? 'watches.empty_hint' :
+        state.Watches.every(w => w.Status === 'paused') ? 'history.paused_hint' : 'history.empty_hint';
+      results.innerHTML = `<div class="empty"><span class="stub ghost" aria-hidden="true"></span><h2>${text('history.empty')}</h2><p>${text(hint)}</p></div>`;
+    }
+    if (focused) results.querySelector(`[data-slot="${focused}"]`)?.focus({ preventScroll: true });
+  }
+
+  async function loadDay(day, background = false) {
+    const request = ++generation;
+    busy = true;
+    results.inert = !background;
+    results.setAttribute('aria-busy', 'true');
+    try {
+      const page = await api('history', { Day: day });
+      if (!current(request)) return;
+      const items = page.Slots;
+      let cursor = page.Next;
+      // Keep pages the user has already opened when refreshing the same day.
+      while (background && page.Day === selectedHistoryDay && cursor && items.length < slots.length) {
+        const more = await api('history', { After: cursor });
+        if (!current(request)) return;
+        items.push(...more.Slots);
+        cursor = more.Next;
+      }
+      selectedHistoryDay = page.Day || 'first';
+      renderDays(page.Days ?? [], page.Day);
+      renderSlots(items, cursor);
+      main.querySelector('#history-error').textContent = '';
+    } catch (error) {
+      if (!current(request)) return;
+      if (!results.hasAttribute('data-ready')) throw error;
+      main.querySelector('#history-error').textContent = errorText(error);
+    } finally {
+      if (current(request)) {
+        busy = false;
+        results.inert = false;
+        results.removeAttribute('aria-busy');
       }
     }
-    const now = new Date();
-    if (!loaded.length) {
-      results.innerHTML = `<div class="empty"><span class="stub ghost" aria-hidden="true"></span><h2>${text('history.empty')}</h2><p>${text(state.Watches?.length ? 'history.empty_hint' : 'watches.empty_hint')}</p></div>`;
+  }
+
+  days.onclick = event => {
+    const button = event.target.closest('[data-date]');
+    if (button) void loadDay(button.dataset.date).catch(error => { if (id === renderID) flash(errorText(error)); });
+  };
+  results.onclick = async event => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.dataset.slot) {
+      const slot = slots.find(item => String(item.ID) === button.dataset.slot);
+      if (slot && Date.parse(slot.DateTime) > Date.now()) bookingDialog(slot);
+      else await run(button, () => loadDay(selectedHistoryDay));
       return;
     }
-    results.innerHTML = `${slotGroups(loaded, now)}${More ? `<button class="secondary" type="button" data-more>${text('common.more')}</button>` : ''}`;
-    for (const button of results.querySelectorAll('[data-slot]')) button.onclick = () => bookingDialog(loaded[Number(button.dataset.slot)]);
-    const next = results.querySelector('[data-more]');
-    if (next) next.onclick = () => void run(next, () => append(offset + Slots.length, Next));
-    // Re-rendering removes the focused button. Keep focus at the newly loaded results.
-    if (offset) {
-      const available = [...results.querySelectorAll('[data-slot]')].find((row) => Number(row.dataset.slot) >= first);
-      const unavailable = [...results.querySelectorAll('[data-expired-slot]')].find((row) => Number(row.dataset.expiredSlot) >= first);
-      const target = available ?? next ?? unavailable ?? results;
-      target.focus();
+    if (!button.hasAttribute('data-more') || !next) return;
+    const request = ++generation;
+    busy = true;
+    await run(button, async () => {
+      try {
+        const page = await api('history', { After: next });
+        if (!current(request)) return;
+        renderSlots([...slots, ...page.Slots], page.Next);
+        (results.querySelector(`[data-slot="${page.Slots[0]?.ID}"]`) ?? results).focus();
+      } catch (error) {
+        if (!current(request)) return;
+        if (error.key !== 'error.stale') throw error;
+        await loadDay(selectedHistoryDay);
+      } finally {
+        if (current(request)) busy = false;
+      }
+    });
+  };
+  refreshHistory = () => {
+    if (id === renderID && !busy && !document.hidden && !document.querySelector('dialog[open]')) {
+      void loadDay(selectedHistoryDay, true).catch(() => {});
     }
-  }
-  await append(0);
+  };
+  await loadDay(selectedHistoryDay);
 }
+
+window.setInterval(() => refreshHistory?.(), 60_000);
+document.addEventListener('visibilitychange', () => refreshHistory?.());
 
 async function getCities(refresh = false) {
   if (!refresh && cities) return cities;

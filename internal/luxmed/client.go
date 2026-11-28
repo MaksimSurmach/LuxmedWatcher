@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/security"
@@ -23,6 +24,8 @@ const (
 type Credentials = security.Credentials
 
 type SearchResult struct {
+	// CompleteDays are Warsaw midnights whose entire inventory was verified, even on a partial search.
+	CompleteDays []time.Time
 	Appointments []domain.Appointment
 	// Checked records a validated date window or verified slots in a partial response.
 	// A subsequent ErrAuthentication still invalidates the session.
