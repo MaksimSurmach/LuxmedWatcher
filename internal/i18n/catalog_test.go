@@ -73,6 +73,10 @@ func TestWebCalendarLabels(t *testing.T) {
 			if entries["calendar.weekdays"] != catalog.T(locale, "calendar.weekdays") {
 				t.Error("Mini App weekday labels differ from the bot")
 			}
+			slotDays := strings.Split(catalog.T(locale, "slot.weekdays"), ",")
+			if len(slotDays) != 7 || slices.Contains(slotDays, "") {
+				t.Error("expected seven weekday labels for appointments")
+			}
 			months := strings.Split(entries["calendar.months"], ",")
 			if len(months) != 12 || slices.Contains(months, "") {
 				t.Error("expected 12 localized month labels")

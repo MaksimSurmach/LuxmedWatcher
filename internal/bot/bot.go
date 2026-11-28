@@ -208,7 +208,7 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 		Locale:      user.Locale,
 		Title:       title,
 		Body:        truncateMessage(procedures.WatchTitle(watch), 150),
-		Slot:        newWidgetSlot(user.Locale, histories[0]),
+		Slot:        b.newWidgetSlot(user.Locale, histories[0]),
 		Actions:     keyboard[:2],
 		BookingHint: b.catalog.T(user.Locale, "notification.booking_hint"),
 		Failure:     b.catalog.T(user.Locale, "widget.error"),
@@ -468,6 +468,11 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	data := cb.Data
 	cancelingLogin := data == "cancel" && b.cancelLogin(ctx, cb.From.ID, b.getFlow(cb.From.ID))
 	attempt := b.selectChrome(cb.From.ID, data)
+	if strings.HasPrefix(data, "watch:check:") {
+		toast := b.handleAction(ctx, cb.From.ID, data, attempt)
+		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, toast))
+		return
+	}
 	_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, ""))
 	if cancelingLogin {
 		return
@@ -479,7 +484,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	b.handleAction(ctx, cb.From.ID, data, attempt)
 }
 
-func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, attempt *storage.ChromeChoice) {
+func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, attempt *storage.ChromeChoice) (toast string) {
 	user, err := b.db.UserByTelegramID(ctx, telegramID)
 	if err != nil {
 		return
@@ -710,8 +715,9 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 		b.backWatch(ctx, user, strings.TrimPrefix(data, "back:"))
 
 	case strings.HasPrefix(data, "watch:"):
-		b.handleWatchAction(ctx, user, data)
+		return b.handleWatchAction(ctx, user, data)
 	}
+	return ""
 }
 
 func (b *Bot) startWatchFlow(ctx context.Context, user domain.User) {
@@ -1632,7 +1638,7 @@ func (b *Bot) authenticatedLuxMedClient(ctx context.Context, user domain.User) (
 	return client, nil
 }
 
-func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data string) {
+func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data string) (toast string) {
 	parts := strings.Split(data, ":")
 	if !user.IsActive() || len(parts) != 3 {
 		return
@@ -1661,12 +1667,17 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	case "delete":
 		state = domain.WatchStatusDeleted
 	case "check":
+		if watch.Status != domain.WatchStatusActive {
+			b.send(user, b.catalog.T(user.Locale, "watch.check_inactive"), watchKeyboard(b.catalog, user.Locale, watch))
+			return
+		}
 		select {
 		case b.manualChecks <- struct{}{}:
 			b.workers.Go(func() {
 				defer func() { <-b.manualChecks }()
 				b.checkWatchNow(ctx, user, watch)
 			})
+			return b.catalog.T(user.Locale, "toast.checking")
 		default:
 			b.send(user, b.catalog.T(user.Locale, "watch.check_rate_limited"), watchKeyboard(b.catalog, user.Locale, watch))
 		}
@@ -1695,6 +1706,7 @@ func (b *Bot) handleWatchAction(ctx context.Context, user domain.User, data stri
 	}
 	key := map[domain.WatchStatus]string{domain.WatchStatusPaused: "watch.paused", domain.WatchStatusActive: "watch.resumed", domain.WatchStatusDeleted: "watch.deleted"}[state]
 	b.send(user, b.catalog.T(user.Locale, key), mainKeyboard(b.catalog, user.Locale))
+	return ""
 }
 
 func (b *Bot) checkWatchNow(ctx context.Context, user domain.User, watch domain.Watch) {

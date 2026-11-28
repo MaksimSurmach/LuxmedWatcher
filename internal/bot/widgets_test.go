@@ -198,11 +198,11 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 	tests := []struct {
 		locale, title, more, date, days string
 	}{
-		{"pl", "Znaleziono wolne terminy · ", "Inne terminy: ", "02.07.2026 · 01:30", "Dni: "},
-		{"en", "Appointment times found · ", "More options: ", "Jul 2, 2026 · 01:30", "Days: "},
-		{"ru", "Свободное время найдено · ", "Другие варианты: ", "02.07.2026 · 01:30", "Дней: "},
-		{"be", "Знойдзены вольны час · ", "Іншыя варыянты: ", "02.07.2026 · 01:30", "Дзён: "},
-		{"uk", "Знайдено вільний час · ", "Інші варіанти: ", "02.07.2026 · 01:30", "Днів: "},
+		{"pl", "Znaleziono wolne terminy · ", "Inne terminy: ", "Cz 02.07 01:30", "Dni: "},
+		{"en", "Appointment times found · ", "More options: ", "Thu 02.07 01:30", "Days: "},
+		{"ru", "Свободное время найдено · ", "Другие варианты: ", "Чт 02.07 01:30", "Дней: "},
+		{"be", "Знойдзены вольны час · ", "Іншыя варыянты: ", "Чц 02.07 01:30", "Дзён: "},
+		{"uk", "Знайдено вільний час · ", "Інші варіанти: ", "Чт 02.07 01:30", "Днів: "},
 	}
 	for _, tc := range tests {
 		t.Run(tc.locale, func(t *testing.T) {
@@ -218,7 +218,8 @@ func TestAppointmentNotificationLanguages(t *testing.T) {
 						}
 					}
 				}
-				date, clock, _ := strings.Cut(tc.date, " · ")
+				split := strings.LastIndexByte(tc.date, ' ')
+				date, clock := tc.date[:split], tc.date[split+1:]
 				switch r.URL.Path {
 				case "/botfake/sendWidget":
 					body := r.Form.Get("html")

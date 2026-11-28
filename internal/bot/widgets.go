@@ -52,10 +52,17 @@ func (b *Bot) handleWidgetQuery(ctx context.Context, query *widgetQuery) {
 	}
 	defer b.deliverDeleteWarnings(query.From.ID, b.readyDeleteWarning(query.From.ID))
 	attempt := b.selectChrome(query.From.ID, query.Data)
-	if _, err := b.api.MakeRequest("answerWidgetQuery", tgbotapi.Params{"widget_query_id": query.ID}); err != nil {
+	params := tgbotapi.Params{"widget_query_id": query.ID}
+	check := strings.HasPrefix(query.Data, "watch:check:")
+	if check {
+		params["data"] = b.handleAction(ctx, query.From.ID, query.Data, attempt)
+	}
+	if _, err := b.api.MakeRequest("answerWidgetQuery", params); err != nil {
 		b.logger.Warn("answer Telegram widget query failed")
 	}
-	b.handleAction(ctx, query.From.ID, query.Data, attempt)
+	if !check {
+		b.handleAction(ctx, query.From.ID, query.Data, attempt)
+	}
 }
 
 func validWidgetAction(action string) bool {
@@ -97,9 +104,9 @@ type widgetSlot struct {
 	Address  string
 }
 
-func newWidgetSlot(locale string, item domain.AppointmentHistory) *widgetSlot {
+func (b *Bot) newWidgetSlot(locale string, item domain.AppointmentHistory) *widgetSlot {
 	return &widgetSlot{
-		When:     appointmentDateTime(locale, item.DateTime),
+		When:     b.slotDateTime(locale, item.DateTime),
 		Doctor:   truncateMessage(item.DoctorName, 64),
 		Facility: truncateMessage(slotPlace(item).facility, 90),
 		Address:  truncateMessage(item.Address, 64),
@@ -127,15 +134,24 @@ a{display:flex;align-items:center;justify-content:center;text-decoration:none}
 <nav>{{range .Actions}}<div class="row">{{range .}}
 {{if .URL}}<a href="{{.URL}}">{{.Text}}</a>{{else if .WidgetAction}}<button data-callback="{{.WidgetAction}}">{{.Text}}</button>{{else if .CallbackData}}<button data-callback="{{.CallbackData}}">{{.Text}}</button>{{end}}
 {{end}}</div>{{end}}</nav>
+<p id="status" role="status" hidden></p>
 <p id="error" aria-live="polite" hidden>{{.Failure}}</p></article>
 <script>
 const feedback = document.getElementById('error');
+const statusText = document.getElementById('status');
 for (const button of document.querySelectorAll('[data-callback]')) {
   button.addEventListener('click', () => {
     feedback.hidden = true;
+    statusText.hidden = true;
     button.disabled = true;
     TelegramWidget.request(button.getAttribute('data-callback')).then(
-      () => { button.disabled = false; },
+      (answer) => {
+        button.disabled = false;
+        if (answer.result) {
+          statusText.textContent = answer.result;
+          statusText.hidden = false;
+        }
+      },
       () => { feedback.hidden = false; button.disabled = false; }
     );
   });

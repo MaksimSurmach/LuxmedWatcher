@@ -1,6 +1,7 @@
 package bot
 
 import (
+	"strings"
 	"time"
 
 	"github.com/maksimsurmach/luxmed-watcher/internal/i18n"
@@ -17,6 +18,17 @@ func appointmentDate(locale string, value time.Time) string {
 
 func appointmentDateTime(locale string, value time.Time) string {
 	return appointmentDate(locale, value) + " · " + value.In(luxmed.Location()).Format("15:04")
+}
+
+// slotDate uses the clinic's calendar day, including around UTC midnight.
+func (b *Bot) slotDate(locale string, value time.Time) string {
+	local := value.In(luxmed.Location())
+	weekdays := strings.Split(b.catalog.T(locale, "slot.weekdays"), ",")
+	return weekdays[local.Weekday()] + " " + local.Format("02.01")
+}
+
+func (b *Bot) slotDateTime(locale string, value time.Time) string {
+	return b.slotDate(locale, value) + " " + value.In(luxmed.Location()).Format("15:04")
 }
 
 func (b *Bot) intervalText(locale string, value time.Duration) string {
