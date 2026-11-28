@@ -186,7 +186,7 @@
   "editor.time_of_day": "Time of day",
   "watches.active_count": "{active} of {total} searches active",
   "watches.days_unit": "days",
-  "viewer.live": "Connected to LUX MED",
+  "viewer.live": "Connected to the remote browser",
   "viewer.lead": "Sign in to LUX MED in the window that opens.",
-  "viewer.lead_more": "If LUX MED asks for a code, enter it there. When you're done, close this page — your searches keep running."
+  "viewer.lead_more": "If LUX MED asks for a code, enter it there."
 }

@@ -21,12 +21,12 @@ func (a *app) public(web, vendor fs.FS) http.Handler {
 	mux.HandleFunc("GET /app", localizedPage(web, "dashboard.html"))
 	for _, file := range []string{
 		"boot.js", "app.js", "style.css", "dashboard.js", "dashboard.css", "language.js", "screencast.js",
+		"fonts/azeret-mono-latin.woff2", "fonts/azeret-mono-latin-ext.woff2", "fonts/OFL.txt",
 	} {
 		mux.HandleFunc("GET /"+file, func(w http.ResponseWriter, r *http.Request) {
 			http.ServeFileFS(w, r, web, file)
 		})
 	}
-	mux.Handle("GET /fonts/", http.FileServerFS(web))
 	mux.HandleFunc("GET /i18n.js", serveDictionaries)
 	mux.HandleFunc("GET /i18n/{locale}", func(w http.ResponseWriter, r *http.Request) {
 		locale := r.PathValue("locale")

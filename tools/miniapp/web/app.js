@@ -27,7 +27,6 @@ const typing = element('typing');
 const keys = element('keys');
 const zoom = element('zoom');
 const label = (name) => t(`viewer.${name}`);
-// The page has four phases (intro, connecting, live, closed); styles key off this one attribute.
 const phase = (name) => { document.querySelector('main').dataset.phase = name; };
 
 function renderLanguage() {
@@ -67,7 +66,6 @@ function close(message) {
   connected = false;
   clearTimeout(startupTimer);
   phase('closed');
-  // A sign-in that ended normally is calm; a dead or refused link must read as trouble.
   document.querySelector('main').dataset.outcome = message === 'disconnected' ? 'done' : 'trouble';
   hint.textContent = '';
   opening.abort();
@@ -82,11 +80,9 @@ function close(message) {
 function init() {
   setLanguage(initialLanguage(telegram, locationURL.searchParams.get('lang')));
   renderLanguage();
-  element('close').hidden = false;
+  element('close').hidden = !returnToApp && !(initData && typeof telegram?.close === 'function');
   if (!initData || !ticket) {
-    phase('closed');
-    document.querySelector('main').dataset.outcome = 'trouble';
-    status.textContent = label('missing');
+    close('missing');
     return;
   }
   if (!window.isSecureContext) {
@@ -149,7 +145,9 @@ async function start() {
       if (telegram?.isVersionAtLeast?.('7.7')) telegram.disableVerticalSwipes();
       if (matchMedia('(pointer: fine)').matches) viewer.focus({ preventScroll: true });
     });
-    viewer.addEventListener('disconnect', () => close(connected ? 'disconnected' : 'failed'));
+    viewer.addEventListener('disconnect', (event) => {
+      close(connected && event.detail?.clean ? 'disconnected' : 'failed');
+    });
   } catch {
     close('failed');
   }

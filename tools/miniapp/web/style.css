@@ -72,7 +72,8 @@ main[data-phase="closed"] #close { background: var(--act); border-color: var(--a
 /* The remote browser */
 #screen {
   flex: 1;
-  min-height: 0;
+  /* Keep the remote field visible when the on-screen keyboard reduces the viewport. */
+  min-height: min(30dvh, 144px);
   overflow: hidden;
   touch-action: none;
   border-radius: 14px;

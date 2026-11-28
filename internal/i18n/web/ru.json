@@ -186,7 +186,7 @@
   "editor.time_of_day": "Время дня",
   "watches.active_count": "Активных поисков: {active} из {total}",
   "watches.days_unit": "дней",
-  "viewer.live": "Подключено к LUX MED",
+  "viewer.live": "Удалённый браузер подключён",
   "viewer.lead": "Войдите в LUX MED в открывшемся окне.",
-  "viewer.lead_more": "Если LUX MED попросит код, введите его там. Когда закончите, закройте эту страницу — поиски продолжат работать."
+  "viewer.lead_more": "Если LUX MED попросит код, введите его там."
 }

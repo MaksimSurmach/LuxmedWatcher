@@ -17,8 +17,9 @@ export class Screencast extends EventTarget {
       this.frame = event.data;
       if (!this.decoding) void this.drawFrames();
     });
-    this.socket.addEventListener('close', () => {
-      this.dispatchEvent(new Event('disconnect'));
+    this.socket.addEventListener('close', (event) => {
+      const clean = event.wasClean && (event.code === 1000 || event.code === 1005);
+      this.dispatchEvent(new CustomEvent('disconnect', { detail: { clean } }));
     });
     screen.classList.add('screencast');
     screen.append(this.canvas);
