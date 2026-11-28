@@ -29,6 +29,7 @@ def day(offset, hh, mm):
     return d.isoformat().replace('+00:00', 'Z')
 
 BOOKED = {}    # slot ID -> 'confirmed' | 'taken'
+VISITS = {}
 AUTOBOOK = {2: True}  # watch ID -> enabled, booking scenario only
 
 def slots(scenario):
@@ -82,8 +83,26 @@ def watches(scenario):
 
 def book(body):
     sid = slot_id(body)
-    BOOKED[sid] = 'taken' if sid == 2 else 'confirmed'
-    return BOOKED[sid]
+    if sid in VISITS:
+        return VISITS[sid]
+    slot = next((item for item in slots('booking') if item['ID'] == sid), None)
+    if sid == 2 or slot is None:
+        BOOKED[sid] = 'taken'
+        return {'Status': 'taken'}
+    BOOKED[sid] = 'confirmed'
+    VISITS[sid] = dict(slot, Status='confirmed', Place=slot['Address'], Automatic=False, Reminders=False)
+    return VISITS[sid]
+
+def reminders(body):
+    data = json.loads(body)
+    visit = VISITS[data['ID']]
+    visit['Reminders'] = bool(data['Enabled'])
+    return visit
+
+def save_watch(body):
+    data = json.loads(body)
+    AUTOBOOK[data.get('ID') or 1] = bool(data.get('AutoBook'))
+    return {}
 
 def autobook(body):
     data = json.loads(body or b'{}')
@@ -155,10 +174,12 @@ class H(BaseHTTPRequestHandler):
         scenario, lang = pick(params, 'scenario', SCENARIOS, ''), pick(params, 'lang', LANGS, 'ru')
         booking = scenario == 'booking'
         handler = {'auth': lambda: {'token': raw or ''},
-                'book': lambda: dict(Status=book(body)),
+                'book': lambda: book(body),
+                'reminders': lambda: reminders(body),
+                'watch': lambda: save_watch(body),
                 'autobook': lambda: autobook(body),
                 'connect': lambda: connect(self.headers.get('Host', 'localhost'), scenario, lang),
-                'load': lambda: dict(Watches=watches(scenario), AvailableSlots=available_count(scenario), AccountStatus='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected', Locale=lang, Booking=booking, CityID=1, CityName='Warszawa', MinimumMinutes=2, DefaultMinutes=10),
+                'load': lambda: dict(Watches=watches(scenario), AvailableSlots=available_count(scenario), AccountStatus='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected', Locale=lang, Booking=booking, Bookings=list(VISITS.values()) if booking else [], CityID=1, CityName='Warszawa', MinimumMinutes=2, DefaultMinutes=10),
                 'history': lambda: history(scenario, body),
                 'account': lambda: dict(state='needs_login' if scenario == 'session' and scenario not in RESTORED else 'connected'),
                 'cities': lambda: [dict(ID=1, Name='Warszawa')],

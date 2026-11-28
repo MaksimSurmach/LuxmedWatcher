@@ -205,10 +205,23 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	soonest := slices.Clone(histories)
 	slices.SortStableFunc(soonest, func(a, b domain.AppointmentHistory) int { return a.DateTime.Compare(b.DateTime) })
 	soonest = soonest[:min(len(soonest), notificationCoupons)]
-	// The card fits the search controls in one row; the text fallback keeps the keyboard as is.
+	// The widget carries its booking actions on the time coupons.
 	actions := append(slices.Clone(keyboard[:len(keyboard)-2]), slices.Concat(keyboard[len(keyboard)-2:]...))
+	if b.runner != nil {
+		var buttons [][]miniAppButton
+		for _, slot := range soonest {
+			if slot.ID > 0 {
+				buttons = append(buttons, []miniAppButton{miniAppButton{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonData(
+					b.catalog.T(user.Locale, "booking.slot_button", b.slotDateTime(user.Locale, slot.DateTime)), fmt.Sprintf("book:%d", slot.ID))}})
+			}
+		}
+		msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": append(buttons, keyboard[1:]...)}
+		actions = actions[1:]
+	}
 	card := b.newWidgetCard(user.Locale, actions)
-	card.BookingHint = b.catalog.T(user.Locale, "notification.booking_hint")
+	if b.runner == nil {
+		card.BookingHint = b.catalog.T(user.Locale, "notification.booking_hint")
+	}
 	for _, item := range soonest {
 		card.Slots = append(card.Slots, b.newWidgetSlot(user, item))
 	}
@@ -487,7 +500,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 			return
 		}
 	}
-	if strings.HasPrefix(data, "watch:check:") {
+	if action, _ := bookingCallback(data); action != "" || strings.HasPrefix(data, "watch:check:") {
 		toast := b.handleAction(ctx, cb.From.ID, data, attempt)
 		_, _ = b.api.Request(tgbotapi.NewCallback(cb.ID, toast))
 		return
@@ -528,8 +541,17 @@ func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, a
 	if !allowsFlowCallback(b.getFlow(user.TelegramUserID), data) {
 		return
 	}
+	if action, id := bookingCallback(data); action != "" {
+		return b.handleBookingAction(ctx, user, action, id)
+	}
 	credentialMode, revisions := credentialButton(data)
 	switch {
+	case data == "autobook:toggle":
+		state := b.getFlow(user.TelegramUserID)
+		if state != nil && state.Kind == flowWatchConfirm {
+			state.Watch.AutoBook = !state.Watch.AutoBook
+			b.previewWatch(user, state, time.Duration(state.Watch.CheckIntervalSeconds)*time.Second)
+		}
 	case strings.HasPrefix(data, "lang:"):
 		locale := strings.TrimPrefix(data, "lang:")
 		if !slices.Contains(i18n.SupportedLocales, locale) {

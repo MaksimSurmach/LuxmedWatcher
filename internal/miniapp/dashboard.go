@@ -71,6 +71,11 @@ func (d *dashboard) handler() http.Handler {
 	mux.HandleFunc("POST "+dashboardPrefix+"settings", d.authorize(d.settings))
 	mux.HandleFunc("POST "+dashboardPrefix+"watch", d.authorize(d.saveWatch))
 	mux.HandleFunc("POST "+dashboardPrefix+"status", d.authorize(d.status))
+	if d.runner != nil {
+		mux.HandleFunc("POST "+dashboardPrefix+"book", dashboardDeadline(d.authorize(d.book)))
+		mux.HandleFunc("POST "+dashboardPrefix+"autobook", d.authorize(d.autoBook))
+		mux.HandleFunc("POST "+dashboardPrefix+"reminders", d.authorize(d.reminders))
+	}
 	mux.HandleFunc("POST "+dashboardPrefix+"credentials", dashboardDeadline(d.authorize(d.saveCredentials)))
 	mux.HandleFunc("POST "+dashboardPrefix+"forget-credentials", d.authorize(d.forgetCredentials))
 	mux.HandleFunc("POST "+dashboardPrefix+"account", dashboardDeadline(d.authorize(d.account)))
@@ -176,7 +181,14 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		reply(w, http.StatusServiceUnavailable, nil)
 		return
 	}
+	bookings, err := d.db.UserBookings(r.Context(), user.ID, time.Now())
+	if err != nil {
+		reply(w, http.StatusServiceUnavailable, nil)
+		return
+	}
 	reply(w, http.StatusOK, struct {
+		Booking                bool
+		Bookings               []domain.Booking
 		SavedLogin             bool
 		HasCredentials         bool
 		CredentialRevision     int64
@@ -192,7 +204,7 @@ func (d *dashboard) load(w http.ResponseWriter, r *http.Request, user domain.Use
 		ReconnectEpisodeID     string `json:",omitempty"`
 		ConfirmedUnix          *int64
 		AccountStatus          storage.LuxMedAccessStatus
-	}{access.SavedLogin, access.HasCredentials, access.CredentialRevision, access.CredentialSaveRevision, watches, available, user.Locale, user.PreferredCityID, user.PreferredCityName,
+	}{d.runner != nil, bookings, access.SavedLogin, access.HasCredentials, access.CredentialRevision, access.CredentialSaveRevision, watches, available, user.Locale, user.PreferredCityID, user.PreferredCityName,
 		int((d.cfg.MinimumInterval + time.Minute - 1) / time.Minute),
 		int((d.cfg.DefaultInterval + time.Minute - 1) / time.Minute), access.EpisodeID != "", access.EpisodeID, access.ConfirmedUnix, access.Status})
 }
@@ -804,6 +816,7 @@ type watchInput struct {
 	NextDays     int
 	TimeWindows  []domain.TimeWindow
 	CheckMinutes int
+	AutoBook     bool
 }
 
 func (d *dashboard) saveWatch(w http.ResponseWriter, r *http.Request, user domain.User) {
@@ -841,6 +854,7 @@ func (d *dashboard) saveWatch(w http.ResponseWriter, r *http.Request, user domai
 		return
 	}
 	watch.ID, watch.UserID, watch.Name = input.ID, user.ID, service.Name+" · "+city.Name
+	watch.AutoBook = d.runner != nil && input.AutoBook
 	watch.CityID, watch.CityName = city.ID, city.Name
 	watch.ServiceID, watch.ServiceName = service.ID, service.Name
 	watch.DoctorMode, watch.FacilityMode = domain.DoctorModeAny, domain.FacilityModeAll

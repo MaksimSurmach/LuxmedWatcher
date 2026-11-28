@@ -502,6 +502,7 @@ function setAutoBook(button, watch, enabled) {
 function autoBookDialog(button, watch) {
   const dialog = document.querySelector('#booking');
   openSession(dialog);
+  dialog.querySelector('#booking-reminders').hidden = true;
   dialog.querySelector('h2').textContent = t('watches.autobook_title');
   dialog.querySelector('dl').innerHTML = `<div><dt>${escape(watch.ServiceName || watch.Name)}</dt><dd>${escape(watch.CityName)}</dd></div>`;
   const note = dialog.querySelector('#booking-note');
@@ -579,6 +580,47 @@ function openSession(dialog) {
 }
 const current = (dialog, session) => dialog.open && dialog.dataset.session === session;
 
+function openPortal() {
+  if (telegram?.openLink) telegram.openLink(portal);
+  else window.open(portal, '_blank', 'noopener');
+}
+
+function bindReminder(button, visit) {
+  const render = () => {
+    button.textContent = t(visit.Reminders ? 'booking.disable' : 'booking.enable');
+    button.setAttribute('aria-pressed', String(visit.Reminders));
+  };
+  render();
+  const toggle = () => void run(button, async () => {
+    const changed = await api('reminders', { ID: visit.ID, Enabled: !visit.Reminders });
+    visit.Reminders = changed.Reminders;
+    const stored = state.Bookings?.find(item => item.ID === visit.ID);
+    if (stored) stored.Reminders = changed.Reminders;
+    if (button.isConnected && !button.hidden && button.onclick === toggle) render();
+    flash(t(visit.Reminders ? 'booking.reminders_on' : 'booking.reminders_off'));
+  });
+  button.onclick = toggle;
+}
+
+function renderBookings(target) {
+  const visits = state.Bookings ?? [];
+  target.hidden = !visits.length;
+  target.innerHTML = `<h2>${text('booking.title')}</h2>${visits.map(visit => {
+    const confirmed = visit.Status === 'confirmed';
+    return `<article class="card stack">
+      <p class="label">${text(confirmed ? 'booking.confirmed' : 'booking.unknown')}</p>
+      <strong>${escape(visit.Service)}</strong>
+      <time datetime="${escape(visit.DateTime)}">${escape(timeOf(visit.DateTime))}</time>
+      <p class="muted">${escape([visit.Doctor, visit.Place].filter(Boolean).join(' · '))}</p>
+      ${confirmed ? `<button type="button" class="secondary" data-reminders="${Number(visit.ID)}"></button>` :
+        `<a class="flat" href="${portal}">${text('history.confirm_open')}</a>`}
+    </article>`;
+  }).join('')}`;
+  for (const button of target.querySelectorAll('[data-reminders]')) {
+    bindReminder(button, visits.find(item => item.ID === Number(button.dataset.reminders)));
+  }
+}
+
 function bookingDialog(slot) {
   const dialog = document.querySelector('#booking');
   const date = new Date(slot.DateTime);
@@ -593,51 +635,52 @@ function bookingDialog(slot) {
   const open = dialog.querySelector('#booking-open');
   note.textContent = t(state.Booking ? 'history.book_note' : 'history.confirm_note');
   note.className = 'muted note';
-  note.removeAttribute('role');
+  note.setAttribute('role', 'status');
   open.hidden = false;
+  dialog.querySelector('#booking-reminders').hidden = true;
   open.lastElementChild.hidden = Boolean(state.Booking);
   open.firstChild.textContent = `${t(state.Booking ? 'history.book_confirm' : 'history.confirm_open')} `;
   const session = openSession(dialog);
   open.onclick = state.Booking ? () => void run(open, async () => {
-    // The server answers with the provider's decision: confirmed, or the time is already taken.
-    let Status;
+    note.textContent = t('booking.working');
+    let visit;
     try {
-      ({ Status } = await api('book', { ID: slot.ID }));
+      visit = await api('book', { ID: slot.ID });
     } catch (error) {
       if (current(dialog, session)) note.textContent = errorText(error);
       else flash(errorText(error));
       return;
     }
-    const confirmed = Status === 'confirmed';
-    const outcome = confirmed
-      ? t('history.book_confirmed', { time: `${dayLabel(date)}, ${clock.format(date)}`, address: slot.Address || slot.Facility })
-      : t('history.book_taken');
-    slot.Status = 'expired';
-    // A late answer must not rewrite a dialog that now shows another time: announce it
-    // and refresh the list once no dialog is open.
+    const confirmed = visit.Status === 'confirmed';
+    const outcome = confirmed ? t('booking.confirmed') :
+      t(visit.Status === 'taken' ? 'history.book_taken' :
+        visit.Status === 'portal' ? 'booking.portal' : 'booking.unknown');
     if (!current(dialog, session)) {
-      // switchTab clears announcements, so announce after the list is refreshed.
-      const refresh = async () => { await switchTab('history'); flash(outcome); };
-      if (tab !== 'history') flash(outcome);
-      else if (!dialog.open) void refresh();
-      else {
-        flash(outcome);
-        dialog.addEventListener('close', () => void refresh(), { once: true });
-      }
+      flash(outcome);
+      if (tab === 'history' && !dialog.open) void update('history').then(() => flash(outcome));
       return;
     }
     note.className = 'note outcome';
-    note.dataset.kind = confirmed ? 'confirmed' : 'taken';
-    note.setAttribute('role', 'status');
+    note.dataset.kind = confirmed ? 'confirmed' : visit.Status;
     note.textContent = outcome;
+    if (confirmed) dialog.querySelector('h2').textContent = t('booking.title');
     open.hidden = true;
+    if (confirmed) {
+      const reminders = dialog.querySelector('#booking-reminders');
+      reminders.hidden = false;
+      bindReminder(reminders, visit);
+    }
+    if (visit.Status === 'portal' || visit.Status === 'unknown' || visit.Status === 'pending') {
+      open.hidden = false;
+      open.firstChild.textContent = `${t('history.confirm_open')} `;
+      open.lastElementChild.hidden = false;
+      open.onclick = openPortal;
+    }
     dialog.querySelector('#booking-cancel').textContent = t('common.close');
-    dialog.addEventListener('close', () => void switchTab('history'), { once: true });
-  }) : () => {
-    dialog.close();
-    if (telegram?.openLink) telegram.openLink(portal);
-    else window.open(portal, '_blank', 'noopener');
-  };
+    dialog.addEventListener('close', () => {
+      if (tab === 'history' && dialog.dataset.session === session) void update('history');
+    }, { once: true });
+  }) : openPortal;
   dialog.querySelector('#booking-cancel').textContent = t('common.cancel');
   dialog.querySelector('#booking-cancel').onclick = () => dialog.close();
   dialog.showModal();
@@ -651,8 +694,9 @@ let selectedHistoryDay = wantedDay ?? 'first';
 let refreshHistory;
 
 async function historyScreen(id) {
-  show(titleFor('history'), `${watchStatus()}<section class="day-filter" aria-label="${text('history.days')}" hidden><h2>${text('history.days')}</h2><div class="history-days"></div></section><p class="error" id="history-error" role="status"></p><div class="stack" id="slots" tabindex="-1">${pending('history.loading')}</div>${newWatchButton()}`);
+  show(titleFor('history'), `${watchStatus()}<section class="stack" id="booked-visits" hidden></section><section class="day-filter" aria-label="${text('history.days')}" hidden><h2>${text('history.days')}</h2><div class="history-days"></div></section><p class="error" id="history-error" role="status"></p><div class="stack" id="slots" tabindex="-1">${pending('history.loading')}</div>${newWatchButton()}`);
   bindShared();
+  renderBookings(main.querySelector('#booked-visits'));
   const days = main.querySelector('.history-days');
   const results = main.querySelector('#slots');
   let slots = [];
@@ -771,6 +815,11 @@ async function historyScreen(id) {
   refreshHistory = () => {
     if (id === renderID && !busy && !document.hidden && !document.querySelector('dialog[open]')) {
       void loadDay(selectedHistoryDay, true).catch(() => {});
+      if (state.Booking) void api('load').then(latest => {
+        if (id !== renderID || JSON.stringify(latest.Bookings) === JSON.stringify(state.Bookings)) return;
+        state.Bookings = latest.Bookings;
+        renderBookings(main.querySelector('#booked-visits'));
+      }).catch(() => {});
     }
   };
   await loadDay(selectedHistoryDay);
@@ -1024,6 +1073,8 @@ async function editor(watch, focusPicks = false) {
     <section class="step" data-step="3" hidden>
       <h2 tabindex="-1" id="summary-heading">${text('editor.summary')}</h2>
       <dl id="summary" class="summary"></dl>
+      ${state.Booking ? `<label class="option"><input type="checkbox" name="autoBook" aria-describedby="auto-book-note" ${watch?.AutoBook ? 'checked' : ''}>${text('watches.autobook_enable')}</label>
+        <p class="muted" id="auto-book-note">${text('watches.autobook_note')}</p>` : ''}
       <div class="advanced" id="advanced" hidden>
         <div class="stack">
           <button type="button" class="secondary" id="providers">${text('editor.choose_providers')}</button>
@@ -1410,7 +1461,7 @@ async function editor(watch, focusPicks = false) {
       try {
         await api('watch', { ID: watch?.ID ?? 0, CityID: Number(fields.city.value), ServiceID: service.ID, DoctorID: doctor,
           FacilityIDs: [...facilities], DateFrom: range ? fields.from.value : '', DateTo: range ? fields.to.value : '',
-          NextDays: range ? 0 : Number(fields.days.value), TimeWindows: windows, CheckMinutes: Number(fields.minutes.value) });
+          NextDays: range ? 0 : Number(fields.days.value), TimeWindows: windows, CheckMinutes: Number(fields.minutes.value), AutoBook: Boolean(fields.autoBook?.checked) });
       } finally {
         form.inert = false;
       }

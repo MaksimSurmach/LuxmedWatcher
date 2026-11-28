@@ -170,7 +170,7 @@
   "watches.autobook_enable": "Уключыць аўтазапіс",
   "watches.autobook_disable": "Выключыць аўтазапіс",
   "watches.autobook_title": "Уключыць аўтазапіс?",
-  "watches.autobook_note": "Першы прыдатны прыём будзе запісаны аўтаматычна. Пасля запісу аўтазапіс выключыцца.",
+  "watches.autobook_note": "Аўтазапіс выбірае першы даступны час, які адпавядае пошуку, спыняе пошук і ўключае напаміны за 24 гадзіны і за 2 гадзіны.",
   "watches.autobook_enabled": "Аўтазапіс уключаны",
   "watches.autobook_disabled": "Аўтазапіс выключаны",
   "watches.state_login": "Патрэбны ўваход",
@@ -199,5 +199,14 @@
   "account.with_password": "Увайсці і захаваць пароль у боце",
   "viewer.finish": "Гатова",
   "viewer.reconnecting": "Аднаўляем злучэнне…",
-  "viewer.interrupted": "Сувязь з акном уваходу перарвалася. Можна падключыцца зноў."
+  "viewer.interrupted": "Сувязь з акном уваходу перарвалася. Можна падключыцца зноў.",
+  "booking.title": "Мае запісы",
+  "booking.confirmed": "LUX MED пацвердзіў запіс",
+  "booking.working": "Правяраем час і адпраўляем запыт на запіс…",
+  "booking.unknown": "LUX MED яшчэ не пацвердзіў запіс. Праверце спіс візітаў на партале.",
+  "booking.portal": "Працягніце запіс на гэты прыём у LUX MED.",
+  "booking.enable": "Уключыць напаміны",
+  "booking.disable": "Выключыць напаміны",
+  "booking.reminders_on": "Напаміны ўключаны за 24 гадзіны і за 2 гадзіны да візіту, калі адпаведны час яшчэ наперадзе.",
+  "booking.reminders_off": "Напаміны выключаны."
 }

@@ -122,3 +122,41 @@ test('an HTML maintenance response to refresh is temporary and preserves the sav
   assert.equal(result.status, 502);
   assert.deepEqual(await readProfile(dir, '1'), initial);
 });
+
+test('a booking POST uses the portal anti-forgery token and is never replayed', async t => {
+  const confirm = '/PatientPortal/NewPortal/Reservation/Confirm';
+  const paths = [];
+  let status = 401;
+  const { dir, origin } = await fixture(t, async (req, res) => {
+    paths.push(req.url);
+    if (req.url.endsWith('/getforgerytoken')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' }).end('{"token":"synthetic"}');
+    } else if (req.url === confirm) {
+      assert.equal(req.method, 'POST');
+      assert.equal(req.headers['xsrf-token'], 'synthetic');
+      let data = '';
+      for await (const part of req) data += part;
+      assert.deepEqual(JSON.parse(data), { temporaryReservationId: 72 });
+      res.writeHead(status).end();
+    } else {
+      assert.fail('unexpected portal call');
+    }
+  });
+  await writeProfile(dir, '1', {
+    cookies: [cookie('Authorization-Token', jwt(Math.floor(Date.now() / 1000) + 600)), cookie('RefreshToken', 'fixture')],
+    origins: [],
+  });
+  const result = await requestPortalResource(dir, '1', confirm, {
+    origin, payload: '{"temporaryReservationId":72}', report() {},
+  });
+  assert.equal(result.status, 401);
+  assert.deepEqual(paths, ['/PatientPortal/NewPortal/security/getforgerytoken', confirm]);
+
+  paths.length = 0;
+  status = 409;
+  const conflict = await requestPortalResource(dir, '1', confirm, {
+    origin, payload: '{"temporaryReservationId":72}', report() {},
+  });
+  assert.equal(conflict.status, 502);
+  assert.deepEqual(paths, ['/PatientPortal/NewPortal/security/getforgerytoken', confirm]);
+});

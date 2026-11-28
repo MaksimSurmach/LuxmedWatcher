@@ -261,6 +261,10 @@ func (c *HTTPClient) request(ctx context.Context, method, endpoint string, body 
 	}
 	if c.xsrfToken != "" {
 		req.Header.Set("X-XSRF-TOKEN", c.xsrfToken)
+		if method == http.MethodPost {
+			req.Header.Set("XSRF-TOKEN", c.xsrfToken)
+			req.Header.Set("X-Requested-With", "XMLHttpRequest")
+		}
 	}
 	resp, err := c.client.Do(req)
 	if err != nil {

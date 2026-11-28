@@ -317,19 +317,30 @@ func startOfDay(t time.Time) time.Time {
 }
 
 type termsResponse struct {
+	CorrelationID   string          `json:"correlationId"`
 	Success         *bool           `json:"success"`
 	TermsForService json.RawMessage `json:"termsForService"`
 }
 
 type termsDay struct {
-	Day   string `json:"day"`
-	Terms []struct {
-		ID           json.RawMessage `json:"id"`
-		DateTimeFrom string          `json:"dateTimeFrom"`
-		Doctor       struct {
-			ID        int    `json:"id"`
-			FirstName string `json:"firstName"`
-			LastName  string `json:"lastName"`
+	Day           string `json:"day"`
+	CorrelationID string `json:"correlationId"`
+	Terms         []struct {
+		ID             json.RawMessage `json:"id"`
+		DateTimeFrom   string          `json:"dateTimeFrom"`
+		DateTimeTo     string          `json:"dateTimeTo"`
+		RoomID         int             `json:"roomId"`
+		ScheduleID     int             `json:"scheduleId"`
+		ServiceID      int             `json:"serviceId"`
+		CityID         int             `json:"cityId"`
+		IsTelemedicine bool            `json:"isTelemedicine"`
+		IsImpediment   bool            `json:"isImpediment"`
+		IsAdditional   bool            `json:"isAdditional"`
+		Doctor         struct {
+			ID            int    `json:"id"`
+			AcademicTitle string `json:"academicTitle"`
+			FirstName     string `json:"firstName"`
+			LastName      string `json:"lastName"`
 		} `json:"doctor"`
 		Clinic      string `json:"clinic"`
 		ClinicID    int    `json:"clinicId"`
@@ -372,6 +383,9 @@ func decodeTermsResponse(watch domain.Watch, body []byte, raw bool) (termsPrevie
 	if json.Unmarshal(response.TermsForService, &service) != nil || json.Unmarshal(service.Days, &days) != nil {
 		return termsPreview{}, fmt.Errorf("luxmed terms missing days: %w", ErrResponse)
 	}
+	for i := range days {
+		days[i].CorrelationID = cmp.Or(days[i].CorrelationID, response.CorrelationID)
+	}
 	apps, err := normalizeTerms(watch, days, payload(body, raw))
 	loaded := make(map[string]int)
 	for _, app := range apps {
@@ -382,14 +396,16 @@ func decodeTermsResponse(watch domain.Watch, body []byte, raw bool) (termsPrevie
 
 func decodeOneDayTerms(watch domain.Watch, day time.Time, body []byte, raw bool) ([]domain.Appointment, error) {
 	var response struct {
-		ServiceID int       `json:"serviceVariantId"`
-		Day       *termsDay `json:"termsForDay"`
-		Info      *dayInfo  `json:"termsInfoForDay"`
+		CorrelationID string    `json:"correlationId"`
+		ServiceID     int       `json:"serviceVariantId"`
+		Day           *termsDay `json:"termsForDay"`
+		Info          *dayInfo  `json:"termsInfoForDay"`
 	}
 	if json.Unmarshal(body, &response) != nil || response.Day == nil || response.Day.Terms == nil ||
 		response.ServiceID != watch.ServiceID || response.Day.Day != day.Format(dateFormat) {
 		return nil, fmt.Errorf("luxmed one-day terms: %w", ErrResponse)
 	}
+	response.Day.CorrelationID = cmp.Or(response.Day.CorrelationID, response.CorrelationID)
 	apps, err := normalizeTerms(watch, []termsDay{*response.Day}, payload(body, raw))
 	for _, app := range apps {
 		if !startOfDay(app.DateTime).Equal(day) {
@@ -414,10 +430,7 @@ func normalizeTerms(watch domain.Watch, days []termsDay, payload string) ([]doma
 	var malformed int
 	for _, day := range days {
 		for _, term := range day.Terms {
-			when, err := time.Parse(time.RFC3339Nano, term.DateTimeFrom)
-			if err != nil {
-				when, err = time.ParseInLocation(wallTime, term.DateTimeFrom, warsaw)
-			}
+			when, err := parsePortalTime(term.DateTimeFrom)
 			if err != nil {
 				malformed++
 				continue
@@ -447,6 +460,18 @@ func normalizeTerms(watch domain.Watch, days []termsDay, payload string) ([]doma
 				CityName:     watch.CityName,
 				BookingURL:   ReservationPageURL,
 				RawPayload:   payload,
+			}
+			if term.ScheduleID > 0 && term.Doctor.ID > 0 && term.ClinicID > 0 && term.ServiceID == watch.ServiceID &&
+				!term.IsAdditional && !term.IsImpediment && !term.IsTelemedicine {
+				end, endErr := parsePortalTime(term.DateTimeTo)
+				if endErr == nil && end.After(when) {
+					app.BookingDetails, _ = json.Marshal(bookingTerm{
+						CityID: cmp.Or(term.CityID, watch.CityID), CityName: watch.CityName, ServiceID: term.ServiceID, ServiceName: watch.ServiceName,
+						FacilityID: term.ClinicID, FacilityName: cmp.Or(term.Clinic, address), RoomID: term.RoomID, ScheduleID: term.ScheduleID,
+						DoctorID: term.Doctor.ID, Doctor: term.Doctor, Date: when.UTC(), TimeFrom: when.In(warsaw).Format("15:04"),
+						TimeTo: end.In(warsaw).Format("15:04"), CorrelationID: day.CorrelationID,
+					})
+				}
 			}
 			app.Fingerprint, app.LegacyFingerprint = appointmentFingerprints(app)
 			if app.ExternalID == "" {

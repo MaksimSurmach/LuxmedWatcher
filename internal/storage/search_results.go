@@ -39,7 +39,14 @@ func (db *DB) SaveSearchHistory(
 		if !update.WatchUpdatedAt.IsZero() && !revision.Equal(update.WatchUpdatedAt) {
 			return errors.New("watch changed during search")
 		}
+		booked, err := bookingFingerprints(ctx, tx, owner.ID, update.StartedAt)
+		if err != nil {
+			return err
+		}
 		for _, appointment := range update.Appointments {
+			if booked[appointment.Fingerprint] {
+				continue
+			}
 			history, _, err := db.upsertAppointmentHistory(ctx, tx, update.WatchID, appointment)
 			if err != nil {
 				return err
@@ -66,7 +73,7 @@ func (db *DB) SaveSearchHistory(
 			}
 		}
 		// Keep a withdrawn notification only until it is eligible to be sent again.
-		_, err := tx.ExecContext(ctx, `DELETE FROM appointment_history WHERE watch_id=$1 AND status=$2
+		_, err = tx.ExecContext(ctx, `DELETE FROM appointment_history WHERE watch_id=$1 AND status=$2
 			AND (last_notified_at IS NULL OR `+db.dateTimeSQL("last_notified_at")+` <= `+db.dateTimeSQL("$3")+`)`,
 			update.WatchID, domain.HistoryStatusExpired, update.RenotifyAt.UTC())
 		return err

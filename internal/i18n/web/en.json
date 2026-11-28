@@ -170,7 +170,7 @@
   "watches.autobook_enable": "Turn on auto-booking",
   "watches.autobook_disable": "Turn off auto-booking",
   "watches.autobook_title": "Turn on auto-booking?",
-  "watches.autobook_note": "The first matching appointment will be booked automatically. Auto-booking then turns off.",
+  "watches.autobook_note": "Auto-booking takes the first matching available time, stops the search and enables reminders 24 and 2 hours before the visit.",
   "watches.autobook_enabled": "Auto-booking is on",
   "watches.autobook_disabled": "Auto-booking is off",
   "watches.state_login": "Sign-in needed",
@@ -199,5 +199,14 @@
   "account.with_password": "Sign in and save the password in the bot",
   "viewer.finish": "Done",
   "viewer.reconnecting": "Reconnecting…",
-  "viewer.interrupted": "The sign-in window lost its connection. You can reconnect here."
+  "viewer.interrupted": "The sign-in window lost its connection. You can reconnect here.",
+  "booking.title": "My visits",
+  "booking.confirmed": "LUX MED confirmed the booking",
+  "booking.working": "Checking the time and requesting the booking…",
+  "booking.unknown": "LUX MED has yet to confirm the booking. Check your visits in the portal.",
+  "booking.portal": "Continue in LUX MED to book this visit.",
+  "booking.enable": "Turn on reminders",
+  "booking.disable": "Turn off reminders",
+  "booking.reminders_on": "Reminders are on for 24 and 2 hours before the visit when those times are still ahead.",
+  "booking.reminders_off": "Reminders are off."
 }

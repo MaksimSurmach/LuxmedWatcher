@@ -170,7 +170,7 @@
   "watches.autobook_enable": "Włącz automatyczną rezerwację",
   "watches.autobook_disable": "Wyłącz automatyczną rezerwację",
   "watches.autobook_title": "Włączyć automatyczną rezerwację?",
-  "watches.autobook_note": "Pierwszy pasujący termin zostanie zarezerwowany automatycznie. Po rezerwacji funkcja się wyłączy.",
+  "watches.autobook_note": "Automatyczna rezerwacja wybiera pierwszy pasujący dostępny termin, zatrzymuje wyszukiwanie i włącza przypomnienia 24 i 2 godziny przed wizytą.",
   "watches.autobook_enabled": "Automatyczna rezerwacja włączona",
   "watches.autobook_disabled": "Automatyczna rezerwacja wyłączona",
   "watches.state_login": "Wymaga logowania",
@@ -199,5 +199,14 @@
   "account.with_password": "Zaloguj się i zapisz hasło w bocie",
   "viewer.finish": "Gotowe",
   "viewer.reconnecting": "Ponowne łączenie…",
-  "viewer.interrupted": "Utracono połączenie z oknem logowania. Możesz połączyć się ponownie."
+  "viewer.interrupted": "Utracono połączenie z oknem logowania. Możesz połączyć się ponownie.",
+  "booking.title": "Moje wizyty",
+  "booking.confirmed": "LUX MED potwierdził rezerwację",
+  "booking.working": "Sprawdzamy termin i wysyłamy rezerwację…",
+  "booking.unknown": "LUX MED jeszcze nie potwierdził rezerwacji. Sprawdź listę wizyt w portalu.",
+  "booking.portal": "Dokończ rezerwację wizyty w LUX MED.",
+  "booking.enable": "Włącz przypomnienia",
+  "booking.disable": "Wyłącz przypomnienia",
+  "booking.reminders_on": "Przypomnienia są włączone na 24 i 2 godziny przed wizytą, jeśli te terminy jeszcze nie minęły.",
+  "booking.reminders_off": "Przypomnienia są wyłączone."
 }

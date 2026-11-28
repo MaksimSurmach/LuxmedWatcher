@@ -56,7 +56,8 @@ func (b *Bot) handleWidgetQuery(ctx context.Context, query *widgetQuery) {
 	attempt := b.selectChrome(query.From.ID, query.Data)
 	ctx, data := actionContext(ctx, query.Data, query.MessageID)
 	params := tgbotapi.Params{"widget_query_id": query.ID}
-	check := strings.HasPrefix(data, "watch:check:")
+	action, _ := bookingCallback(data)
+	check := action != "" || strings.HasPrefix(data, "watch:check:")
 	if check {
 		params["data"] = b.handleAction(ctx, query.From.ID, data, attempt)
 	}
@@ -69,6 +70,9 @@ func (b *Bot) handleWidgetQuery(ctx context.Context, query *widgetQuery) {
 }
 
 func validWidgetAction(action string) bool {
+	if kind, _ := bookingCallback(action); kind != "" {
+		return true
+	}
 	if mode, _ := credentialButton(action); mode != "" {
 		return true
 	}
@@ -115,7 +119,7 @@ type widgetSlot struct {
 	Label, Weekday, Day, Month, Time, Doctor, Place, URL, Stamp string
 	Hide, HideLabel                                             string
 	// AppURL opens this slot in the Mini App; the coupon then books through the Book pill.
-	AppURL, Book string
+	AppURL, Book, BookAction string
 }
 
 // widgetPass is one saved search: the stub holds its state, the body what it watches.
@@ -151,6 +155,10 @@ func (b *Bot) newWidgetSlot(user domain.User, item domain.AppointmentHistory) wi
 	}
 	if b.cfg.MiniApp != nil && b.cfg.MiniAppLink != "" && b.cfg.Browsers[user.TelegramUserID] != nil && item.ID > 0 {
 		slot.AppURL = b.cfg.MiniAppLink + "?startapp=slot-" + strconv.FormatInt(item.ID, 10) + "-" + local.Format(time.DateOnly)
+		slot.Book = b.catalog.T(locale, "button.book")
+	}
+	if b.runner != nil && item.ID > 0 {
+		slot.BookAction = fmt.Sprintf("book:%d", item.ID)
 		slot.Book = b.catalog.T(locale, "button.book")
 	}
 	slot.Label = strings.Join(slices.DeleteFunc([]string{b.slotDateTime(locale, item.DateTime), slot.Doctor, slot.Place}, func(s string) bool { return s == "" }), " · ")
@@ -199,7 +207,7 @@ button:disabled{opacity:.6}
 .hideable .slot{padding-right:70px}.coupon .hide{position:absolute;right:6px;bottom:4px;min-height:0;padding:6px 8px;background:none;color:var(--muted);font-size:12px}
 #status,#error{margin:8px 4px 0;font-size:13px}#error{color:var(--red)}
 </style>
-<article>{{if .Slots}}<ol>{{range $i, $s := .Slots}}<li class="coupon{{if $s.Stamp}} void{{else if eq $i 0}} next{{end}}{{if $s.Hide}} hideable{{end}}">{{if $s.Stamp}}<div class="open" aria-label="{{$s.Label}} · {{$s.Stamp}}">{{else if $s.AppURL}}<a class="open" href="{{$s.AppURL}}" data-app aria-label="{{$s.Label}}">{{else}}<a class="open" href="{{$s.URL}}" aria-label="{{$s.Label}}">{{end}}<span class="stub" aria-hidden="true"><small>{{$s.Weekday}}</small><b>{{$s.Day}}</b><small>{{$s.Month}}</small></span><span class="slot" aria-hidden="true"><time>{{$s.Time}}</time>{{if $s.Doctor}}<strong>{{$s.Doctor}}</strong>{{end}}{{if $s.Place}}<small>{{$s.Place}}</small>{{end}}{{if $s.Stamp}}<span class="stamp">{{$s.Stamp}}</span>{{end}}</span>{{if $s.Stamp}}</div>{{else}}</a>{{if $s.AppURL}}<a class="book" href="{{$s.URL}}" aria-label="{{$s.Book}}: {{$s.Label}}">{{$s.Book}}</a>{{end}}{{end}}{{if $s.Hide}}<button class="hide" data-callback="{{$s.Hide}}" aria-label="{{$s.HideLabel}}: {{$s.Label}}">{{$s.HideLabel}}</button>{{end}}</li>{{end}}</ol>{{end}}
+<article>{{if .Slots}}<ol>{{range $i, $s := .Slots}}<li class="coupon{{if $s.Stamp}} void{{else if eq $i 0}} next{{end}}{{if $s.Hide}} hideable{{end}}">{{if $s.Stamp}}<div class="open" aria-label="{{$s.Label}} · {{$s.Stamp}}">{{else if $s.AppURL}}<a class="open" href="{{$s.AppURL}}" data-app aria-label="{{$s.Label}}">{{else if $s.URL}}<a class="open" href="{{$s.URL}}" aria-label="{{$s.Label}}">{{else}}<div class="open" aria-label="{{$s.Label}}">{{end}}<span class="stub" aria-hidden="true"><small>{{$s.Weekday}}</small><b>{{$s.Day}}</b><small>{{$s.Month}}</small></span><span class="slot" aria-hidden="true"><time>{{$s.Time}}</time>{{if $s.Doctor}}<strong>{{$s.Doctor}}</strong>{{end}}{{if $s.Place}}<small>{{$s.Place}}</small>{{end}}{{if $s.Stamp}}<span class="stamp">{{$s.Stamp}}</span>{{end}}</span>{{if or $s.Stamp (not $s.URL)}}</div>{{else}}</a>{{if $s.BookAction}}<button class="book" data-callback="{{$s.BookAction}}" aria-label="{{$s.Book}}: {{$s.Label}}">{{$s.Book}}</button>{{else if $s.AppURL}}<a class="book" href="{{$s.URL}}" aria-label="{{$s.Book}}: {{$s.Label}}">{{$s.Book}}</a>{{end}}{{end}}{{if $s.Hide}}<button class="hide" data-callback="{{$s.Hide}}" aria-label="{{$s.HideLabel}}: {{$s.Label}}">{{$s.HideLabel}}</button>{{end}}</li>{{end}}</ol>{{end}}
 {{if .Passes}}<ol>{{range .Passes}}<li class="coupon pass {{.Tone}}"><span class="stub"><small>{{.State}}</small><b>{{.Figure}}</b><small>{{.Unit}}</small></span><span class="slot">{{range .Lines}}<small>{{.}}</small>{{end}}</span></li>{{end}}</ol>{{end}}
 {{if .More}}<p class="more">{{.More}}</p>{{end}}{{if .BookingHint}}<p class="booking-hint">{{.BookingHint}}</p>{{end}}
 {{if .Actions}}<nav>{{range .Actions}}<div class="row">{{range .}}{{if .URL}}<a class="primary" href="{{.URL}}">{{.Text}}</a>{{else if .WidgetAction}}{{if $.AppLink}}<a href="{{$.AppLink}}" data-app>{{.Text}}</a>{{else}}<button data-callback="{{.WidgetAction}}">{{.Text}}</button>{{end}}{{else if .CallbackData}}<button data-callback="{{.CallbackData}}">{{.Text}}</button>{{end}}{{end}}</div>{{end}}</nav>{{end}}

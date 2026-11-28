@@ -1,6 +1,7 @@
 import { request } from 'playwright';
 import { readProfile, writeProfile } from './profile-store.mjs';
 import { portalOrigin } from './session.mjs';
+import { forgeryPath } from './portal-api.mjs';
 
 const refreshPath = '/PatientPortal/NewPortal/Token/Refresh';
 const sessionProbe = '/PatientPortal/NewPortal/Dictionary/cities';
@@ -42,6 +43,7 @@ function responseStatus(response, origin) {
 
 export async function requestPortalResource(profileDir, id, path, {
   origin = portalOrigin,
+  payload,
   report = record => console.info(JSON.stringify(record)),
 } = {}) {
   let state = await readProfile(profileDir, id);
@@ -88,9 +90,29 @@ export async function requestPortalResource(profileDir, id, path, {
   }
 
   async function fetchResource() {
-    const response = await get(path === '/session' ? sessionProbe : path);
+    let response;
+    if (payload) {
+      const forgery = await get(forgeryPath);
+      try {
+        const status = responseStatus(forgery, origin);
+        if (status !== 200) return { status };
+        const { token } = await forgery.json();
+        if (typeof token !== 'string' || !token) return { status: 502 };
+        response = await client.post(path, {
+          data: payload, maxRedirects: 0, maxRetries: 0,
+          headers: { 'XSRF-TOKEN': token, 'Content-Type': 'application/json' },
+        });
+      } finally {
+        await forgery.dispose();
+      }
+    } else {
+      response = await get(path === '/session' ? sessionProbe : path);
+    }
     try {
-      const status = responseStatus(response, origin);
+      const upstreamStatus = responseStatus(response, origin);
+      // The worker uses 409 for its own busy state. Keep write conflicts
+      // from the portal distinct so a confirmation is never replayed.
+      const status = payload && upstreamStatus === 409 ? 502 : upstreamStatus;
       const headers = response.headers();
       if (status !== 200) return { status, retryAfter: headers['retry-after'] };
       if (Number(headers['content-length']) > maxResponseBytes ||
@@ -116,7 +138,7 @@ export async function requestPortalResource(profileDir, id, path, {
     }
 
     const result = await fetchResource();
-    if (result.status !== 401) return result;
+    if (result.status !== 401 || payload) return result;
     const renewed = await refresh();
     return renewed.status === 200 ? await fetchResource() : renewed;
   } finally {

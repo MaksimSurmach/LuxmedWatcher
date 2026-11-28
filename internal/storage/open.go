@@ -110,6 +110,9 @@ func (db *DB) Migrate(ctx context.Context) error {
 		return fmt.Errorf("apply storage schema: %w", err)
 	}
 	if db.postgres {
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE watches ADD COLUMN IF NOT EXISTS auto_book BOOLEAN NOT NULL DEFAULT FALSE"); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `
 			ALTER TABLE users ADD COLUMN IF NOT EXISTS credential_revision BIGINT NOT NULL DEFAULT 0,
 				ADD COLUMN IF NOT EXISTS credential_save_revision BIGINT NOT NULL DEFAULT 0
@@ -140,6 +143,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 			return err
 		}
 		for _, column := range []struct{ table, name, definition string }{
+			{"watches", "auto_book", "BOOLEAN NOT NULL DEFAULT FALSE"},
 			{"luxmed_cities", "listed", "BOOLEAN NOT NULL DEFAULT TRUE"},
 			{"luxmed_access", "confirmed_unix", "BIGINT"},
 			{"users", "preferred_city_id", "INTEGER"},

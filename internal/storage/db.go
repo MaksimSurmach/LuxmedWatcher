@@ -339,10 +339,10 @@ func (db *DB) CreateWatch(ctx context.Context, watch domain.Watch) (int64, error
 		INSERT INTO watches (
 			name, city_id, city_name, service_id, service_name, doctor_id, doctor_name, doctor_mode,
 			facility_mode, facility_ids, facility_names, date_from, date_to, next_days, time_windows,
-			check_interval_seconds, user_id, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19)
+			check_interval_seconds, user_id, status, created_at, updated_at, auto_book
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $19, $20)
 		RETURNING id
-	`, append(watchParameters(watch), watch.UserID, domain.WatchStatusActive, now)...).Scan(&id)
+	`, append(watchParameters(watch), watch.UserID, domain.WatchStatusActive, now, watch.AutoBook)...).Scan(&id)
 	return id, err
 }
 
@@ -357,11 +357,11 @@ func (db *DB) UpdateWatch(ctx context.Context, watch domain.Watch) error {
 		UPDATE watches SET name=$1, city_id=$2, city_name=$3, service_id=$4, service_name=$5, doctor_id=$6,
 			doctor_name=$7, doctor_mode=$8, facility_mode=$9, facility_ids=$10, facility_names=$11, date_from=$12,
 			date_to=$13, next_days=$14, time_windows=$15, check_interval_seconds=$16, updated_at=$17,
-			last_checked_at=NULL, last_success_at=NULL,
+			last_checked_at=NULL, last_success_at=NULL, auto_book=$21,
 			last_error=CASE WHEN `+watchSignInError+` AND NOT `+hasAccountTermsRequirement("$19")+`
 				THEN last_error ELSE '' END
 		WHERE id=$18 AND user_id=$19 AND status <> $20
-	`, append(watchParameters(watch), time.Now().UTC(), watch.ID, watch.UserID, domain.WatchStatusDeleted)...)
+	`, append(watchParameters(watch), time.Now().UTC(), watch.ID, watch.UserID, domain.WatchStatusDeleted, watch.AutoBook)...)
 	if err = requireOneRow(res, err); err != nil {
 		return err
 	}
@@ -1308,7 +1308,7 @@ func scanUser(row scanner) (domain.User, error) {
 func watchSelect() string {
 	return `SELECT id, user_id, name, status, city_id, city_name, service_id, service_name, doctor_id, doctor_name, doctor_mode,
 		facility_mode, facility_ids, facility_names, date_from, date_to, next_days, time_windows,
-		check_interval_seconds, last_checked_at, last_success_at, last_error, created_at, updated_at FROM watches`
+		check_interval_seconds, last_checked_at, last_success_at, last_error, created_at, updated_at, auto_book FROM watches`
 }
 
 func scanWatches(rows *sql.Rows) ([]domain.Watch, error) {
@@ -1330,7 +1330,7 @@ func scanWatch(row scanner) (domain.Watch, error) {
 	var dateFrom, dateTo, lastChecked, lastSuccess sql.NullTime
 	err := row.Scan(&watch.ID, &watch.UserID, &watch.Name, &watch.Status, &watch.CityID, &watch.CityName, &watch.ServiceID, &watch.ServiceName,
 		&doctorID, &watch.DoctorName, &watch.DoctorMode, &watch.FacilityMode, &facilityIDs, &facilityNames, &dateFrom, &dateTo, &watch.NextDays,
-		&timeWindows, &watch.CheckIntervalSeconds, &lastChecked, &lastSuccess, &watch.LastError, &watch.CreatedAt, &watch.UpdatedAt)
+		&timeWindows, &watch.CheckIntervalSeconds, &lastChecked, &lastSuccess, &watch.LastError, &watch.CreatedAt, &watch.UpdatedAt, &watch.AutoBook)
 	if err != nil {
 		return domain.Watch{}, err
 	}
