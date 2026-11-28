@@ -127,7 +127,8 @@ func (b *Bot) showStart(ctx context.Context, user domain.User, invited bool) {
 	const title = "Luxmed Watcher"
 	if !user.IsActive() {
 		b.setFlow(user.TelegramUserID, &flow{Kind: flowInvite})
-		b.sendOnboarding(user, title, b.catalog.T(user.Locale, "flow.invite.enter"), widgetKeyboard(languageKeyboard(b.catalog)))
+		body := b.catalog.T(user.Locale, "widget.start") + "\n\n" + b.catalog.T(user.Locale, "flow.invite.enter")
+		b.sendOnboarding(user, title, body, widgetKeyboard(languageKeyboard(b.catalog)))
 		return
 	}
 	b.SyncAppMenu(ctx, user.ID)
@@ -136,7 +137,7 @@ func (b *Bot) showStart(ctx context.Context, user domain.User, invited bool) {
 		body += "\n\n" + b.catalog.T(user.Locale, "widget.start_connect")
 	}
 	if invited {
-		body = b.catalog.T(user.Locale, "flow.invite.accepted") + "\n\n" + body
+		body = b.catalog.T(user.Locale, "flow.invite.accepted") + "\n\n" + b.catalog.T(user.Locale, "help.text")
 	}
 	connect := b.actionButton(user, "button.connect", "account")
 	language := b.actionButton(user, "button.language", "settings:language")

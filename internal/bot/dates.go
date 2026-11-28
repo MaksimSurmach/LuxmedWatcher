@@ -31,9 +31,18 @@ func (b *Bot) slotDateTime(locale string, value time.Time) string {
 	return b.slotDate(locale, value) + " " + value.In(luxmed.Location()).Format("15:04")
 }
 
-func (b *Bot) intervalText(locale string, value time.Duration) string {
-	minutes := int(value / time.Minute)
-	seconds := int(value % time.Minute / time.Second)
+// Watch intervals are persisted as whole seconds. Rounding up preserves the configured minimum.
+func intervalSeconds(value time.Duration) int {
+	seconds := int(value / time.Second)
+	if value%time.Second > 0 {
+		seconds++
+	}
+	return seconds
+}
+
+func (b *Bot) intervalText(locale string, totalSeconds int) string {
+	minutes := totalSeconds / 60
+	seconds := totalSeconds % 60
 	if seconds == 0 {
 		return b.catalog.T(locale, "button.interval_minutes", minutes)
 	}

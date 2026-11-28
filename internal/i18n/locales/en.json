@@ -127,7 +127,7 @@
   "flow.watch.summary": "Watch: %s\nCity: %s\nService: %s\nDoctor: %s\nFacilities: %s\nInterval: %s",
   "flow.watch.time": "Step 5/8: date/time filters use next 14 days and any time in MVP.",
   "flow.watch.updated": "Watch updated.",
-  "help.text": "Use buttons to create watches, manage your LUX MED account, and view found appointments.",
+  "help.text": "1. Sign in to LUX MED via /connect.\n2. Choose a service and filters via /new.\n3. When a slot matches, open the alert and book in the LUX MED portal.",
   "history.empty": "No appointment times found yet.",
   "options.empty": "No times from this notification are still available.",
   "history.expired": "This appointment time has passed.",
