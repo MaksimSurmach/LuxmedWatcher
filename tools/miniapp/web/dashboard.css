@@ -327,3 +327,37 @@ details[open] > summary { margin-bottom: 8px; }
   .pulse:not(.off, .trouble) { animation: breathe 2.4s ease-in-out infinite; }
   @keyframes breathe { 50% { box-shadow: 0 0 0 7px var(--ok-wash); } }
 }
+
+/* Preferences share the same sheet and touch targets as the rest of the wallet. */
+.preference-value {
+  display: flex; align-items: center; justify-content: space-between; gap: 16px; width: 100%; min-height: 48px;
+  padding: 10px 16px; border: 1px solid var(--line); border-radius: 12px; background: var(--paper);
+  color: var(--ink); text-align: start; font-size: 1rem; font-weight: 550; cursor: pointer;
+}
+.preference-value::after {
+  content: ''; flex: none; width: 8px; height: 8px; margin: -4px 2px 0 0;
+  border: solid var(--muted); border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.preference-sheet[open] { display: flex; flex-direction: column; max-height: 80vh; max-height: 80dvh; }
+.preference-sheet header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px 12px; }
+.preference-sheet h2 { padding: 0; font-size: 1.1rem; }
+.preference-sheet h2::before { display: none; }
+.preference-close {
+  flex: none; width: 44px; height: 44px; border: 0; border-radius: 50%; background: var(--tint);
+  color: var(--ink); font-size: 1.5rem; cursor: pointer;
+}
+.preference-options { overflow-y: auto; overscroll-behavior: contain; padding: 2px 12px 8px; }
+.preference-options button {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; min-height: 48px;
+  padding: 10px 14px; border: 0; border-radius: 10px; color: var(--text); background: transparent; text-align: start; cursor: pointer;
+}
+.preference-options button[aria-pressed="true"] { background: var(--tint); color: var(--ink); font-weight: 650; }
+.preference-options button[aria-pressed="true"]::after {
+  content: ''; width: 6px; height: 12px; flex: none; margin-inline-end: 4px;
+  border: solid currentColor; border-width: 0 2px 2px 0; transform: rotate(45deg);
+}
+.preference-options button:focus-visible { outline-offset: -2px; }
+@media (hover: hover) {
+  .preference-value:hover { border-color: var(--ink); }
+  .preference-options button:hover { background: var(--tint); }
+}
