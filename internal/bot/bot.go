@@ -5,9 +5,9 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"html"
 	"log/slog"
 	randv2 "math/rand/v2"
 	"net/url"
@@ -35,6 +35,7 @@ type Config struct {
 	PollTimeout      int
 	Browsers         map[int64]*luxmed.Browser
 	MiniApp          *luxmed.MiniApp
+	MiniAppLink      string // t.me direct link to the Mini App; enables opening one slot from a widget.
 	MenuClient       tgbotapi.HTTPClient
 }
 
@@ -175,48 +176,46 @@ func (b *Bot) NotifyAppointments(ctx context.Context, user domain.User, watch do
 	msg := tgbotapi.NewMessage(user.TelegramChatID, text)
 	msg.ParseMode = tgbotapi.ModeHTML
 	msg.DisableWebPagePreview = true
+	count := max(total, len(histories))
 	booking := miniAppButton{InlineKeyboardButton: tgbotapi.NewInlineKeyboardButtonURL(
 		b.catalog.T(user.Locale, "button.book_portal"), portalURL(histories[0].BookingURL),
 	)}
-	details := b.actionButton(user, "button.show_watch", fmt.Sprintf("watch:show:%d", watch.ID))
-	keyboard := [][]miniAppButton{{booking}, {details}}
+	keyboard := [][]miniAppButton{{booking}}
+	var options []miniAppButton
+	if count > min(shown, notificationCoupons) {
+		options = append(options, b.actionButton(user, "button.all_options", fmt.Sprintf("options:%d:0", watch.ID)))
+	}
 	if b.cfg.MiniApp != nil && b.cfg.Browsers[user.TelegramUserID] != nil {
 		results := newMiniAppButton(b.catalog.T(user.Locale, "button.slot_results"), b.dashboardURL(user, "history"))
 		results.WidgetAction = "app:history"
-		keyboard[1] = []miniAppButton{results}
-		keyboard = append(keyboard, []miniAppButton{details})
+		options = append(options, results)
 	}
-	if max(total, len(histories)) > shown {
-		keyboard[1] = append(keyboard[1], b.actionButton(user, "button.all_options", fmt.Sprintf("options:%d:0", watch.ID)))
+	if len(options) > 0 {
+		keyboard = append(keyboard, options)
 	}
-	keyboard = append(keyboard, []miniAppButton{
-		b.actionButton(user, "button.pause", fmt.Sprintf("watch:pause:%d", watch.ID)),
-		b.actionButton(user, "button.check_again", fmt.Sprintf("watch:check:%d", watch.ID)),
-	})
+	keyboard = append(keyboard,
+		[]miniAppButton{b.actionButton(user, "button.show_watch", fmt.Sprintf("watch:show:%d", watch.ID))},
+		[]miniAppButton{
+			b.actionButton(user, "button.pause", fmt.Sprintf("watch:pause:%d", watch.ID)),
+			b.actionButton(user, "button.check_again", fmt.Sprintf("watch:check:%d", watch.ID)),
+		},
+	)
 	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": keyboard}
-	if max(total, len(histories)) > 1 {
-		// The widget card has room for one slot; grouped lists go in the text message.
-		res, err := b.api.Request(msg)
-		var sent struct {
-			MessageID int `json:"message_id"`
-		}
-		if err != nil || json.Unmarshal(res.Result, &sent) != nil || sent.MessageID <= 0 {
-			return 0, fmt.Errorf("Telegram notification delivery failed")
-		}
-		return sent.MessageID, nil
+
+	soonest := slices.Clone(histories)
+	slices.SortStableFunc(soonest, func(a, b domain.AppointmentHistory) int { return a.DateTime.Compare(b.DateTime) })
+	soonest = soonest[:min(len(soonest), notificationCoupons)]
+	// The card fits the search controls in one row; the text fallback keeps the keyboard as is.
+	actions := append(slices.Clone(keyboard[:len(keyboard)-2]), slices.Concat(keyboard[len(keyboard)-2:]...))
+	card := b.newWidgetCard(user.Locale, actions)
+	card.BookingHint = b.catalog.T(user.Locale, "notification.booking_hint")
+	for _, item := range soonest {
+		card.Slots = append(card.Slots, b.newWidgetSlot(user, item))
 	}
-	title := b.catalog.T(user.Locale, "notification.title", 1)
-	card := widgetCard{
-		Locale:      user.Locale,
-		Title:       title,
-		Body:        truncateMessage(procedures.WatchTitle(watch), 150),
-		Slot:        b.newWidgetSlot(user.Locale, histories[0]),
-		Actions:     keyboard[:2],
-		BookingHint: b.catalog.T(user.Locale, "notification.booking_hint"),
-		Failure:     b.catalog.T(user.Locale, "widget.error"),
+	if count > len(soonest) {
+		card.More = b.catalog.T(user.Locale, "notification.more", count-len(soonest))
 	}
-	caption, _ := b.appointmentNotification(user.Locale, watch, histories, total, 2)
-	messageID, err := b.sendWidget(card, caption, msg)
+	messageID, err := b.sendWidget(card, b.notificationCaption(user.Locale, watch, soonest[0], count), msg)
 	if err != nil {
 		return 0, fmt.Errorf("Telegram notification delivery failed")
 	}
@@ -382,7 +381,7 @@ func (b *Bot) handleCommand(ctx context.Context, user domain.User, msg *tgbotapi
 	case "language":
 		b.showLanguage(user)
 	case "help":
-		b.send(user, b.catalog.T(user.Locale, "help.text"), mainKeyboard(b.catalog, user.Locale))
+		b.sendOnboarding(user, "Luxmed Watcher", b.catalog.T(user.Locale, "help.text"), widgetKeyboard(mainKeyboard(b.catalog, user.Locale)))
 	case "cancel":
 		if !b.clearCredentialFlow(user.TelegramUserID) {
 			b.clearFlow(user.TelegramUserID)
@@ -497,14 +496,20 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	if cancelingLogin {
 		return
 	}
+	ctx, data = actionContext(ctx, data, cb.Message.MessageID)
+	b.handleAction(ctx, cb.From.ID, data, attempt)
+}
+
+// actionContext adds what a button's own message tells its action: the notification batch and the watch page.
+func actionContext(ctx context.Context, data string, messageID int) (context.Context, string) {
 	if strings.HasPrefix(data, "options:") && strings.Count(data, ":") == 2 {
 		// Only the opening button is on the notification itself. Page buttons carry its message ID.
-		data += ":" + strconv.Itoa(cb.Message.MessageID)
+		data += ":" + strconv.Itoa(messageID)
 	}
-	if isWatchPageAction(data) && cb.Message.MessageID > 0 {
-		ctx = context.WithValue(ctx, watchPageMessageKey{}, cb.Message.MessageID)
+	if isWatchPageAction(data) && messageID > 0 {
+		ctx = context.WithValue(ctx, watchPageMessageKey{}, messageID)
 	}
-	b.handleAction(ctx, cb.From.ID, data, attempt)
+	return ctx, data
 }
 
 func (b *Bot) handleAction(ctx context.Context, telegramID int64, data string, attempt *storage.ChromeChoice) (toast string) {
@@ -1824,9 +1829,21 @@ func (b *Bot) showWatch(ctx context.Context, user domain.User, watch domain.Watc
 	if watch.LastCheckedAt != nil {
 		last = appointmentDateTime(user.Locale, *watch.LastCheckedAt)
 	}
-	text := b.watchSummary(user, watch) + "\n" + b.catalog.T(user.Locale, "watch.status.checked",
+	summary := b.watchSummary(user, watch)
+	status := b.catalog.T(user.Locale, "watch.status.checked",
 		b.catalog.T(user.Locale, "watch.status."+string(watch.Status)), last, count)
+	text := summary + "\n" + status
 	markup := watchKeyboard(b.catalog, user.Locale, watch)
+	pass := widgetPass{
+		State:  b.catalog.T(user.Locale, "watch.status."+string(watch.Status)),
+		Tone:   string(watch.Status),
+		Figure: strconv.Itoa(watch.NextDays),
+		Unit:   b.catalog.T(user.Locale, "watch.days_unit"),
+	}
+	if watch.DateFrom != nil {
+		from := watch.DateFrom.In(luxmed.Location())
+		pass.Figure, pass.Unit = strconv.Itoa(from.Day()), strings.Split(b.catalog.T(user.Locale, "slot.months"), ",")[from.Month()-1]
+	}
 	if watch.LastError != "" {
 		key := "watch.check_failed"
 		switch watch.LastError {
@@ -1840,9 +1857,27 @@ func (b *Bot) showWatch(ctx context.Context, user domain.User, watch domain.Watc
 			key = "errors.luxmed_partial"
 		}
 		text += "\n" + b.catalog.T(user.Locale, key)
+		if watch.Status == domain.WatchStatusActive {
+			pass.Tone = "degraded"
+			if key == "errors.needs_login" || key == "errors.no_account" {
+				pass.Tone, pass.State = "problem", b.catalog.T(user.Locale, "watch.state_login")
+			}
+		}
+		pass.Lines = append(pass.Lines, b.catalog.T(user.Locale, key))
 		markup = b.withAccountRecovery(user, key, markup)
 	}
-	b.send(user, text, markup)
+	pass.Lines = append(pass.Lines, strings.Split(summary, "\n")...)
+	statusLines := strings.Split(status, "\n")
+	pass.Lines = append(pass.Lines, statusLines[min(1, len(statusLines)-1):]...)
+	fallback := tgbotapi.NewMessage(user.TelegramChatID, html.EscapeString(text))
+	fallback.ParseMode = tgbotapi.ModeHTML
+	fallback.ReplyMarkup = markup
+	caption := "<b>" + html.EscapeString(procedures.WatchTitle(watch)) + "</b>\n" + html.EscapeString(statusLines[0])
+	card := b.newWidgetCard(user.Locale, widgetKeyboard(markup))
+	card.Passes = []widgetPass{pass}
+	if _, err := b.sendWidget(card, caption, fallback); err != nil {
+		b.logger.Warn("send Telegram watch card failed")
+	}
 }
 
 func (b *Bot) showHistory(ctx context.Context, user domain.User) {

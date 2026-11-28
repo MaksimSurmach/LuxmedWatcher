@@ -3,6 +3,8 @@ package bot
 import (
 	"context"
 	"fmt"
+	"html"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -85,6 +87,8 @@ func (b *Bot) sendHistoryPage(
 	}
 	var lines []string
 	var bookingURL string
+	var coupons []widgetSlot
+	var previews []string
 	var hide []tgbotapi.InlineKeyboardButton
 	for i, item := range items {
 		when := b.slotDateTime(user.Locale, item.DateTime)
@@ -105,14 +109,27 @@ func (b *Bot) sendHistoryPage(
 		if item.Address != "" {
 			line += "\n" + truncateMessage(item.Address, 100)
 		}
+		coupon := b.newWidgetSlot(user, item)
+		coupon.Hide, coupon.HideLabel = hideAction(item.ID), b.catalog.T(user.Locale, "button.hide")
+		if item.ServiceName != "" {
+			coupon.Doctor = strings.Join(slices.DeleteFunc([]string{coupon.Doctor, truncateMessage(item.ServiceName, 64)}, func(s string) bool { return s == "" }), " · ")
+		}
 		switch {
 		case !item.DateTime.After(now):
 			line += "\n" + b.catalog.T(user.Locale, "history.expired")
+			coupon.Stamp = b.catalog.T(user.Locale, "history.stamp_past")
 		case item.Status == domain.HistoryStatusExpired:
 			line += "\n" + b.catalog.T(user.Locale, "history.unavailable")
+			coupon.Stamp = b.catalog.T(user.Locale, "history.stamp_gone")
 		case bookingURL == "":
 			bookingURL = portalURL(item.BookingURL)
 		}
+		coupons = append(coupons, coupon)
+		preview := when
+		if coupon.Stamp != "" {
+			preview += " · " + coupon.Stamp
+		}
+		previews = append(previews, preview)
 		if item.LastNotifiedAt != nil {
 			line += "\n" + b.catalog.T(user.Locale, "history.notified")
 		}
@@ -122,17 +139,30 @@ func (b *Bot) sendHistoryPage(
 			hideAction(item.ID),
 		))
 	}
-	rows := make([][]tgbotapi.InlineKeyboardButton, 0, 4)
+	// Coupons carry their own booking and hide buttons, so the card keeps paging and the menu in one
+	// row and stays under Telegram's 600px widget height; the text fallback keeps every row.
+	var top, bottom [][]tgbotapi.InlineKeyboardButton
 	if bookingURL != "" {
 		lines = append(lines, b.catalog.T(user.Locale, "notification.booking_hint"))
-		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		top = append(top, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonURL(b.catalog.T(user.Locale, "button.book_portal"), bookingURL),
 		))
 	}
-	rows = append(rows, hide)
 	if len(navigation) > 0 {
-		rows = append(rows, navigation)
+		bottom = append(bottom, navigation)
 	}
-	rows = append(rows, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.menu"), "menu")))
-	b.send(user, strings.Join(lines, "\n\n"), tgbotapi.NewInlineKeyboardMarkup(rows...))
+	bottom = append(bottom, tgbotapi.NewInlineKeyboardRow(tgbotapi.NewInlineKeyboardButtonData(b.catalog.T(user.Locale, "button.menu"), "menu")))
+	rows := slices.Concat(top, [][]tgbotapi.InlineKeyboardButton{hide}, bottom)
+	title := b.catalog.T(user.Locale, "button.history")
+	if empty == "options.empty" {
+		title = b.catalog.T(user.Locale, "button.all_options")
+	}
+	card := b.newWidgetCard(user.Locale, widgetKeyboard(tgbotapi.NewInlineKeyboardMarkup(slices.Concat(bottom...))))
+	card.Slots = coupons
+	fallback := tgbotapi.NewMessage(user.TelegramChatID, html.EscapeString(truncateMessage(strings.Join(lines, "\n\n"), 4000)))
+	fallback.ParseMode = tgbotapi.ModeHTML
+	fallback.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	if _, err := b.sendWidget(card, "<b>"+html.EscapeString(title)+"</b>\n"+html.EscapeString(strings.Join(previews, " · ")), fallback); err != nil {
+		b.logger.Warn("send Telegram history page failed")
+	}
 }

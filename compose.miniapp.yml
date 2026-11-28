@@ -2,6 +2,7 @@ services:
   luxmed-watcher:
     environment:
       LUXMED_MINIAPP_URL: ${LUXMED_MINIAPP_URL:?Mini App HTTPS origin required}
+      LUXMED_MINIAPP_LINK: ${LUXMED_MINIAPP_LINK:-}
       LUXMED_MINIAPP_AGENT_URL: http://miniapp-agent:8093
       LUXMED_BROWSER_ROUTES: ${LUXMED_BROWSER_ROUTES:-}
       LUXMED_INTERNAL_KEY: ${LUXMED_INTERNAL_KEY:-}

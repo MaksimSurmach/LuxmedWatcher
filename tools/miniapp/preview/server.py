@@ -59,9 +59,11 @@ def history(scenario, body):
     for row in slots(scenario):
         day = datetime.fromisoformat(row['DateTime']).astimezone(ZoneInfo('Europe/Warsaw')).date().isoformat()
         groups.setdefault(day, []).append(row)
-    requested = json.loads(body).get('Day', '')
+    params = json.loads(body)
+    requested = params.get('Day', '')
     day = requested if requested in groups else next(iter(groups), '')
-    return dict(Day=day, Days=[dict(Date=k, Count=len(v)) for k,v in groups.items()],
+    linked = next((row for row in groups.get(day, []) if row['ID'] == params.get('SlotID')), None)
+    return dict(Day=day, Linked=linked, Days=[dict(Date=k, Count=len(v)) for k,v in groups.items()],
                 Slots=groups.get(day, []) if requested else slots(scenario), More=False)
 
 def watches(scenario):

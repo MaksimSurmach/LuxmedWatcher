@@ -3,7 +3,9 @@ package bot
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,8 @@ import (
 	"github.com/maksimsurmach/luxmed-watcher/internal/domain"
 	"github.com/maksimsurmach/luxmed-watcher/internal/luxmed"
 )
+
+var widgetButton = regexp.MustCompile(`<button[^>]*data-callback="([^"]+)"[^>]*>([^<]+)</button>`)
 
 func slot(city, clinic, address, doctor string, day, hour, minute int) domain.AppointmentHistory {
 	return domain.AppointmentHistory{Appointment: domain.Appointment{
@@ -113,14 +117,14 @@ func TestNotificationLongListShowsCountPreviewAndFitsTelegram(t *testing.T) {
 	}
 }
 
-func TestMultiSlotNotificationUsesTextAndAllOptionsListsAddresses(t *testing.T) {
+func TestMultiSlotNotificationShowsCouponsAndHistoryListsAddresses(t *testing.T) {
 	ctx := t.Context()
 	var sent []string
 	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
 		_ = r.ParseForm()
 		switch r.URL.Path {
 		case "/botfake/sendWidget":
-			t.Error("grouped list sent through widget")
+			sent = append(sent, r.Form.Get("html"))
 		case "/botfake/sendMessage":
 			sent = append(sent, r.Form.Get("text"))
 		}
@@ -151,8 +155,8 @@ func TestMultiSlotNotificationUsesTextAndAllOptionsListsAddresses(t *testing.T) 
 	if id, err := b.NotifyAppointments(ctx, user, domain.Watch{ID: watchID, UserID: user.ID, Name: "W"}, items, 3); err != nil || id != 7 {
 		t.Fatalf("id=%d err=%v", id, err)
 	}
-	if len(sent) != 1 || !strings.Contains(sent[0], "11:00") {
-		t.Fatalf("short list lost slots: %q", sent)
+	if len(sent) != 1 || strings.Count(sent[0], `<a class="open"`) != 3 || !strings.Contains(sent[0], "11:00") {
+		t.Fatalf("short list lost coupons: %q", sent)
 	}
 	b.handleHistoryPage(ctx, user, fmt.Sprintf("history:%d:0", watchID))
 	if len(sent) != 2 || !strings.Contains(sent[1], "Main 1") || !strings.Contains(sent[1], "Side 2") {
@@ -168,13 +172,20 @@ func TestAllOptionsCallbackShowsAvailableSlotsFromItsNotification(t *testing.T) 
 	}
 	sent := make(chan message, 8)
 	b := testBotWithTelegram(t, func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/botfake/sendMessage" {
+		if r.URL.Path == "/botfake/sendMessage" || r.URL.Path == "/botfake/sendWidget" {
 			if err := r.ParseForm(); err != nil {
 				t.Error(err)
 			}
-			msg := message{text: r.Form.Get("text")}
-			if err := json.Unmarshal([]byte(r.Form.Get("reply_markup")), &msg.keyboard); err != nil {
-				t.Error(err)
+			msg := message{text: r.Form.Get("text") + r.Form.Get("caption") + r.Form.Get("html")}
+			if markup := r.Form.Get("reply_markup"); markup != "" {
+				if err := json.Unmarshal([]byte(markup), &msg.keyboard); err != nil {
+					t.Error(err)
+				}
+			}
+			// Widget cards carry their buttons in the HTML instead of a keyboard.
+			for _, m := range widgetButton.FindAllStringSubmatch(r.Form.Get("html"), -1) {
+				data := html.UnescapeString(m[1])
+				msg.keyboard.InlineKeyboard = append(msg.keyboard.InlineKeyboard, []tgbotapi.InlineKeyboardButton{{Text: html.UnescapeString(m[2]), CallbackData: &data}})
 			}
 			sent <- msg
 		}
@@ -274,7 +285,7 @@ func TestAllOptionsCallbackShowsAvailableSlotsFromItsNotification(t *testing.T) 
 	notification := nextMessage()
 	action := button(notification, "All options")
 	if action == "" || !strings.Contains(notification.text, b.catalog.T(user.Locale, "notification.title", len(batch))) ||
-		!strings.Contains(notification.text, "Street 05") || strings.Contains(notification.text, "Street 06") {
+		!strings.Contains(notification.text, "Street 03") || strings.Contains(notification.text, "Street 04") {
 		t.Fatalf("unexpected long notification: %q (action %q)", notification.text, action)
 	}
 	click := func(messageID int, action string) {
@@ -321,7 +332,7 @@ func TestAllOptionsCallbackShowsAvailableSlotsFromItsNotification(t *testing.T) 
 	if !strings.Contains(third.text, "Street 11") || strings.Contains(third.text, "Street 06") {
 		t.Errorf("unexpected third page: %q", third.text)
 	}
-	click(52, button(third, b.catalog.T(user.Locale, "button.hide_history", 1)))
+	click(52, button(third, b.catalog.T(user.Locale, "button.hide")))
 	if msg := nextMessage(); msg.text != b.catalog.T(user.Locale, "options.empty") {
 		t.Errorf("hiding the last slot should leave the page empty: %q", msg.text)
 	} else {

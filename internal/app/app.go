@@ -113,6 +113,7 @@ func (a *App) Run(ctx context.Context) error {
 		PollTimeout:      a.cfg.PollTimeout,
 		Browsers:         browsers,
 		MiniApp:          miniApp,
+		MiniAppLink:      a.cfg.MiniAppLink,
 		MenuClient:       telegramHTTP{ctx: ctx, client: &http.Client{Timeout: 3 * time.Second}},
 	}, a.logger)
 	runner := scheduler.NewRunner(db, cryptor, tgBot, a.cfg.MinimumInterval, a.cfg.NotificationCooldown, a.cfg.EnableRawLuxMedPayload)

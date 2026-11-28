@@ -1,5 +1,6 @@
 {
   "slot.weekdays": "Nd,Pn,Wt,Śr,Cz,Pt,Sb",
+  "slot.months": "sty,lut,mar,kwi,maj,cze,lip,sie,wrz,paź,lis,gru",
   "toast.checking": "Sprawdzam…",
   "language.name": "Polski",
   "input.all": "wszystkie",
@@ -45,6 +46,9 @@
   "button.next": "Dalej",
   "button.next_days": "Dni: %d",
   "button.book_portal": "Otwórz Portal Pacjenta LUX MED",
+  "button.hide": "Ukryj",
+  "widget.error": "Nie udało się wykonać tej akcji. Spróbuj ponownie lub użyj przycisków poniżej.",
+  "button.book": "Umów się",
   "button.all_options": "Wszystkie terminy",
   "button.slot_results": "Zobacz terminy",
   "button.open_app": "Otwórz aplikację",
@@ -139,6 +143,10 @@
   "notification.booking_hint": "Dostępność mogła się zmienić. Sprawdź termin i umów wizytę w Portalu Pacjenta LUX MED.",
   "notification.title": "Znaleziono wolne terminy · %d",
   "notification.more": "Inne terminy: %d",
+  "history.stamp_past": "Minął",
+  "history.stamp_gone": "Niedostępny",
+  "notification.reconnect_title": "Wymagane ponowne logowanie",
+  "notification.soonest": "Najbliższy: %s",
   "settings.city_saved": "Miasto zapisane: %s.",
   "settings.title": "Ustawienia",
   "watch.checked": "Sprawdzanie zakończone. Pasujące terminy: %d.",
@@ -151,6 +159,8 @@
   "watch.deleted": "Wyszukiwanie usunięte.",
   "watch.list.item": "%s\nStatus: %s\nCel: %s / %s\nOstatnie sprawdzenie: %s\nZnaleziono: %d",
   "watch.paused": "Wyszukiwanie wstrzymane.",
+  "watch.state_login": "Wymaga logowania",
+  "watch.days_unit": "dni",
   "watch.step_expired": "Ten krok jest już nieaktualny.",
   "watch.resumed": "Wyszukiwanie wznowione.",
   "watch.status.active": "Aktywne",
@@ -160,6 +170,5 @@
   "command.help": "Wyświetl pomoc",
   "widget.start": "Obserwuj terminy w LUX MED i otrzymuj powiadomienia w Telegramie, gdy pojawi się pasujący termin.",
   "widget.start_connect": "Połącz konto LUX MED i utwórz pierwsze wyszukiwanie. Możesz wybrać Chrome lub zapisany login i hasło.",
-  "widget.connect": "Otwórz LUX MED, zaloguj się i w razie potrzeby potwierdź logowanie. Następnie zamknij okno logowania. Nie wysyłaj na tym czacie loginu ani hasła do LUX MED.",
-  "widget.error": "Nie udało się wykonać tej akcji. Spróbuj ponownie lub użyj przycisków poniżej."
+  "widget.connect": "Otwórz LUX MED, zaloguj się i w razie potrzeby potwierdź logowanie. Następnie zamknij okno logowania. Nie wysyłaj na tym czacie loginu ani hasła do LUX MED."
 }

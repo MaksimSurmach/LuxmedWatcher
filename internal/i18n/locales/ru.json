@@ -1,5 +1,6 @@
 {
   "slot.weekdays": "Вс,Пн,Вт,Ср,Чт,Пт,Сб",
+  "slot.months": "янв,фев,мар,апр,мая,июн,июл,авг,сен,окт,ноя,дек",
   "toast.checking": "Проверяю…",
   "language.name": "Русский",
   "input.all": "все",
@@ -45,6 +46,9 @@
   "button.next": "Далее",
   "button.next_days": "Дней: %d",
   "button.book_portal": "Открыть портал LUX MED",
+  "button.hide": "Скрыть",
+  "widget.error": "Не удалось выполнить действие. Повторите попытку или используйте кнопки ниже.",
+  "button.book": "Записаться",
   "button.all_options": "Все варианты",
   "button.slot_results": "Смотреть слоты",
   "button.open_app": "Открыть приложение",
@@ -139,6 +143,10 @@
   "notification.booking_hint": "Доступность могла измениться. Проверьте время и оформите запись на портале LUX MED.",
   "notification.title": "Свободное время найдено · %d",
   "notification.more": "Другие варианты: %d",
+  "history.stamp_past": "Прошло",
+  "history.stamp_gone": "Недоступно",
+  "notification.reconnect_title": "Нужен повторный вход",
+  "notification.soonest": "Ближайшее: %s",
   "settings.city_saved": "Город сохранён: %s.",
   "settings.title": "Настройки",
   "watch.checked": "Проверка завершена. Подходящих вариантов: %d.",
@@ -151,6 +159,8 @@
   "watch.deleted": "Поиск удалён.",
   "watch.list.item": "%s\nСтатус: %s\nЦель: %s / %s\nПоследняя проверка: %s\nНайдено: %d",
   "watch.paused": "Поиск поставлен на паузу.",
+  "watch.state_login": "Нужен вход",
+  "watch.days_unit": "дней",
   "watch.step_expired": "Этот шаг уже завершён.",
   "watch.resumed": "Поиск возобновлён.",
   "watch.status.active": "Активно",
@@ -160,6 +170,5 @@
   "command.help": "Показать справку",
   "widget.start": "Отслеживайте записи в LUX MED и получайте уведомления в Telegram, когда появляется подходящее время.",
   "widget.start_connect": "Подключите аккаунт LUX MED и создайте первый поиск. Для входа можно выбрать Chrome или сохранённые логин и пароль.",
-  "widget.connect": "Откройте LUX MED, войдите и при необходимости подтвердите вход. Затем закройте окно входа. Не отправляйте логин и пароль LUX MED в этот чат.",
-  "widget.error": "Не удалось выполнить действие. Повторите попытку или используйте кнопки ниже."
+  "widget.connect": "Откройте LUX MED, войдите и при необходимости подтвердите вход. Затем закройте окно входа. Не отправляйте логин и пароль LUX MED в этот чат."
 }

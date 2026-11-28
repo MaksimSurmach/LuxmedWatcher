@@ -1,5 +1,6 @@
 {
   "slot.weekdays": "Sun,Mon,Tue,Wed,Thu,Fri,Sat",
+  "slot.months": "Jan,Feb,Mar,Apr,May,Jun,Jul,Aug,Sep,Oct,Nov,Dec",
   "toast.checking": "Checking…",
   "language.name": "English",
   "input.all": "all",
@@ -45,6 +46,9 @@
   "button.next": "Next",
   "button.next_days": "Days: %d",
   "button.book_portal": "Open LUX MED portal",
+  "button.hide": "Hide",
+  "widget.error": "This action could not be completed. Try again or use the buttons below.",
+  "button.book": "Book",
   "button.all_options": "All options",
   "button.slot_results": "View slots",
   "button.open_app": "Open app",
@@ -139,6 +143,10 @@
   "notification.booking_hint": "Availability may have changed. Check the time and book in the LUX MED portal.",
   "notification.title": "Appointment times found · %d",
   "notification.more": "More options: %d",
+  "history.stamp_past": "Past",
+  "history.stamp_gone": "Gone",
+  "notification.reconnect_title": "Sign-in required",
+  "notification.soonest": "Soonest: %s",
   "settings.city_saved": "City saved: %s.",
   "settings.title": "Settings",
   "watch.checked": "Check complete. Matching times: %d.",
@@ -151,6 +159,8 @@
   "watch.deleted": "Watch deleted.",
   "watch.list.item": "%s\nStatus: %s\nTarget: %s / %s\nLast check: %s\nFound: %d",
   "watch.paused": "Watch paused.",
+  "watch.state_login": "Sign-in needed",
+  "watch.days_unit": "days",
   "watch.step_expired": "This step has expired.",
   "watch.resumed": "Watch resumed.",
   "watch.status.active": "Active",
@@ -160,6 +170,5 @@
   "command.help": "Show help",
   "widget.start": "Watch LUX MED for appointments and get a Telegram alert when a slot matches your search.",
   "widget.start_connect": "Connect your LUX MED account and create your first watch. You can choose Chrome or a saved login and password.",
-  "widget.connect": "Open LUX MED, sign in, and complete verification if prompted. Close the sign-in window when finished. Do not send your LUX MED login or password in this chat.",
-  "widget.error": "This action could not be completed. Try again or use the buttons below."
+  "widget.connect": "Open LUX MED, sign in, and complete verification if prompted. Close the sign-in window when finished. Do not send your LUX MED login or password in this chat."
 }

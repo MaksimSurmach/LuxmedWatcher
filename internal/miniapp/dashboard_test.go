@@ -915,3 +915,76 @@ func TestDashboardProcedurePicksUseOwnSearchesAndBrowser(t *testing.T) {
 		}
 	})
 }
+
+func TestCouponResolvesAvailableRowOutsideVisiblePage(t *testing.T) {
+	ctx := t.Context()
+	db, err := storage.Open(ctx, filepath.Join(t.TempDir(), "coupons.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	d := dashboard{db: db}
+	owner := func(telegramID int64) domain.User {
+		t.Helper()
+		u, err := db.UpsertTelegramUser(ctx, domain.User{TelegramUserID: telegramID, Status: domain.UserStatusActive})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	watch := func(u domain.User) int64 {
+		t.Helper()
+		id, err := db.CreateWatch(ctx, domain.Watch{UserID: u.ID, CityID: 1, ServiceID: 2})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	user := owner(1)
+	first, overlap, foreign := watch(user), watch(user), watch(owner(2))
+	tomorrow := time.Now().In(luxmed.Location()).AddDate(0, 0, 1)
+	start := time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, luxmed.Location())
+	put := func(w int64, minute int) int64 {
+		t.Helper()
+		row, _, err := db.UpsertAppointmentHistory(ctx, w, domain.Appointment{Fingerprint: fmt.Sprint(minute), DateTime: start.Add(time.Duration(minute) * time.Minute)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return row.ID
+	}
+	for i := range 25 {
+		put(first, i)
+	}
+	last := put(first, 25)
+	alias := put(overlap, 25)
+	other := put(foreign, 25)
+	load := func(id int64) *dashboardHistory {
+		t.Helper()
+		body := fmt.Sprintf(`{"Day":%q,"SlotID":%d}`, start.Format(time.DateOnly), id)
+		r := httptest.NewRequest("POST", dashboardPrefix+"history", strings.NewReader(body))
+		w := httptest.NewRecorder()
+		d.history(w, r, user)
+		var result struct {
+			Linked *dashboardHistory
+			Slots  []dashboardHistory
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil || w.Code != 200 || len(result.Slots) != 24 {
+			t.Fatalf("response %d: %v", w.Code, err)
+		}
+		return result.Linked
+	}
+	for _, id := range []int64{last, alias} {
+		if row := load(id); row == nil || row.ID != id {
+			t.Fatalf("missed available coupon %d: %+v", id, row)
+		}
+	}
+	if row := load(other); row != nil {
+		t.Fatal("another user's coupon returned")
+	}
+	if err := db.HideAppointmentHistory(ctx, user.ID, last); err != nil {
+		t.Fatal(err)
+	}
+	if row := load(last); row != nil {
+		t.Fatal("hidden coupon returned")
+	}
+}

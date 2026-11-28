@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -208,15 +209,16 @@ func widgetKeyboard(keyboard tgbotapi.InlineKeyboardMarkup) [][]miniAppButton {
 	return rows
 }
 
+// sendOnboarding sends a text card: a bold title, the body, and actions in the keyboard only.
 func (b *Bot) sendOnboarding(user domain.User, title, body string, actions [][]miniAppButton) {
-	text := title
+	text := "<b>" + html.EscapeString(title) + "</b>"
 	if body != "" {
-		text += "\n\n" + body
+		text += "\n\n" + html.EscapeString(body)
 	}
 	msg := tgbotapi.NewMessage(user.TelegramChatID, text)
+	msg.ParseMode = tgbotapi.ModeHTML
 	msg.ReplyMarkup = map[string][][]miniAppButton{"inline_keyboard": actions}
-	card := widgetCard{Locale: user.Locale, Title: title, Body: body, Actions: actions, Failure: b.catalog.T(user.Locale, "widget.error")}
-	if _, err := b.sendWidget(card, text, msg); err != nil {
+	if _, err := b.api.Request(msg); err != nil {
 		b.logger.Warn("send Telegram onboarding message failed")
 	}
 }
