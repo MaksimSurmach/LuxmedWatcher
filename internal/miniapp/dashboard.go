@@ -263,17 +263,31 @@ func (d *dashboard) history(w http.ResponseWriter, r *http.Request, user domain.
 
 func (d *dashboard) cities(w http.ResponseWriter, r *http.Request, user domain.User) {
 	ctx := r.Context()
-	items, err := d.db.Cities(ctx, 300)
-	if err == nil && len(items) == 0 {
-		err = d.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
-			var err error
-			items, err = client.GetCities(ctx)
-			return err
-		})
-		if err == nil {
-			err = d.db.UpsertCities(ctx, items)
-		}
+	var input struct{ Refresh bool }
+	if !decodeDashboard(w, r, &input) {
+		return
 	}
+	cached, err := d.db.Cities(ctx, 0)
+	if err != nil || (!input.Refresh && len(cached) > 0) {
+		dashboardResult(w, cached, err)
+		return
+	}
+	err = d.runner.WithLuxMedClient(ctx, user, func(client luxmed.Client) error {
+		items, err := client.GetCities(ctx)
+		if err != nil {
+			return err
+		}
+		return d.db.ReplaceCityCatalog(ctx, items)
+	})
+	if err != nil {
+		if len(cached) > 0 {
+			reply(w, http.StatusOK, cached)
+		} else {
+			dashboardResult(w, nil, err)
+		}
+		return
+	}
+	items, err := d.db.Cities(ctx, 0)
 	dashboardResult(w, items, err)
 }
 

@@ -7,7 +7,6 @@ const announcement = document.querySelector('#announcement');
 const portal = 'https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Reservation';
 const referralsPortal = 'https://portalpacjenta.luxmed.pl/PatientPortal/NewPortal/Page/Referrals';
 const icons = {
-  user: '<circle cx="12" cy="8.5" r="3.75"/><path d="M4.75 19.5c1.2-3.3 4-5 7.25-5s6.05 1.7 7.25 5"/>',
   plus: '<path d="M12 5v14M5 12h14"/>',
   link: '<path d="M7.5 16.5l9-9M9.5 7.5h7v7"/>',
   back: '<path d="M14.5 6 8.5 12l6 6"/>',
@@ -57,6 +56,7 @@ let weekdays;
 let state;
 let apiToken;
 let cities;
+let cityRequest;
 let tab = 'history';
 let flashTimer;
 let renderID = 0;
@@ -72,13 +72,7 @@ function renderLanguage() {
   for (const button of navigation.querySelectorAll('.switch button')) {
     button.firstElementChild.textContent = titleFor(button.dataset.tab);
   }
-  const me = navigation.querySelector('.me');
-  me.setAttribute('aria-label', titleFor('settings'));
-  me.title = titleFor('settings');
-  // Initials from Telegram make the account button yours; the drawn person stays as the fallback.
-  const user = telegram?.initDataUnsafe?.user;
-  const initials = [user?.first_name, user?.last_name].map((name) => name?.trim()?.[0] ?? '').join('').toLocaleUpperCase(language);
-  if (initials) me.innerHTML = `<span class="initials" aria-hidden="true">${escape(initials)}</span>`;
+  navigation.querySelector('[data-tab="settings"]').textContent = titleFor('settings');
 }
 
 // The switch shows how much each side holds on every screen: open times found, searches saved.
@@ -327,7 +321,11 @@ function bindAccount() {
     openLoginViewer(issueTicket, async () => {
       try {
         for (let retry = 0; ; retry++) {
-          try { await api('account'); break; }
+          try {
+            const account = await api('account');
+            if (account.state !== 'needs_login') refreshCitiesAfterLogin();
+            break;
+          }
           catch (err) {
             if (err.key !== 'error.browser_busy' || retry >= 5) throw err;
             await new Promise(resolve => setTimeout(resolve, 700));
@@ -360,6 +358,7 @@ function bindAccount() {
             Login: form.elements.login.value, Password: form.elements.password.value,
             CredentialRevision, CredentialSaveRevision,
           }, attempt.id);
+          refreshCitiesAfterLogin();
         } finally {
           form.elements.password.value = '';
         }
@@ -700,9 +699,24 @@ async function historyScreen(id) {
   await append(0);
 }
 
-async function getCities() {
-  if (!cities) cities = await api('cities');
-  return cities ?? [];
+async function getCities(refresh = false) {
+  if (!refresh && cities) return cities;
+  cityRequest ??= api('cities', { Refresh: true }).then(items => {
+    cities = items ?? [];
+    main.querySelector('#preferences [name="city"]')?.dispatchEvent(new Event('cities-loaded'));
+    return cities;
+  }).finally(() => { cityRequest = undefined; });
+  return cityRequest;
+}
+
+function refreshCitiesAfterLogin() {
+  // A launch-time request may still be finishing with the old account session.
+  void Promise.resolve(cityRequest).catch(() => {}).then(() => getCities(true)).catch(() => {});
+}
+
+function preferredCity(items) {
+  if (state.CityID) return items.find(city => city.ID === state.CityID) ?? { ID: state.CityID, Name: state.CityName };
+  return items.find(city => city.Name.trim().toLowerCase() === 'warszawa');
 }
 
 const option = (id, name) => `<option value="${Number(id)}">${escape(name)}</option>`;
@@ -729,26 +743,35 @@ async function settingsScreen(id) {
   const form = main.querySelector('#preferences');
   const error = form.querySelector('[data-error]');
   const loadCities = main.querySelector('#load-cities');
-  const selected = { ID: state.CityID, Name: state.CityName };
+  const select = form.elements.city;
+  let edited = false;
+  select.onchange = () => { edited = true; };
   function fillCities(items) {
-    const select = form.elements.city;
-    const value = select.value || String(selected.ID ?? 0);
-    select.innerHTML = cityOptions(items, selected, t('settings.no_city'));
-    select.value = value;
+    if (id !== renderID) return;
+    const selected = edited ? { ID: Number(select.value), Name: select.selectedOptions[0]?.textContent } : preferredCity(items);
+    const available = selected?.ID && !items.some(city => city.ID === selected.ID) ? [selected, ...items] : items;
+    select.innerHTML = available.map(city => option(city.ID, city.Name)).join('');
+    if (selected?.ID) select.value = String(selected.ID);
+    else {
+      select.prepend(new Option(cities ? t('editor.choose_city') : 'Warszawa', '0'));
+      select.value = '0';
+    }
+    loadCities.hidden = true;
   }
   fillCities(cities ?? []);
-  loadCities.hidden = true;
-  if (!cities) {
-    getCities().then((items) => { if (id === renderID) fillCities(items); })
-      .catch((failure) => { if (id === renderID) { loadCities.hidden = false; error.textContent = errorText(failure); } });
-  }
-  loadCities.onclick = () => void run(loadCities, async () => {
-    const items = await getCities();
-    if (id === renderID) {
-      fillCities(items);
-      loadCities.hidden = true;
+  // The same form may stay open while the LUX MED account reconnects.
+  select.addEventListener('cities-loaded', () => fillCities(cities ?? []));
+  const load = async () => {
+    try { fillCities(await getCities()); }
+    catch (failure) {
+      if (id === renderID) {
+        loadCities.hidden = false;
+        error.textContent = errorText(failure);
+      }
     }
-  }, error);
+  };
+  if (!cities) void load();
+  loadCities.onclick = () => void run(loadCities, load, error);
   form.elements.locale.value = Object.hasOwn(languages, state.Locale) ? state.Locale : language;
   form.onsubmit = (event) => {
     event.preventDefault();
@@ -774,7 +797,7 @@ async function editor(watch, focusPicks = false) {
     return;
   }
   if (id !== renderID) return;
-  const city = watch ? { ID: watch.CityID, Name: watch.CityName } : { ID: state.CityID, Name: state.CityName };
+  const city = watch ? { ID: watch.CityID, Name: watch.CityName } : preferredCity(options) ?? {};
   let service = watch ? { ID: watch.ServiceID, Name: watch.ServiceName } : null;
   let doctor = watch?.DoctorID ?? 0;
   let facilities = new Set(watch?.FacilityIDs);
@@ -1265,7 +1288,7 @@ function applySnapshot(latest) {
   state = latest;
   setCount('watches', state.Watches?.length ?? 0);
   setCount('history', state.AvailableSlots);
-  setLanguage(state.Locale);
+  setLanguage(Object.hasOwn(languages, state.Locale) ? state.Locale : initialLanguage(telegram));
   renderLanguage();
 }
 
@@ -1288,6 +1311,7 @@ async function start() {
   const initial = params.get('tab') === 'home' ? 'history' : params.get('tab');
   try {
     ({ token: apiToken } = await api('auth'));
+    void getCities(true).catch(() => {});
     await update(tabs.includes(initial) ? initial : 'history');
   } catch (error) {
     screenError('Luxmed Watcher', error, error?.key === 'error.access_denied' ? undefined : start);

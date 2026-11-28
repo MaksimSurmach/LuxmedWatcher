@@ -86,12 +86,19 @@ nav {
 .switch [aria-current="page"] .count { color: inherit; opacity: .75; }
 .count { font: 600 .8rem/1 var(--figures); color: var(--red); }
 .count:empty { display: none; }
-.me {
-  display: grid; place-items: center; width: 44px; height: 44px; flex: none; border: 1px solid var(--line); border-radius: 50%;
-  background: var(--stock); color: var(--ink); cursor: pointer;
+.settings-tab {
+  flex: none; min-height: 44px; padding: 6px 12px; border: 1px solid var(--line); border-radius: 10px;
+  background: var(--stock); color: var(--ink); font-size: .92rem; font-weight: 650;
 }
-.me[aria-current="page"] { background: var(--act); color: var(--act-ink); border-color: var(--act); }
-.initials { font-size: .85rem; font-weight: 700; letter-spacing: .02em; }
+.settings-tab[aria-current="page"] { background: var(--act); color: var(--act-ink); border-color: var(--act); }
+@media (max-width: 420px) {
+  nav, .switch { gap: 2px; }
+  .switch button, .settings-tab { padding-inline: 6px; }
+}
+@media (max-width: 360px) {
+  nav { flex-wrap: wrap; }
+  .settings-tab { margin-inline-start: auto; }
+}
 
 /* Status: is it still watching, and does it need me? */
 .status-line { display: flex; align-items: flex-start; gap: 8px; margin: 12px 0 14px; color: var(--muted); font-size: .88rem; }
@@ -207,7 +214,7 @@ nav {
 .account-panel { padding: 16px; border-radius: 12px; background: var(--tint); }
 .account[data-state="connected"] .account-panel { background: var(--ok-wash); }
 .account:is([data-state="needs_login"], [data-state="search_paused"]) .account-panel { background: var(--red-wash); }
-.account .account-status { display: flex; padding: 0; border-radius: 0; background: transparent; font-size: 1.25rem; }
+.account .account-status { display: flex; white-space: normal; padding: 0; border-radius: 0; background: transparent; font-size: 1.25rem; }
 .account-activity { display: grid; gap: 6px; margin: 12px 0 0; }
 .account-activity:empty { display: none; }
 .account-activity div { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 2px 12px; }
