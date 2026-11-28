@@ -1,0 +1,509 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-11-28T08:48:13+00:00",
+  "title": "Design System: Luxmed Watcher",
+  "extensions": {
+    "colorMeta": {
+      "navy-ink": {
+        "role": "primary",
+        "displayName": "Navy Ink",
+        "canonical": "#1f2f57",
+        "dark": "#dfe5f5",
+        "tonalRamp": [
+          "oklch(15% 0.037 266)",
+          "oklch(27% 0.048 266)",
+          "oklch(39% 0.060 266)",
+          "oklch(51% 0.071 266)",
+          "oklch(63% 0.067 266)",
+          "oklch(75% 0.056 266)",
+          "oklch(86% 0.045 266)",
+          "oklch(95% 0.037 266)"
+        ]
+      },
+      "carbon-purple": {
+        "role": "secondary",
+        "displayName": "Carbon Purple",
+        "canonical": "#5a4a8a",
+        "dark": "#b9acef",
+        "tonalRamp": [
+          "oklch(15% 0.050 293)",
+          "oklch(27% 0.066 293)",
+          "oklch(39% 0.082 293)",
+          "oklch(51% 0.097 293)",
+          "oklch(63% 0.092 293)",
+          "oklch(75% 0.076 293)",
+          "oklch(86% 0.062 293)",
+          "oklch(95% 0.050 293)"
+        ]
+      },
+      "ticket-red": {
+        "role": "tertiary",
+        "displayName": "Ticket Red",
+        "canonical": "#b8392f",
+        "dark": "#f08a7e",
+        "tonalRamp": [
+          "oklch(15% 0.081 28)",
+          "oklch(27% 0.106 28)",
+          "oklch(39% 0.131 28)",
+          "oklch(51% 0.157 28)",
+          "oklch(63% 0.148 28)",
+          "oklch(75% 0.123 28)",
+          "oklch(86% 0.100 28)",
+          "oklch(95% 0.081 28)"
+        ]
+      },
+      "red-wash": {
+        "role": "tertiary",
+        "displayName": "Red Wash",
+        "canonical": "#f8e9e6",
+        "dark": "#3a2224",
+        "tonalRamp": [
+          "oklch(15% 0.008 31)",
+          "oklch(27% 0.011 31)",
+          "oklch(39% 0.013 31)",
+          "oklch(51% 0.016 31)",
+          "oklch(63% 0.015 31)",
+          "oklch(75% 0.013 31)",
+          "oklch(86% 0.010 31)",
+          "oklch(95% 0.008 31)"
+        ]
+      },
+      "warm-paper": {
+        "role": "neutral",
+        "displayName": "Warm Paper",
+        "canonical": "#f3f1ec",
+        "dark": "#11141c",
+        "tonalRamp": [
+          "oklch(15% 0.003 89)",
+          "oklch(27% 0.004 89)",
+          "oklch(39% 0.006 89)",
+          "oklch(51% 0.007 89)",
+          "oklch(63% 0.006 89)",
+          "oklch(75% 0.005 89)",
+          "oklch(86% 0.004 89)",
+          "oklch(95% 0.003 89)"
+        ]
+      },
+      "coupon-stock": {
+        "role": "neutral",
+        "displayName": "Coupon Stock",
+        "canonical": "#ffffff",
+        "dark": "#1a1f2c",
+        "tonalRamp": [
+          "oklch(15% 0.000 90)",
+          "oklch(27% 0.000 90)",
+          "oklch(39% 0.000 90)",
+          "oklch(51% 0.000 90)",
+          "oklch(63% 0.000 90)",
+          "oklch(75% 0.000 90)",
+          "oklch(86% 0.000 90)",
+          "oklch(95% 0.000 90)"
+        ]
+      },
+      "body-ink": {
+        "role": "neutral",
+        "displayName": "Body Ink",
+        "canonical": "#27304a",
+        "dark": "#d3d9e8",
+        "tonalRamp": [
+          "oklch(15% 0.024 269)",
+          "oklch(27% 0.031 269)",
+          "oklch(39% 0.039 269)",
+          "oklch(51% 0.046 269)",
+          "oklch(63% 0.044 269)",
+          "oklch(75% 0.036 269)",
+          "oklch(86% 0.029 269)",
+          "oklch(95% 0.024 269)"
+        ]
+      },
+      "muted-ink": {
+        "role": "neutral",
+        "displayName": "Muted Ink",
+        "canonical": "#5f6884",
+        "dark": "#98a1b8",
+        "tonalRamp": [
+          "oklch(15% 0.022 271)",
+          "oklch(27% 0.029 271)",
+          "oklch(39% 0.036 271)",
+          "oklch(51% 0.043 271)",
+          "oklch(63% 0.041 271)",
+          "oklch(75% 0.034 271)",
+          "oklch(86% 0.028 271)",
+          "oklch(95% 0.022 271)"
+        ]
+      },
+      "perforation": {
+        "role": "neutral",
+        "displayName": "Perforation",
+        "canonical": "#d7dbe5",
+        "dark": "#2b3245",
+        "tonalRamp": [
+          "oklch(15% 0.007 268)",
+          "oklch(27% 0.009 268)",
+          "oklch(39% 0.011 268)",
+          "oklch(51% 0.014 268)",
+          "oklch(63% 0.013 268)",
+          "oklch(75% 0.011 268)",
+          "oklch(86% 0.009 268)",
+          "oklch(95% 0.007 268)"
+        ]
+      },
+      "rule-line": {
+        "role": "neutral",
+        "displayName": "Rule Line",
+        "canonical": "#c9cfdc",
+        "dark": "#3a4258",
+        "tonalRamp": [
+          "oklch(15% 0.009 266)",
+          "oklch(27% 0.012 266)",
+          "oklch(39% 0.015 266)",
+          "oklch(51% 0.018 266)",
+          "oklch(63% 0.017 266)",
+          "oklch(75% 0.014 266)",
+          "oklch(86% 0.012 266)",
+          "oklch(95% 0.009 266)"
+        ]
+      },
+      "ink-tint": {
+        "role": "neutral",
+        "displayName": "Ink Tint",
+        "canonical": "#e8ebf3",
+        "dark": "#252c3e",
+        "tonalRamp": [
+          "oklch(15% 0.006 270)",
+          "oklch(27% 0.007 270)",
+          "oklch(39% 0.009 270)",
+          "oklch(51% 0.011 270)",
+          "oklch(63% 0.010 270)",
+          "oklch(75% 0.008 270)",
+          "oklch(86% 0.007 270)",
+          "oklch(95% 0.006 270)"
+        ]
+      },
+      "watching-green": {
+        "role": "neutral",
+        "displayName": "Watching Green",
+        "canonical": "#2f7a59",
+        "dark": "#7ccfa6",
+        "tonalRamp": [
+          "oklch(15% 0.045 162)",
+          "oklch(27% 0.059 162)",
+          "oklch(39% 0.073 162)",
+          "oklch(51% 0.087 162)",
+          "oklch(63% 0.082 162)",
+          "oklch(75% 0.068 162)",
+          "oklch(86% 0.055 162)",
+          "oklch(95% 0.045 162)"
+        ]
+      },
+      "green-wash": {
+        "role": "neutral",
+        "displayName": "Green Wash",
+        "canonical": "#e3f1ea",
+        "dark": "#1d3429",
+        "tonalRamp": [
+          "oklch(15% 0.009 165)",
+          "oklch(27% 0.011 165)",
+          "oklch(39% 0.014 165)",
+          "oklch(51% 0.017 165)",
+          "oklch(63% 0.016 165)",
+          "oklch(75% 0.013 165)",
+          "oklch(86% 0.011 165)",
+          "oklch(95% 0.009 165)"
+        ]
+      },
+      "caution-amber": {
+        "role": "neutral",
+        "displayName": "Caution Amber",
+        "canonical": "#8f5c00",
+        "dark": "#e8b86a",
+        "tonalRamp": [
+          "oklch(15% 0.054 72)",
+          "oklch(27% 0.071 72)",
+          "oklch(39% 0.088 72)",
+          "oklch(51% 0.105 72)",
+          "oklch(63% 0.100 72)",
+          "oklch(75% 0.083 72)",
+          "oklch(86% 0.067 72)",
+          "oklch(95% 0.054 72)"
+        ]
+      },
+      "amber-wash": {
+        "role": "neutral",
+        "displayName": "Amber Wash",
+        "canonical": "#f6ecd8",
+        "dark": "#3a2f19",
+        "tonalRamp": [
+          "oklch(15% 0.014 85)",
+          "oklch(27% 0.018 85)",
+          "oklch(39% 0.023 85)",
+          "oklch(51% 0.027 85)",
+          "oklch(63% 0.026 85)",
+          "oklch(75% 0.021 85)",
+          "oklch(86% 0.017 85)",
+          "oklch(95% 0.014 85)"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "display": {
+        "displayName": "Display figure",
+        "purpose": "Appointment time on the booking sheet."
+      },
+      "headline": {
+        "displayName": "Headline",
+        "purpose": "Dashboard screen titles."
+      },
+      "title": {
+        "displayName": "Title",
+        "purpose": "Pass and card headings."
+      },
+      "body": {
+        "displayName": "Body",
+        "purpose": "Running text and inputs."
+      },
+      "label": {
+        "displayName": "Label",
+        "purpose": "Field and group labels in navy."
+      },
+      "figure-time": {
+        "displayName": "Figure time",
+        "purpose": "Coupon time in carbon purple; 1.85rem on the soonest coupon."
+      },
+      "figure-date": {
+        "displayName": "Figure date",
+        "purpose": "Day number on a stub in ticket red."
+      },
+      "stub-label": {
+        "displayName": "Stub label",
+        "purpose": "Weekday, month and horizon unit printed on a stub."
+      },
+      "headline-step": {
+        "displayName": "Headline step",
+        "purpose": "Wizard step titles and the sign-in page title."
+      },
+      "lead": {
+        "displayName": "Lead",
+        "purpose": "The navy opening sentence of the sign-in intro card."
+      },
+      "stub-state": {
+        "displayName": "Stub state",
+        "purpose": "State word on a pass stub; shrinks with the viewport instead of breaking mid-word."
+      }
+    },
+    "shadows": [
+      {
+        "name": "stock-lift",
+        "value": "0 1px 2px rgb(31 47 87 / .06), 0 6px 18px rgb(31 47 87 / .07)",
+        "purpose": "Every coupon, pass and card at rest."
+      },
+      {
+        "name": "stock-lift-dark",
+        "value": "0 1px 2px rgb(0 0 0 / .3), 0 8px 22px rgb(0 0 0 / .25)",
+        "purpose": "Stock lift in dark mode."
+      },
+      {
+        "name": "sheet",
+        "value": "0 -10px 40px rgb(17 20 28 / .18)",
+        "purpose": "Bottom-sheet booking ticket."
+      },
+      {
+        "name": "toast",
+        "value": "0 10px 30px rgb(17 20 28 / .25)",
+        "purpose": "Announcement toast."
+      }
+    ],
+    "motion": [
+      {
+        "name": "ease-ticket",
+        "value": "cubic-bezier(.16, 1, .3, 1)",
+        "purpose": "Coupon deal-in, hover lift and sheet rise."
+      },
+      {
+        "name": "deal",
+        "value": "translateY(8px) + fade, .42s, 40ms stagger",
+        "purpose": "Coupons entering the wallet."
+      },
+      {
+        "name": "sheet",
+        "value": "translateY(40px) + fade from .6, .32s",
+        "purpose": "Booking sheet opening."
+      },
+      {
+        "name": "breathe",
+        "value": "halo 4px to 7px, 2.4s ease-in-out infinite",
+        "purpose": "Live status dot on the dashboard only; trouble and off dots are still."
+      },
+      {
+        "name": "state",
+        "value": ".15s ease-out",
+        "purpose": "Button, chip and tab colour changes."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "narrow",
+        "value": "359px",
+        "purpose": "max-width: single-column fields, 64px coupon stub."
+      },
+      {
+        "name": "column",
+        "value": "560px",
+        "purpose": "Max dashboard content and sheet width."
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The one navy action per screen, docked at the bottom.",
+      "html": "<button class=\"ds-btn-primary\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\"><path d=\"M12 5v14M5 12h14\"/></svg>New search</button>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-btn-primary{display:inline-flex;justify-content:center;align-items:center;gap:8px;min-height:48px;padding:10px 18px;border:1px solid transparent;border-radius:12px;cursor:pointer;font:650 1rem/1.2 system-ui,sans-serif;min-height:52px;background:var(--ink);color:#fff;transition:filter .15s ease-out} .ds-btn-primary:hover{filter:brightness(1.12)} .ds-btn-primary:focus-visible{outline:2px solid var(--ink);outline-offset:2px}"
+    },
+    {
+      "name": "Secondary Button",
+      "kind": "button",
+      "refersTo": "button-secondary",
+      "description": "Stock button with a rule-line border for the non-committing choice.",
+      "html": "<button class=\"ds-btn-secondary\">Cancel</button>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-btn-secondary{display:inline-flex;justify-content:center;align-items:center;gap:8px;min-height:48px;padding:10px 18px;border:1px solid transparent;border-radius:12px;cursor:pointer;font:650 1rem/1.2 system-ui,sans-serif;background:var(--stock);border-color:var(--line);color:var(--ink);transition:border-color .15s ease-out} .ds-btn-secondary:hover{border-color:var(--ink)} .ds-btn-secondary:focus-visible{outline:2px solid var(--ink);outline-offset:2px}"
+    },
+    {
+      "name": "Flat Link",
+      "kind": "button",
+      "refersTo": "button-flat",
+      "description": "Underlined in-card action (Edit, Pause, Change).",
+      "html": "<button class=\"ds-flat\">Edit</button> <button class=\"ds-flat ds-danger\">Delete</button>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-flat{min-height:44px;padding:0 4px;border:0;background:none;color:var(--ink);font:650 1rem system-ui,sans-serif;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:4px;cursor:pointer} .ds-flat:hover{text-decoration-color:currentColor} .ds-flat:focus-visible{outline:2px solid var(--ink);outline-offset:2px} .ds-danger{color:var(--red)}"
+    },
+    {
+      "name": "Chip",
+      "kind": "chip",
+      "refersTo": "chip",
+      "description": "Pill preset; pressed fills navy.",
+      "html": "<div class=\"ds-chips\"><button class=\"ds-chip\" aria-pressed=\"true\">Any time</button><button class=\"ds-chip\" aria-pressed=\"false\">Mornings</button></div>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-chips{display:flex;gap:8px;flex-wrap:wrap} .ds-chip{min-height:44px;padding:8px 16px;border:1px solid var(--line);border-radius:999px;background:var(--stock);color:var(--ink);font:600 1rem system-ui,sans-serif;cursor:pointer;transition:background-color .15s ease-out,color .15s ease-out} .ds-chip:hover{border-color:var(--ink)} .ds-chip[aria-pressed=true]{background:var(--ink);border-color:var(--ink);color:#fff} .ds-chip:focus-visible{outline:2px solid var(--ink);outline-offset:2px}"
+    },
+    {
+      "name": "Text Field",
+      "kind": "input",
+      "refersTo": "input",
+      "description": "Stock field with a navy label above.",
+      "html": "<label class=\"ds-field\">City<input class=\"ds-input\" placeholder=\"Warszawa\"></label>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-field{display:grid;gap:6px;font:600 .9rem system-ui,sans-serif;color:var(--ink)} .ds-input{min-height:48px;padding:8px 12px;border:1px solid var(--line);border-radius:10px;background:var(--stock);color:var(--text);font:400 1rem system-ui,sans-serif} .ds-input::placeholder{color:var(--muted)} .ds-input:focus-visible{border-color:var(--ink);outline:2px solid var(--ink);outline-offset:0}"
+    },
+    {
+      "name": "Two-way Switch",
+      "kind": "nav",
+      "refersTo": "switch-tab-current",
+      "description": "Found / Searches navy-pill switch with red Figures counts and the round account button carrying Telegram initials.",
+      "html": "<nav class=\"ds-nav\"><div class=\"ds-switch\"><button aria-current=\"page\">Found <span class=\"ds-count\">5</span></button><button>Searches <span class=\"ds-count\">2</span></button></div><button class=\"ds-me\" aria-label=\"Account\"><span class=\"ds-initials\">AK</span></button></nav>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-nav{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 0;background:var(--paper)} .ds-switch{display:inline-flex;gap:4px} .ds-switch button{display:inline-flex;align-items:center;gap:6px;min-height:40px;padding:6px 14px;border:0;border-radius:999px;background:none;color:var(--ink);font:650 .92rem system-ui,sans-serif;cursor:pointer;transition:background-color .15s ease-out} .ds-switch [aria-current=page]{background:var(--ink);color:#fff} .ds-switch [aria-current=page] .ds-count{color:inherit;opacity:.75} .ds-count{font:600 .8rem/1 var(--figures);color:var(--red)} .ds-me{display:grid;place-items:center;width:44px;height:44px;border:1px solid var(--line);border-radius:50%;background:var(--stock);color:var(--ink);cursor:pointer} .ds-switch button:focus-visible,.ds-me:focus-visible{outline:2px solid var(--ink);outline-offset:2px} .ds-initials{font-size:.85rem;font-weight:700;letter-spacing:.02em}"
+    },
+    {
+      "name": "Coupon",
+      "kind": "custom",
+      "refersTo": "coupon",
+      "description": "Signature found-time ticket: red date stub, dashed perforation, punched notches, carbon time.",
+      "html": "<button class=\"ds-coupon\"><span class=\"ds-stub\"><small class=\"ds-wd\">Thu</small><b>3</b><small>Dec</small></span><span class=\"ds-body\"><span class=\"ds-t\">08:15</span><span class=\"ds-who\">Anna Nowak · Echo serca</span><small>ul. Postępu 21C</small></span></button>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-coupon{position:relative;display:grid;grid-template-columns:76px minmax(0,1fr);width:100%;min-height:88px;padding:0;border:0;border-radius:14px;background:var(--stock);color:var(--text);text-align:start;cursor:pointer;box-shadow:var(--shadow);transition:transform .2s cubic-bezier(.16,1,.3,1)} .ds-coupon:hover{transform:translateY(-1px)} .ds-coupon:focus-visible{outline:2px solid var(--ink);outline-offset:3px} .ds-stub{position:relative;display:grid;align-content:center;justify-items:center;gap:2px;padding:12px 6px;border-right:2px dashed var(--perf);color:var(--red)} .ds-stub::before,.ds-stub::after{content:'';position:absolute;right:-9px;width:16px;height:16px;border-radius:50%;background:var(--paper)} .ds-stub::before{top:-8px} .ds-stub::after{bottom:-8px} .ds-stub b{font:700 1.75rem/1 var(--figures);letter-spacing:-.02em} .ds-stub small{font:700 .7rem/1.15 system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em} .ds-stub .ds-wd{color:var(--muted)} .ds-body{display:grid;align-content:center;gap:1px;min-width:0;padding:12px 16px} .ds-t{font:700 1.45rem/1.1 var(--figures);color:var(--carbon);font-variant-numeric:tabular-nums} .ds-who{font-weight:600;color:var(--ink)} .ds-body small{color:var(--muted);font-size:.86rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}"
+    },
+    {
+      "name": "Void Coupon",
+      "kind": "custom",
+      "refersTo": "stamp",
+      "description": "A gone time keeps its coupon: flat outline, struck time, rotated red stamp.",
+      "html": "<div class=\"ds-void\"><span class=\"ds-stub\"><b>2</b><small>Dec</small></span><span class=\"ds-body\"><span class=\"ds-t\">14:30</span><small>Jan Mazur</small></span><span class=\"ds-stamp\">Gone</span></div>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-void{position:relative;display:grid;grid-template-columns:76px minmax(0,1fr);min-height:88px;border-radius:14px;outline:1px solid var(--perf);outline-offset:-1px} .ds-void .ds-stub,.ds-void .ds-body{opacity:.6} .ds-stub{display:grid;align-content:center;justify-items:center;padding:12px 6px;border-right:2px dashed var(--perf);color:var(--red)} .ds-stub b{font:700 1.75rem/1 var(--figures)} .ds-stub small{font:700 .7rem system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em} .ds-body{display:grid;align-content:center;padding:12px 16px;color:var(--muted)} .ds-t{font:700 1.45rem/1.1 var(--figures);color:var(--carbon);text-decoration:line-through;text-decoration-thickness:2px} .ds-stamp{position:absolute;right:14px;top:14px;padding:2px 8px;border:2px solid var(--red);border-radius:6px;color:var(--red);font:800 .74rem/1.3 system-ui,sans-serif;letter-spacing:.1em;text-transform:uppercase;transform:rotate(-7deg)}"
+    },
+    {
+      "name": "Boarding Pass",
+      "kind": "card",
+      "refersTo": "pass-stub",
+      "description": "A search as a pass: 92px navy stub with a clamp-sized state word, horizon figure and unit; dashed perforation without notches.",
+      "html": "<article class=\"ds-pass\"><span class=\"ds-pstub\" data-state=\"active\"><small class=\"ds-state\">Active</small><b>14</b><small>Days</small></span><div class=\"ds-pbody\"><h2>Echo serca</h2><p class=\"ds-meta\">Warszawa · Interval: 10 min</p><p class=\"ds-meta\">Last successful check: <b>Nov 28, 12:00</b></p><div class=\"ds-links\"><button class=\"ds-flat\">Edit</button><button class=\"ds-flat\">Pause</button></div></div></article>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-pass{display:grid;grid-template-columns:92px minmax(0,1fr);border-radius:14px;background:var(--stock);box-shadow:var(--shadow);overflow-wrap:anywhere} .ds-pstub{display:grid;align-content:start;justify-items:center;gap:2px;padding:16px 6px 12px;border-right:2px dashed var(--perf);color:var(--ink)} .ds-pstub b{font:700 1.75rem/1 var(--figures);letter-spacing:-.02em} .ds-pstub small{font:700 .7rem/1.15 system-ui,sans-serif;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)} .ds-pstub .ds-state{margin-bottom:6px;font-size:clamp(.58rem,2.7vw,.7rem);letter-spacing:0;word-break:keep-all} .ds-pstub[data-state=active] .ds-state{color:var(--ok)} .ds-pstub[data-state=problem] .ds-state{color:var(--red)} .ds-pbody{display:grid;align-content:start;gap:3px;padding:14px 16px 6px} .ds-pbody h2{margin:0;font-size:1.08rem;font-weight:650;color:var(--ink)} .ds-meta{margin:0;color:var(--muted);font-size:.9rem} .ds-meta b{color:var(--ink);font-weight:650} .ds-links{display:flex;gap:0 18px} .ds-flat{min-height:44px;padding:0;border:0;background:none;color:var(--ink);font:650 1rem system-ui,sans-serif;text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:4px;cursor:pointer} .ds-flat:hover{text-decoration-color:currentColor} .ds-flat:focus-visible{outline:2px solid var(--ink);outline-offset:2px}"
+    },
+    {
+      "name": "State Badge",
+      "kind": "chip",
+      "refersTo": "badge-active",
+      "description": "Pill status with a dot; green active, red problem, amber degraded.",
+      "html": "<span class=\"ds-badge\" data-state=\"active\">Watching</span> <span class=\"ds-badge\" data-state=\"problem\">Sign in</span>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-badge{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border-radius:999px;background:var(--tint);color:var(--muted);font:650 .8rem system-ui,sans-serif} .ds-badge::before{content:'';width:7px;height:7px;border-radius:50%;background:currentColor} .ds-badge[data-state=active]{background:var(--ok-wash);color:var(--ok)} .ds-badge[data-state=problem]{background:var(--red-wash);color:var(--red)}"
+    },
+    {
+      "name": "Toolbar Pills",
+      "kind": "button",
+      "refersTo": "toolbar-pill",
+      "description": "Sign-in controls under the remote screen; pressed fills navy, scroll arrows group at the trailing edge.",
+      "html": "<div class=\"ds-toolbar\"><button class=\"ds-pill\" aria-expanded=\"true\">Keyboard</button><button class=\"ds-pill\">Paste</button><button class=\"ds-pill\" aria-pressed=\"false\">Zoom in</button><span class=\"ds-scroll\"><button class=\"ds-pill ds-icon\" aria-label=\"Scroll up\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 19V5M6 11l6-6 6 6\"/></svg></button><button class=\"ds-pill ds-icon\" aria-label=\"Scroll down\"><svg width=\"20\" height=\"20\" viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"1.75\" stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"M12 5v14M6 13l6 6 6-6\"/></svg></button></span></div><p class=\"ds-status\">Connected to LUX MED</p>",
+      "css": ":host{--paper:#f3f1ec;--stock:#fff;--ink:#1f2f57;--text:#27304a;--muted:#5f6884;--perf:#d7dbe5;--line:#c9cfdc;--tint:#e8ebf3;--red:#b8392f;--red-wash:#f8e9e6;--carbon:#5a4a8a;--ok:#2f7a59;--ok-wash:#e3f1ea;--shadow:0 1px 2px rgb(31 47 87 / .06),0 6px 18px rgb(31 47 87 / .07);--figures:'Figures',ui-monospace,'SF Mono',Menlo,monospace;font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif} .ds-toolbar{display:flex;flex-wrap:wrap;gap:8px} .ds-scroll{display:flex;gap:8px;margin-left:auto} .ds-pill{display:inline-flex;align-items:center;justify-content:center;gap:6px;min-height:44px;padding:8px 16px;border:1px solid var(--line);border-radius:999px;background:var(--stock);color:var(--ink);font:650 1rem system-ui,sans-serif;cursor:pointer} .ds-icon{min-width:44px;padding-inline:10px} .ds-pill:hover{border-color:var(--ink)} .ds-pill[aria-pressed=true],.ds-pill[aria-expanded=true]{background:var(--ink);border-color:var(--ink);color:#fff} .ds-pill:focus-visible{outline:2px solid var(--ink);outline-offset:2px} .ds-status{display:flex;align-items:flex-start;gap:8px;margin:12px 0 0;color:var(--muted);font-size:.9rem} .ds-status::before{content:'';width:8px;height:8px;flex:none;margin-top:.45em;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px var(--ok-wash)}"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Ticket Wallet",
+    "overview": "**Creative North Star: \"The Ticket Wallet\"**\n\nEvery found appointment is a ticket coupon kept in a wallet. A coupon has a perforated date stub on the left, punched notches where the stub tears off, and a body carrying the time, the doctor, the service and the street. A time that has been taken or has passed keeps its coupon, voided and stamped, so the history never silently disappears. Searches are boarding passes built from the same stub-and-body anatomy, with the stub reporting whether the search is still watching. The same paper, stock and ink carry the LUX MED sign-in page and the standalone remote viewer, so leaving the wallet to sign in never changes worlds: the remote browser sits in a sheet of stock like any other content.\n\nThe mood is soft, calm and quiet, as the medical subject asks: warm paper ground, white coupon stock, one navy ink for text and every action. Colour carries meaning, never decoration: carbon purple marks times, ticket red marks dates, counts and stamps, green and amber report search health. Density is phone-first and single column, one coupon per row at full width, with the next action docked at the bottom of the screen. The world refuses the dashboard card stack, the generic white-and-blue booking app, and any black-and-yellow signage palette.",
+    "keyCharacteristics": [
+      "Coupons with a 76px date stub, a 2px dashed perforation and two punched notches cut in the paper colour.",
+      "Navy ink is the only action colour; the current tab, the selected chip and the primary button all fill with it.",
+      "Every figure (date, time, count) is set in Azeret Mono (\"Figures\"); all words are system sans.",
+      "Soft two-layer shadows lift stock off paper; there are no borders on coupons and cards.",
+      "One status line pattern everywhere: an 8px dot aligned to the first text line, then muted words.",
+      "Three surfaces, one token set: the dashboard, the sign-in page and the remote viewer repeat the same custom properties; light and dark switch by `prefers-color-scheme`."
+    ],
+    "rules": [
+      {
+        "name": "The One Ink Rule",
+        "body": "Navy ink is the only action colour. Anything tappable that commits or selects fills navy; nothing else does.",
+        "section": "colors"
+      },
+      {
+        "name": "The Red Stub Rule",
+        "body": "Ticket red is reserved for dates on stubs, counts, stamps and failures. It never fills a button or a large surface; its wash only backs an error or problem message.",
+        "section": "colors"
+      },
+      {
+        "name": "The Carbon Time Rule",
+        "body": "An appointment time is always carbon purple in Figures. No other text uses carbon purple.",
+        "section": "colors"
+      },
+      {
+        "name": "The Figures-Only Rule",
+        "body": "Azeret Mono sets digits only: stub days, pass horizons, times and counts. Words, headings, labels and the booking sheet's date line stay in system sans. The colon inside a time is pulled in (-0.22em each side) so \"08:15\" closes up.",
+        "section": "typography"
+      },
+      {
+        "name": "The Native Weight Rule",
+        "body": "Weights step 400 / 600 / 650 / 700 / 800; 800 is used only by the stamp.",
+        "section": "typography"
+      },
+      {
+        "name": "The Void Goes Flat Rule",
+        "body": "A voided coupon loses its shadow and fill: it becomes a 1px perforation outline at 60% opacity with a struck-through time and a stamp. Spent tickets do not float.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "**Do** keep warm paper (#f3f1ec) as the ground and white stock (#ffffff) for every surface that holds content.",
+      "**Do** fill every committing or selected control with navy ink and nothing else.",
+      "**Do** set every date, time and count in Figures; times in carbon purple, stub dates and counts in ticket red.",
+      "**Do** build new list items on the stub-and-body ticket anatomy with a 2px dashed perforation and paper-coloured notches.",
+      "**Do** lead every connection or health summary with the 8px status dot aligned to the first text line.",
+      "**Do** repeat the full token set, light and dark, on any page served outside the dashboard stylesheet (sign-in, viewer).",
+      "**Do** keep voided coupons visible: outline only, 60% opacity, struck-through time, rotated red stamp.",
+      "**Do** honour `prefers-reduced-motion`: all transitions and the deal, sheet and breathe animations sit inside the no-preference query. The sign-in page and viewer carry no animation.",
+      "**Do** keep tap targets at 44px or more and test at 360px with long Polish and Cyrillic strings in both themes."
+    ],
+    "donts": [
+      "**Don't** use black-and-yellow or any signage/warning palette; the tone stays soft and calm.",
+      "**Don't** use ticket red as a button fill or large surface, or carbon purple for anything but times.",
+      "**Don't** add a second action colour, gradients or glows.",
+      "**Don't** put borders on coupons or cards; depth comes from the stock-lift shadow.",
+      "**Don't** set words or headings in Figures, or put uppercase tracked labels above headings; uppercase belongs only to stub fields, the booking sheet's date line and the stamp.",
+      "**Don't** imitate the LUX MED portal's branding; the sign-in screen is a framed remote view inside this world."
+    ]
+  }
+}
