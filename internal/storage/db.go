@@ -814,11 +814,38 @@ func (db *DB) PurgeHistory(ctx context.Context, before time.Time) error {
 }
 
 func (db *DB) UpsertCities(ctx context.Context, cities []domain.City) error {
+	return db.storeCities(ctx, cities, false)
+}
+
+// ReplaceCityCatalog hides withdrawn cities from pickers but keeps their IDs for saved searches.
+func (db *DB) ReplaceCityCatalog(ctx context.Context, cities []domain.City) error {
+	if len(cities) == 0 {
+		return errors.New("empty city catalog")
+	}
+	for _, city := range cities {
+		if city.ID <= 0 || strings.TrimSpace(city.Name) == "" {
+			return errors.New("invalid city catalog")
+		}
+	}
+	return db.storeCities(ctx, cities, true)
+}
+
+func (db *DB) storeCities(ctx context.Context, cities []domain.City, replace bool) error {
 	tx, err := db.sql.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if replace {
+		if db.postgres {
+			if _, err = tx.ExecContext(ctx, "LOCK TABLE luxmed_cities IN SHARE ROW EXCLUSIVE MODE"); err != nil {
+				return err
+			}
+		}
+		if _, err = tx.ExecContext(ctx, "UPDATE luxmed_cities SET listed=FALSE WHERE listed"); err != nil {
+			return err
+		}
+	}
 	now := time.Now().UTC()
 	for _, city := range cities {
 		if city.ID == 0 || city.Name == "" {
@@ -826,7 +853,7 @@ func (db *DB) UpsertCities(ctx context.Context, cities []domain.City) error {
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO luxmed_cities (id, name, updated_at) VALUES ($1, $2, $3)
-			ON CONFLICT(id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at
+			ON CONFLICT(id) DO UPDATE SET name=excluded.name, updated_at=excluded.updated_at, listed=TRUE
 		`, city.ID, city.Name, now); err != nil {
 			return err
 		}
@@ -839,7 +866,7 @@ func (db *DB) Cities(ctx context.Context, limit int) ([]domain.City, error) {
 }
 
 func (db *DB) CitiesPage(ctx context.Context, limit int, offset int) ([]domain.City, error) {
-	query := `SELECT id, name FROM luxmed_cities ORDER BY name`
+	query := `SELECT id, name FROM luxmed_cities WHERE listed ORDER BY name`
 	args := []any{}
 	if limit > 0 {
 		query += ` LIMIT $1 OFFSET $2`
@@ -863,7 +890,7 @@ func (db *DB) CitiesPage(ctx context.Context, limit int, offset int) ([]domain.C
 
 func (db *DB) SearchCities(ctx context.Context, query string, limit int) ([]domain.City, error) {
 	query = normalizeCitySearch(query)
-	rows, err := db.sql.QueryContext(ctx, `SELECT id, name FROM luxmed_cities ORDER BY name`)
+	rows, err := db.sql.QueryContext(ctx, `SELECT id, name FROM luxmed_cities WHERE listed ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}

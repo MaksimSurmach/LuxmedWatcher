@@ -128,6 +128,21 @@ func testCitySearchAndPagination(t *testing.T, ctx context.Context, db *DB) {
 		t.Fatalf("expected accent-insensitive match for Wrocław, got %#v", results)
 	}
 
+	if err := db.ReplaceCityCatalog(ctx, []domain.City{{ID: 3, Name: "Warszawa"}, {ID: 5, Name: "Opole"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.ReplaceCityCatalog(ctx, nil); err == nil {
+		t.Fatal("empty refresh accepted")
+	}
+	listed, err := db.Cities(ctx, 0)
+	if err != nil || len(listed) != 2 || listed[0].ID != 5 || listed[1].ID != 3 {
+		t.Fatalf("refreshed catalog = %v, %v", listed, err)
+	}
+	archived, err := db.City(ctx, 4)
+	if err != nil || archived.Name != "Wrocław" {
+		t.Fatalf("historical city = %v, %v", archived, err)
+	}
+
 	city := results[0]
 	procedure := domain.Procedure{ID: 1, Name: "Kardiolog", IsRecent: true}
 	if err := db.UpsertProcedures(ctx, city, []domain.Procedure{procedure}); err != nil {

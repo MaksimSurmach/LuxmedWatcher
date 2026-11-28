@@ -333,7 +333,7 @@ On the sign-in page every control that is not the main action is a pill: stock f
 - **Error:** red 600 text below; a selection panel turns red-wash with red text.
 
 ### Navigation
-A two-way pill switch (Found, Searches) with a red Figures count beside each label; the current tab is a navy pill and its count fades to 75% of the label colour. A 44px round account button on the right shows the Telegram user's initials (700, 0.85rem) or, without a name, a line-icon person; it fills navy when Settings is open. The bar is sticky on paper. Icons are 20px inline SVG strokes at 1.75 width.
+A two-way pill switch (Found, Searches) with a red Figures count beside each label; the current tab is a navy pill and its count fades to 75% of the label colour. A labeled Settings button on the right fills navy when Settings is open. The bar is sticky on paper. Icons are 20px inline SVG strokes at 1.75 width.
 
 ### Coupon (signature)
 The found-time ticket. A 76px stub (weekday muted, day number in red Figures, month in red) behind a dashed perforation with punched notches; the body holds the carbon time, the navy doctor and service, and the muted street truncated to one line. The soonest coupon's time grows to 1.85rem. Coupons deal in with an 8px rise and fade (0.42s, cubic-bezier(.16, 1, .3, 1), staggered 40ms), and lift 1px on hover. A gone or past coupon is voided and carries a red stamp.

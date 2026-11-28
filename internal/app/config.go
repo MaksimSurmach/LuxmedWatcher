@@ -51,7 +51,7 @@ func LoadConfig() (Config, error) {
 		DefaultLocale:        envString("DEFAULT_LOCALE", "ru"),
 		AdminTelegramIDs:     parseIDSet(os.Getenv("ADMIN_TELEGRAM_IDS")),
 		MinimumInterval:      envDuration("MIN_CHECK_INTERVAL", 2*time.Minute),
-		DefaultInterval:      envDuration("DEFAULT_CHECK_INTERVAL", 5*time.Minute),
+		DefaultInterval:      envDuration("DEFAULT_CHECK_INTERVAL", 10*time.Minute),
 		NotificationCooldown: envDuration("NOTIFICATION_COOLDOWN", 6*time.Hour),
 		PollTimeout:          envInt("TELEGRAM_POLL_TIMEOUT", 30),
 		LogLevel:             parseLogLevel(envString("LOG_LEVEL", "INFO")),

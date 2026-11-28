@@ -116,6 +116,9 @@ func (db *DB) Migrate(ctx context.Context) error {
 		`); err != nil {
 			return err
 		}
+		if _, err := tx.ExecContext(ctx, "ALTER TABLE luxmed_cities ADD COLUMN IF NOT EXISTS listed BOOLEAN NOT NULL DEFAULT TRUE"); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, "ALTER TABLE luxmed_access ADD COLUMN IF NOT EXISTS confirmed_unix BIGINT"); err != nil {
 			return err
 		}
@@ -125,6 +128,7 @@ func (db *DB) Migrate(ctx context.Context) error {
 	}
 	if !db.postgres {
 		for _, column := range []struct{ table, name, definition string }{
+			{"luxmed_cities", "listed", "BOOLEAN NOT NULL DEFAULT TRUE"},
 			{"luxmed_access", "confirmed_unix", "BIGINT"},
 			{"users", "preferred_city_id", "INTEGER"},
 			{"users", "preferred_city_name", "TEXT NOT NULL DEFAULT ''"},
